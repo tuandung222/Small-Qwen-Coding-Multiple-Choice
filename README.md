@@ -1,6 +1,6 @@
 # Qwen-Coder-MCQ: Fine-tuning Qwen2.5 for Multiple-Choice Coding Questions
 
-This project provides a framework for fine-tuning Qwen2.5 Coder models on multiple-choice coding questions with structured reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
+This project provides a framework for fine-tuning Qwen2.5-Coder-1.5B-Instruct models on multiple-choice coding questions with structured reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
 
 ## Features
 
@@ -195,7 +195,7 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
 |-----------|-------------|---------|
 | `--experiment-name` | Name for this experiment | auto-generated timestamp |
 | `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
-| `--destination-repo` | HF Hub repo for the model | tuandunghcmut/Qwen25_Coder_MultipleChoice_v2 |
+| `--destination-repo` | HF Hub repo for the model | tuandunghcmut/Qwen25_Coder_MultipleChoice_v3 |
 | `--batch-size` | Per device batch size | 24 |
 | `--grad-accum` | Gradient accumulation steps | 4 |
 | `--learning-rate` | Learning rate | 2e-4 |
@@ -465,144 +465,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - This project uses [Unsloth](https://github.com/unslothai/unsloth) for optimized training
 - The base model is [Qwen2.5-Coder-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct) by Alibaba Cloud
-
-## Distributed Training
-
-The project supports multiple distributed training backends through a modular and extensible architecture. The distributed training implementation is located in `src/training/distributed_trainer.py` and provides support for:
-
-- PyTorch DDP (Distributed Data Parallel)
-- FSDP (Fully Sharded Data Parallel)
-- DeepSpeed
-- HuggingFace Accelerate
-
-### Configuration
-
-Distributed training can be configured through the `DistributedTrainingConfig` class or command-line arguments:
-
-```python
-# Example configuration
-config = DistributedTrainingConfig(
-    distributed_backend=DistributedBackend.DEEPSPEED,
-    mixed_precision="bf16",
-    gradient_checkpointing=True,
-    world_size=4,  # Number of GPUs
-    deepspeed_stage=2,  # DeepSpeed ZeRO stage
-)
-```
-
-### Available Backends
-
-1. **PyTorch DDP**
-   - Simple and efficient for multi-GPU training
-   - Supports mixed precision and gradient checkpointing
-   - Use with `--distributed-mode ddp` or `--use-ddp`
-
-2. **FSDP (Fully Sharded Data Parallel)**
-   - Memory-efficient training with parameter sharding
-   - Configurable auto-wrap policies
-   - CPU offloading support
-   - Use with `--use-fsdp`
-
-3. **DeepSpeed**
-   - Advanced ZeRO optimization stages
-   - Automatic mixed precision
-   - Optimizer and parameter offloading
-   - Use with `--distributed-mode deepspeed`
-
-4. **Accelerate**
-   - Easy integration with HuggingFace ecosystem
-   - Automatic mixed precision
-   - Flexible batch handling
-   - Use with `--distributed-mode accelerate`
-
-### Usage Examples
-
-1. **DDP Training**:
-```bash
-python run.py \
-    --distributed-mode ddp \
-    --world-size 4 \
-    --mixed-precision bf16 \
-    --gradient-checkpointing
-```
-
-2. **FSDP Training**:
-```bash
-python run.py \
-    --use-fsdp \
-    --fsdp-auto-wrap-policy transformer \
-    --fsdp-min-num-params 1e6 \
-    --mixed-precision bf16
-```
-
-3. **DeepSpeed Training**:
-```bash
-python run.py \
-    --distributed-mode deepspeed \
-    --deepspeed-stage 2 \
-    --deepspeed-offload-optimizer \
-    --mixed-precision bf16
-```
-
-4. **Accelerate Training**:
-```bash
-python run.py \
-    --distributed-mode accelerate \
-    --accelerate-mixed-precision bf16 \
-    --accelerate-gradient-accumulation-steps 4
-```
-
-### Advanced Configuration
-
-Each backend supports additional configuration options:
-
-#### DDP
-- `--backend`: Communication backend (nccl/gloo)
-- `--master-addr`: Master node address
-- `--master-port`: Master node port
-
-#### FSDP
-- `--fsdp-state-dict-type`: State dict type for saving
-- `--fsdp-offload-params`: Enable parameter offloading
-- `--fsdp-auto-wrap-policy`: Wrapping policy (transformer/size)
-
-#### DeepSpeed
-- `--deepspeed-stage`: ZeRO stage (0-3)
-- `--deepspeed-offload-optimizer`: Enable optimizer offloading
-- `--deepspeed-offload-param`: Enable parameter offloading
-- `--deepspeed-zero-reduce-bucket-size`: Reduce bucket size
-- `--deepspeed-zero-reduce-scatter`: Enable reduce-scatter
-- `--deepspeed-zero-contiguous-gradients`: Enable contiguous gradients
-
-#### Accelerate
-- `--accelerate-dispatch-batches`: Enable batch dispatching
-- `--accelerate-split-batches`: Enable batch splitting
-- `--accelerate-even-batches`: Enable even batch distribution
-- `--accelerate-project-dir`: Project directory for config
-- `--accelerate-project-config`: Project configuration
-
-### Implementation Details
-
-The distributed training implementation follows a modular design:
-
-1. **Base Classes**:
-   - `BaseDistributedTrainer`: Abstract base class with common functionality
-   - `DistributedTrainingConfig`: Configuration dataclass
-   - `DistributedBackend`: Enum for available backends
-
-2. **Specialized Trainers**:
-   - `DDPTrainer`: PyTorch DDP implementation
-   - `FSDPTrainer`: FSDP implementation
-   - `DeepSpeedTrainer`: DeepSpeed integration
-   - `AccelerateTrainer`: Accelerate integration
-
-3. **Factory Function**:
-   - `create_distributed_trainer`: Creates appropriate trainer based on config
-
-The implementation supports:
-- Mixed precision training (bf16/fp16)
-- Gradient checkpointing
-- CPU offloading
-- Automatic device placement
-- Distributed data loading
-- Optimizer and scheduler integration

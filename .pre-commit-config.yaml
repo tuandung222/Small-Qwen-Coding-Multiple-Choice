@@ -40,3 +40,9 @@ repos:
                 .*full\.py$|
                 .*experiment_output/.*
             )
+
+            (?x)^(
+                .*unsloth_compiled_cache/.*|
+                .*full\.py$|
+                .*experiment_output/.*
+            )

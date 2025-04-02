@@ -78,6 +78,8 @@ class QwenTrainer:
         lora_config: Optional[LoraConfig] = None,
         destination_hub_config: Optional[HubConfig] = None,
         debug_samples: int = 3,  # Number of samples to log for debugging
+        responses_only_config: Optional[Dict[str, Any]] = None,
+        attention_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the QwenTrainer with model, tokenizer, and configuration.
@@ -90,6 +92,8 @@ class QwenTrainer:
             destination_hub_config: Optional configuration for pushing to HuggingFace Hub
             debug_samples: Number of random samples to log during training for debugging.
                          Set to 0 to disable debug logging. Default: 3
+            responses_only_config: Optional configuration for response-only training
+            attention_config: Optional configuration for attention implementation
 
         The trainer will:
         1. Set up authentication if needed
@@ -105,6 +109,9 @@ class QwenTrainer:
         self.prompt_creator = prompt_creator
         self.lora_config = lora_config
         self.destination_hub_config = destination_hub_config
+        self.debug_samples = debug_samples
+        self.responses_only_config = responses_only_config
+        self.attention_config = attention_config
 
         # Initialize training state
         self.peft_model = None
@@ -122,7 +129,6 @@ class QwenTrainer:
         else:
             self.max_seq_length = 2048  # Default fallback
 
-        self.debug_samples = debug_samples
         self.debug_examples = []  # Store debug examples
 
     def validate(
@@ -563,6 +569,7 @@ class QwenTrainer:
         optimizer_config: Optional[Dict[str, Any]] = None,
         lr_scheduler_config: Optional[Dict[str, Any]] = None,
         responses_only_config: Optional[Dict[str, Any]] = None,
+        attention_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Train the model with comprehensive configuration and monitoring.
@@ -630,10 +637,18 @@ class QwenTrainer:
             optimizer_config: Optional configuration for optimizer selection and parameters
             lr_scheduler_config: Optional configuration for learning rate scheduler selection and parameters
             responses_only_config: Optional configuration for training only on responses with Unsloth
+            attention_config: Optional configuration for attention implementation
 
         Returns:
             Dict containing training metrics and results
         """
+        # Use stored configs if not explicitly provided
+        if responses_only_config is None:
+            responses_only_config = self.responses_only_config
+
+        if attention_config is None:
+            attention_config = self.attention_config
+
         # Initialize wandb if needed
         try:
             import wandb

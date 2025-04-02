@@ -60,7 +60,7 @@ class QwenModelHandler:
         device_map: str = "auto",
         source_hub_config: Optional[HubConfig] = None,
         destination_hub_config: Optional[HubConfig] = None,
-        attn_implementation: str = "eager",
+        attn_implementation: str = "default",
         force_attn_implementation: bool = False,
     ):
         """
@@ -74,7 +74,7 @@ class QwenModelHandler:
             device_map: Device mapping strategy for the model
             source_hub_config: Configuration for the source model on Hugging Face Hub
             destination_hub_config: Configuration for the destination model on Hugging Face Hub
-            attn_implementation: Attention implementation to use (eager, flash_attention_2, sdpa, xformers)
+            attn_implementation: Attention implementation to use (default, flash_attention_2, sdpa, eager, xformers)
             force_attn_implementation: Whether to force the attention implementation even if not optimal
         """
         self.model_name = model_name
@@ -199,12 +199,7 @@ class QwenModelHandler:
         """Load the model and tokenizer based on the specified source"""
         try:
             if self.model_source == ModelSource.UNSLOTH:
-                try:
-                    self._load_from_unsloth()
-                except Exception as e:
-                    logger.error(f"Failed to load model with Unsloth: {str(e)}")
-                    logger.warning("Falling back to standard HuggingFace loading")
-                    self._load_from_huggingface()
+                self._load_from_unsloth()
             else:
                 self._load_from_huggingface()
 
@@ -271,7 +266,7 @@ class QwenModelHandler:
             self.model_name,
             token=self.source_hub_config.token if self.source_hub_config else None,
             trust_remote_code=True,
-            padding_side="left" if attn_implementation == "flash_attention_2" else "right",
+            padding_side="right",
             model_max_length=self.max_seq_length,
         )
 
@@ -296,27 +291,30 @@ class QwenModelHandler:
             # Setup model args
             model_args = {
                 "max_seq_length": self.max_seq_length,
-                "dtype": None,
-                "load_in_4bit": self.quantization == "4bit",
-                "load_in_8bit": self.quantization == "8bit",
-                "attn_implementation": attn_implementation,
-                "max_memory": max_memory,
-                "token": self.source_hub_config.token if self.source_hub_config else None,
-                "trust_remote_code": True,
+                "device_map": self.device_map,
             }
 
-            # Load model and tokenizer using Unsloth
+            # Add quantization config
+            if self.quantization == "4bit":
+                model_args["load_in_4bit"] = True
+            elif self.quantization == "8bit":
+                model_args["load_in_8bit"] = True
+
+            # Add attention implementation if not default
+            if attn_implementation != "default":
+                model_args["attn_implementation"] = attn_implementation
+                logger.info(f"Using attention implementation: {attn_implementation}")
+
+            # Load model and tokenizer
             self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-                model_name=self.model_name, **model_args
+                model_name=self.model_name,
+                token=self.source_hub_config.token if self.source_hub_config else None,
+                max_memory=max_memory,
+                **model_args,
             )
 
-            # Set padding side based on attention implementation
-            if attn_implementation == "flash_attention_2":
-                self.tokenizer.padding_side = "left"
-                logger.info("Set tokenizer padding_side to 'left' for Flash Attention 2")
-
-        except Exception as e:
-            logger.error(f"Error loading model with Unsloth: {str(e)}")
+        except ImportError:
+            logger.error("Unsloth import failed. Please install unsloth with: pip install unsloth")
             raise
 
     def generate_response(

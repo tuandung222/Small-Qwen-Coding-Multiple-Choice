@@ -76,7 +76,7 @@ def setup_hub_configs(
     # Set default destination repo if not provided
     if not destination_repo_id:
         # Use the default repository name
-        destination_repo_id = "tuandunghcmut/Qwen25_Coder_MultipleChoice_v2"
+        destination_repo_id = "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3"
         logger.info(f"Using default destination repository: {destination_repo_id}")
 
     # Check if the repository exists
@@ -142,83 +142,11 @@ def parse_args():
         choices=["4bit", "8bit", "none"],
         help="Quantization level for the model",
     )
-    parser.add_argument(
-        "--model-loader",
-        type=str,
-        default="transformers",
-        choices=["transformers", "unsloth"],
-        help="Library to use for loading the model (transformers or unsloth)",
-    )
-    parser.add_argument(
-        "--attn-implementation",
-        type=str,
-        default="flash_attention_2",
-        choices=["eager", "flash_attention_2", "sdpa", "xformers"],
-        help="Attention implementation to use (default: flash_attention_2 for best performance with Unsloth)",
-    )
-    parser.add_argument(
-        "--force-attn-implementation",
-        action="store_true",
-        help="Force the specified attention implementation even if not optimal",
-    )
-
-    # Distributed training configuration
-    parser.add_argument(
-        "--distributed-mode",
-        type=str,
-        default="none",
-        choices=["none", "ddp", "fsdp"],
-        help="Distributed training mode (none, ddp, or fsdp)",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="nccl",
-        choices=["nccl", "gloo"],
-        help="Distributed backend (nccl for GPU, gloo for CPU)",
-    )
-    parser.add_argument(
-        "--mixed-precision",
-        type=str,
-        default="bf16",
-        choices=["bf16", "fp16", "no"],
-        help="Mixed precision training mode",
-    )
-    parser.add_argument(
-        "--gradient-checkpointing",
-        action="store_true",
-        help="Enable gradient checkpointing",
-    )
-    parser.add_argument(
-        "--fsdp-min-num-params",
-        type=int,
-        default=1e6,
-        help="Minimum number of parameters to use FSDP",
-    )
-    parser.add_argument(
-        "--fsdp-state-dict-type",
-        type=str,
-        default="FULL_STATE_DICT",
-        choices=["FULL_STATE_DICT", "SHARDED_STATE_DICT", "LOCAL_STATE_DICT"],
-        help="FSDP state dict type",
-    )
-    parser.add_argument(
-        "--fsdp-offload-params",
-        action="store_true",
-        help="Enable CPU offloading for FSDP",
-    )
-    parser.add_argument(
-        "--fsdp-auto-wrap-policy",
-        type=str,
-        default=None,
-        choices=["transformer", "size", None],
-        help="FSDP auto wrap policy",
-    )
 
     # Training configuration
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument(
-        "--batch-size", type=int, default=16, help="Per device batch size for training"
+        "--batch-size", type=int, default=24, help="Per device batch size for training"
     )
     parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
@@ -271,35 +199,6 @@ def parse_args():
         "--test-training-mode",
         action="store_true",
         help="Use only enough examples to fill one batch (batch_size) for minimal training testing",
-    )
-    parser.add_argument(
-        "--train-on-responses-only",
-        action="store_true",
-        help="Enable response-only training",
-    )
-    parser.add_argument(
-        "--instruction-token",
-        type=str,
-        default="<|im_start|>user\n",
-        help="Token/prefix indicating start of instruction",
-    )
-    parser.add_argument(
-        "--response-token",
-        type=str,
-        default="<|im_start|>assistant\n",
-        help="Token/prefix indicating start of response",
-    )
-    parser.add_argument(
-        "--instruction-token-id",
-        type=int,
-        default=None,
-        help="Token ID for instruction start (optional)",
-    )
-    parser.add_argument(
-        "--response-token-id",
-        type=int,
-        default=None,
-        help="Token ID for response start (optional)",
     )
     parser.add_argument(
         "--experiment-name",
@@ -416,83 +315,295 @@ def parse_args():
         help="Quantization bits for 8-bit optimizers",
     )
 
+    # Learning Rate Scheduler
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="cosine",
+        choices=[
+            "cosine",
+            "linear",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+            "inverse_sqrt",
+        ],
+        help="Learning rate scheduler type",
+    )
+    parser.add_argument(
+        "--lr-scheduler-num-cycles",
+        type=int,
+        default=1,
+        help="Number of cycles for cosine_with_restarts",
+    )
+    parser.add_argument(
+        "--lr-scheduler-power",
+        type=float,
+        default=1.0,
+        help="Power factor for polynomial scheduler",
+    )
+    parser.add_argument(
+        "--lr-scheduler-last-epoch",
+        type=int,
+        default=-1,
+        help="Index of last epoch when resuming training",
+    )
+
+    # PEFT configuration
+    parser.add_argument(
+        "--peft-type",
+        type=str,
+        default="lora",
+        choices=["lora", "adalora", "prefix", "prompt", "ia3", "lokr", "oft"],
+        help="PEFT method to use",
+    )
+
+    # AdaLoRA specific parameters
+    parser.add_argument(
+        "--adalora-target-r",
+        type=int,
+        default=8,
+        help="Target rank for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-init-r",
+        type=int,
+        default=12,
+        help="Initial rank for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-tinit",
+        type=int,
+        default=200,
+        help="Initial step before sparsification begins",
+    )
+    parser.add_argument(
+        "--adalora-tfinal",
+        type=int,
+        default=1000,
+        help="Final step when sparsification ends",
+    )
+    parser.add_argument(
+        "--adalora-delta-t",
+        type=int,
+        default=10,
+        help="Steps between rank updates",
+    )
+    parser.add_argument(
+        "--adalora-beta1",
+        type=float,
+        default=0.85,
+        help="EMA hyperparameter",
+    )
+    parser.add_argument(
+        "--adalora-beta2",
+        type=float,
+        default=0.85,
+        help="EMA hyperparameter",
+    )
+
+    # Module targeting options
+    parser.add_argument(
+        "--target-modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated list of target modules",
+    )
+    parser.add_argument(
+        "--fan-in-fan-out",
+        type=bool,
+        default=False,
+        help="Set fan_in_fan_out for Conv1D",
+    )
+    parser.add_argument(
+        "--use-gradient-checkpointing",
+        type=bool,
+        default=False,
+        help="Use gradient checkpointing",
+    )
+    parser.add_argument(
+        "--modules-to-save",
+        type=str,
+        default=None,
+        help="Modules to save in full precision",
+    )
+
+    # Response-only training options
+    parser.add_argument(
+        "--train-on-responses-only",
+        action="store_true",
+        help="Enable response-only training",
+    )
+    parser.add_argument(
+        "--instruction-token",
+        type=str,
+        default="<|im_start|>user\n",
+        help="Token/prefix indicating start of instruction",
+    )
+    parser.add_argument(
+        "--response-token",
+        type=str,
+        default="<|im_start|>assistant\n",
+        help="Token/prefix indicating start of response",
+    )
+    parser.add_argument(
+        "--instruction-token-id",
+        type=int,
+        default=None,
+        help="Token ID for instruction start (optional)",
+    )
+    parser.add_argument(
+        "--response-token-id",
+        type=int,
+        default=None,
+        help="Token ID for response start (optional)",
+    )
+
+    # Attention implementation
+    parser.add_argument(
+        "--attention-implementation",
+        type=str,
+        default="flash_attention_2",
+        choices=["default", "flash_attention_2", "sdpa", "eager", "xformers"],
+        help="Type of attention implementation to use",
+    )
+    parser.add_argument(
+        "--use-flash-attention",
+        action="store_true",
+        help="Use Flash Attention 2 if available (shortcut for setting attention-implementation=flash_attention_2)",
+    )
+    parser.add_argument(
+        "--force-attn-implementation",
+        action="store_true",
+        help="Force the attention implementation even if not optimal for the hardware",
+    )
+
     return parser.parse_args()
 
 
 def setup_model_and_trainer(source_hub, destination_hub, args):
-    """Setup model and trainer with the specified configurations"""
+    """Initialize model handler and trainer"""
     try:
         # Initialize model handler
+        logger.info("Initializing model handler...")
         model_handler = QwenModelHandler(
-            model_name=args.source_model,
+            model_name=source_hub.model_id,
             max_seq_length=args.max_seq_length,
             quantization=args.quantization,
-            model_source=ModelSource.UNSLOTH
-            if args.model_loader == "unsloth"
-            else ModelSource.HUGGINGFACE,
+            model_source=ModelSource.UNSLOTH,
             device_map="auto",
             source_hub_config=source_hub,
-            destination_hub_config=destination_hub,
-            attn_implementation=args.attn_implementation,
-            force_attn_implementation=args.force_attn_implementation,
         )
 
-        # Load dataset
-        dataset = load_dataset(
-            "json",
-            data_files="data/multiple_choice_questions.json",
-            split="train",
+        # Configure LoRA or other PEFT methods
+        logger.info(f"Setting up {args.peft_type} configuration...")
+
+        # Parse target modules from string to list if provided
+        target_modules = (
+            args.target_modules.split(",")
+            if args.target_modules
+            else [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",  # Attention modules
+                "gate_proj",
+                "up_proj",
+                "down_proj",  # FFN modules
+            ]
         )
 
-        # Split dataset into train and validation
-        dataset = dataset.train_test_split(test_size=0.1, seed=42)
-        train_dataset = dataset["train"]
-        eval_dataset = dataset["test"]
-
-        # Create distributed training config
-        from src.training.distributed_trainer import DistributedTrainingConfig
-
-        dist_config = DistributedTrainingConfig(
-            backend=args.backend,
-            mixed_precision=args.mixed_precision,
-            gradient_checkpointing=args.gradient_checkpointing,
-            use_fsdp=args.distributed_mode == "fsdp",
-            fsdp_min_num_params=args.fsdp_min_num_params,
-            fsdp_state_dict_type=args.fsdp_state_dict_type,
-            fsdp_offload_params=args.fsdp_offload_params,
-            fsdp_auto_wrap_policy=args.fsdp_auto_wrap_policy,
-        )
-
-        # Initialize appropriate trainer based on distributed mode
-        if args.distributed_mode == "ddp":
-            from src.training.distributed_trainer import DDPTrainer
-
-            trainer = DDPTrainer(
-                model=model_handler.model,
-                tokenizer=model_handler.tokenizer,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                config=dist_config,
+        # Set up appropriate PEFT configuration based on the type
+        if args.peft_type == "lora":
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                fan_in_fan_out=args.fan_in_fan_out,
+                modules_to_save=args.modules_to_save.split(",") if args.modules_to_save else None,
             )
-        elif args.distributed_mode == "fsdp":
-            from src.training.distributed_trainer import FSDPTrainer
+            peft_config = lora_config
+        elif args.peft_type == "adalora":
+            # Import AdaLoraConfig if adalora is selected
+            from peft import AdaLoraConfig
 
-            trainer = FSDPTrainer(
-                model=model_handler.model,
-                tokenizer=model_handler.tokenizer,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                config=dist_config,
+            adalora_config = AdaLoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_r=args.adalora_target_r,
+                init_r=args.adalora_init_r,
+                tinit=args.adalora_tinit,
+                tfinal=args.adalora_tfinal,
+                delta_t=args.adalora_delta_t,
+                beta1=args.adalora_beta1,
+                beta2=args.adalora_beta2,
+                fan_in_fan_out=args.fan_in_fan_out,
+                modules_to_save=args.modules_to_save.split(",") if args.modules_to_save else None,
             )
+            peft_config = adalora_config
         else:
-            trainer = QwenTrainer(
-                model=model_handler.model,
-                tokenizer=model_handler.tokenizer,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
+            # For other PEFT types, import as needed and create config
+            # This is a simplified version - for actual implementation,
+            # you would need to import and configure each PEFT type specifically
+            logger.warning(
+                f"PEFT type {args.peft_type} not fully implemented, falling back to LoRA"
             )
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            peft_config = lora_config
 
-        return model_handler, trainer
+        # Get prompt template based on arg
+        prompt_type = get_prompt_template(args.prompt_template)
+
+        # Initialize trainer
+        logger.info("Initializing trainer...")
+
+        # Set response-only training configuration if enabled
+        response_only_config = None
+        if args.train_on_responses_only:
+            response_only_config = {
+                "instruction_token": args.instruction_token,
+                "response_token": args.response_token,
+                "instruction_token_id": args.instruction_token_id,
+                "response_token_id": args.response_token_id,
+            }
+
+        # Configure attention implementation if specified
+        attention_config = {
+            "implementation": args.attention_implementation,
+            "force_implementation": args.force_attn_implementation,
+        }
+
+        # If use_flash_attention is set, override the implementation choice
+        if args.use_flash_attention:
+            attention_config["implementation"] = "flash_attention_2"
+
+        trainer = QwenTrainer(
+            model=model_handler.model,
+            tokenizer=model_handler.tokenizer,
+            prompt_creator=PromptCreator(prompt_type),
+            lora_config=peft_config,
+            destination_hub_config=destination_hub,
+            debug_samples=args.debug_samples,
+            responses_only_config=response_only_config,
+            attention_config=attention_config,
+        )
+
+        return trainer
 
     except Exception as e:
         logger.error(f"Error in setup: {str(e)}")
@@ -587,7 +698,7 @@ def main():
         )
 
         # Initialize model and trainer
-        model_handler, trainer = setup_model_and_trainer(source_hub, destination_hub, args)
+        trainer = setup_model_and_trainer(source_hub, destination_hub, args)
 
         # Load dataset from HuggingFace Hub
         train_dataset = load_datasets(
@@ -719,9 +830,69 @@ def main():
             "optim_bits": args.optim_bits,
         }
 
+        # Configure learning rate scheduler
+        lr_scheduler_config = {
+            "lr_scheduler_type": args.lr_scheduler,
+            "num_cycles": args.lr_scheduler_num_cycles,
+            "power": args.lr_scheduler_power,
+            "last_epoch": args.lr_scheduler_last_epoch,
+        }
+
+        # Configure PEFT (Parameter-Efficient Fine-Tuning)
+        peft_config = {
+            "peft_type": args.peft_type,
+            "lora_r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "target_modules": args.target_modules.split(",") if args.target_modules else None,
+            "fan_in_fan_out": args.fan_in_fan_out,
+            "modules_to_save": args.modules_to_save.split(",") if args.modules_to_save else None,
+            "use_gradient_checkpointing": args.use_gradient_checkpointing,
+        }
+
+        # Add AdaLoRA specific configuration if that's the selected PEFT type
+        if args.peft_type == "adalora":
+            peft_config.update(
+                {
+                    "adalora_target_r": args.adalora_target_r,
+                    "adalora_init_r": args.adalora_init_r,
+                    "adalora_tinit": args.adalora_tinit,
+                    "adalora_tfinal": args.adalora_tfinal,
+                    "adalora_delta_t": args.adalora_delta_t,
+                    "adalora_beta1": args.adalora_beta1,
+                    "adalora_beta2": args.adalora_beta2,
+                }
+            )
+
+        # Configure response-only training
+        response_only_config = None
+        if args.train_on_responses_only:
+            response_only_config = {
+                "instruction_token": args.instruction_token,
+                "response_token": args.response_token,
+                "instruction_token_id": args.instruction_token_id,
+                "response_token_id": args.response_token_id,
+            }
+
+        # Configure attention implementation
+        attention_config = {
+            "implementation": args.attention_implementation,
+            "force_implementation": args.force_attn_implementation,
+        }
+
+        # If use_flash_attention is set, override the implementation choice
+        if args.use_flash_attention:
+            attention_config["implementation"] = "flash_attention_2"
+
         # Start training
         logger.info("Starting training with all callbacks enabled...")
         logger.info(f"Using optimizer: {args.optimizer}")
+        logger.info(f"Using learning rate scheduler: {args.lr_scheduler}")
+        logger.info(f"Using PEFT method: {args.peft_type}")
+        if args.train_on_responses_only:
+            logger.info("Training on responses only")
+        logger.info(f"Using attention implementation: {attention_config['implementation']}")
+
         results = trainer.train(
             train_dataset=train_dataset,
             val_split=args.val_split,
@@ -747,8 +918,11 @@ def main():
             random_seed=args.random_seed,
             # Pass the callbacks
             callbacks=callbacks,
-            # Optimizer configuration
+            # Configuration dictionaries
             optimizer_config=optimizer_config,
+            lr_scheduler_config=lr_scheduler_config,
+            responses_only_config=response_only_config,
+            attention_config=attention_config,
         )
 
         # Log results

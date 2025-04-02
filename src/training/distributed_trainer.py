@@ -1,9 +1,8 @@
 import logging
 import os
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -44,6 +43,7 @@ class DistributedTrainingConfig:
     mixed_precision: str = "bf16"  # bf16, fp16, or no
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = True
+    batch_size: int = 8  # Default batch size per device
 
     # Distributed backend selection
     distributed_backend: DistributedBackend = DistributedBackend.NONE
@@ -78,276 +78,212 @@ class DistributedTrainingConfig:
     accelerate_project_config: Optional[Dict[str, Any]] = None
 
 
-class BaseDistributedTrainer(ABC):
-    """Base class for distributed training"""
+class DistributedTrainer(QwenTrainer):
+    """
+    Distributed training handler for Qwen models that inherits from QwenTrainer.
+
+    This class extends QwenTrainer with distributed training capabilities:
+    1. Support for multiple distributed backends (DDP, FSDP, DeepSpeed, Accelerate)
+    2. Automatic distributed environment setup
+    3. Distributed data loading and model preparation
+    4. Integration with existing QwenTrainer functionality
+    """
 
     def __init__(
         self,
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
-        train_dataset: Dataset,
-        eval_dataset: Optional[Dataset] = None,
-        config: Optional[DistributedTrainingConfig] = None,
+        model: Any,
+        tokenizer: Any,
+        prompt_creator: Any,
+        lora_config: Optional[Any] = None,
+        destination_hub_config: Optional[Any] = None,
+        distributed_config: Optional[DistributedTrainingConfig] = None,
+        debug_samples: int = 3,
     ):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.train_dataset = train_dataset
-        self.eval_dataset = eval_dataset
-        self.config = config or DistributedTrainingConfig()
+        """
+        Initialize the DistributedTrainer with model, tokenizer, and configuration.
+
+        Args:
+            model: The base model to fine-tune
+            tokenizer: The tokenizer associated with the model
+            prompt_creator: PromptCreator instance for formatting prompts
+            lora_config: Optional LoRA configuration for parameter-efficient training
+            destination_hub_config: Optional configuration for pushing to HuggingFace Hub
+            distributed_config: Configuration for distributed training
+            debug_samples: Number of random samples to log during training for debugging
+        """
+        # Initialize the parent QwenTrainer
+        super().__init__(
+            model=model,
+            tokenizer=tokenizer,
+            prompt_creator=prompt_creator,
+            lora_config=lora_config,
+            destination_hub_config=destination_hub_config,
+            debug_samples=debug_samples,
+        )
+
+        # Store distributed configuration
+        self.distributed_config = distributed_config or DistributedTrainingConfig()
 
         # Initialize distributed environment
         self._setup_distributed()
 
         # Setup accelerator if using Accelerate
-        if self.config.distributed_backend == DistributedBackend.ACCELERATE:
+        if self.distributed_config.distributed_backend == DistributedBackend.ACCELERATE:
             self.accelerator = Accelerator(
-                mixed_precision=self.config.accelerate_mixed_precision,
-                gradient_accumulation_steps=self.config.accelerate_gradient_accumulation_steps,
-                dispatch_batches=self.config.accelerate_dispatch_batches,
-                split_batches=self.config.accelerate_split_batches,
-                even_batches=self.config.accelerate_even_batches,
-                project_dir=self.config.accelerate_project_dir,
-                project_config=self.config.accelerate_project_config,
+                mixed_precision=self.distributed_config.accelerate_mixed_precision,
+                gradient_accumulation_steps=self.distributed_config.accelerate_gradient_accumulation_steps,
+                dispatch_batches=self.distributed_config.accelerate_dispatch_batches,
+                split_batches=self.distributed_config.accelerate_split_batches,
+                even_batches=self.distributed_config.accelerate_even_batches,
+                project_dir=self.distributed_config.accelerate_project_dir,
+                project_config=self.distributed_config.accelerate_project_config,
             )
         else:
             self.accelerator = None
 
     def _setup_distributed(self):
         """Setup distributed training environment"""
-        if self.config.distributed_backend == DistributedBackend.NONE:
+        if self.distributed_config.distributed_backend == DistributedBackend.NONE:
             logger.info("No distributed training backend selected, using single GPU/CPU")
             return
 
         if not dist.is_initialized():
-            if self.config.world_size == -1:
-                self.config.world_size = torch.cuda.device_count()
+            if self.distributed_config.world_size == -1:
+                self.distributed_config.world_size = torch.cuda.device_count()
 
-            if self.config.rank == -1:
-                self.config.rank = int(os.environ.get("RANK", -1))
+            if self.distributed_config.rank == -1:
+                self.distributed_config.rank = int(os.environ.get("RANK", -1))
 
-            if self.config.local_rank == -1:
-                self.config.local_rank = int(os.environ.get("LOCAL_RANK", -1))
+            if self.distributed_config.local_rank == -1:
+                self.distributed_config.local_rank = int(os.environ.get("LOCAL_RANK", -1))
 
             dist.init_process_group(
-                backend=self.config.backend,
-                init_method=self.config.init_method,
-                world_size=self.config.world_size,
-                rank=self.config.rank,
+                backend=self.distributed_config.backend,
+                init_method=self.distributed_config.init_method,
+                world_size=self.distributed_config.world_size,
+                rank=self.distributed_config.rank,
             )
 
             # Set device
             if torch.cuda.is_available():
-                torch.cuda.set_device(self.config.local_rank)
+                torch.cuda.set_device(self.distributed_config.local_rank)
 
             logger.info(
-                f"Initialized distributed training: world_size={self.config.world_size}, "
-                f"rank={self.config.rank}, local_rank={self.config.local_rank}"
+                f"Initialized distributed training: world_size={self.distributed_config.world_size}, "
+                f"rank={self.distributed_config.rank}, local_rank={self.distributed_config.local_rank}"
             )
 
-    @abstractmethod
-    def prepare_model(self) -> PreTrainedModel:
-        """Prepare model for distributed training"""
-        pass
+    def prepare_model_for_training(self) -> Any:
+        """
+        Prepare model for distributed training.
 
-    @abstractmethod
-    def prepare_dataloader(self, dataset: Dataset, is_train: bool = True) -> DataLoader:
-        """Prepare dataloader for distributed training"""
-        pass
+        This method extends the parent class's prepare_model_for_training method
+        to add distributed training capabilities.
+        """
+        # First, prepare the model using the parent class method
+        model = super().prepare_model_for_training()
 
-    def train(self, **kwargs):
-        """Train the model"""
-        # Prepare model and dataloaders
-        self.model = self.prepare_model()
-        train_dataloader = self.prepare_dataloader(self.train_dataset, is_train=True)
-        eval_dataloader = (
-            self.prepare_dataloader(self.eval_dataset, is_train=False)
-            if self.eval_dataset
-            else None
-        )
-
-        # Prepare optimizer and scheduler
-        optimizer = self._prepare_optimizer()
-        scheduler = self._prepare_scheduler(optimizer, len(train_dataloader))
-
-        # Prepare everything with accelerator if using Accelerate
-        if self.accelerator is not None:
-            self.model, optimizer, train_dataloader, scheduler = self.accelerator.prepare(
-                self.model, optimizer, train_dataloader, scheduler
-            )
-            if eval_dataloader:
-                eval_dataloader = self.accelerator.prepare(eval_dataloader)
-
-        # Training loop
-        self._train_loop(
-            train_dataloader=train_dataloader,
-            eval_dataloader=eval_dataloader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            **kwargs,
-        )
-
-    def _prepare_optimizer(self):
-        """Prepare optimizer"""
-        # Implementation depends on your specific needs
-        pass
-
-    def _prepare_scheduler(self, optimizer, num_training_steps):
-        """Prepare learning rate scheduler"""
-        # Implementation depends on your specific needs
-        pass
-
-    def _train_loop(self, **kwargs):
-        """Training loop implementation"""
-        # Implementation depends on your specific needs
-        pass
-
-
-class DDPTrainer(BaseDistributedTrainer):
-    """Distributed Data Parallel trainer"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Apply distributed training specific preparations
         if (
-            self.config.distributed_backend != DistributedBackend.TORCH_RUN
-            and not self.config.use_ddp
+            self.distributed_config.distributed_backend == DistributedBackend.TORCH_RUN
+            or self.distributed_config.use_ddp
         ):
-            raise ValueError("DDPTrainer requires use_ddp=True or distributed_backend=TORCH_RUN")
+            # DDP preparation
+            if self.distributed_config.gradient_checkpointing:
+                model.gradient_checkpointing_enable()
 
-    def prepare_model(self) -> PreTrainedModel:
-        """Prepare model for DDP training"""
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-
-        # Wrap model with DDP
-        self.model = DistributedDataParallel(
-            self.model,
-            device_ids=[self.config.local_rank] if torch.cuda.is_available() else None,
-            output_device=self.config.local_rank if torch.cuda.is_available() else None,
-            find_unused_parameters=True,
-        )
-        return self.model
-
-    def prepare_dataloader(self, dataset: Dataset, is_train: bool = True) -> DataLoader:
-        """Prepare dataloader for DDP training"""
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=self.config.world_size,
-            rank=self.config.rank,
-            shuffle=is_train,
-        )
-
-        return DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True,
-        )
-
-
-class FSDPTrainer(BaseDistributedTrainer):
-    """Fully Sharded Data Parallel trainer"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not self.config.use_fsdp:
-            raise ValueError("FSDPTrainer requires use_fsdp=True in config")
-
-        # Import FSDP modules
-        from torch.distributed.fsdp import CPUOffload
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from torch.distributed.fsdp import MixedPrecision, StateDictType
-        from torch.distributed.fsdp.wrap import (
-            size_based_auto_wrap_policy,
-            transformer_auto_wrap_policy,
-        )
-
-        self.FSDP = FSDP
-        self.StateDictType = StateDictType
-        self.MixedPrecision = MixedPrecision
-        self.CPUOffload = CPUOffload
-
-    def prepare_model(self) -> PreTrainedModel:
-        """Prepare model for FSDP training"""
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-
-        # Setup FSDP wrapping policy
-        if self.config.fsdp_auto_wrap_policy == "transformer":
-            auto_wrap_policy = transformer_auto_wrap_policy
-        elif self.config.fsdp_auto_wrap_policy == "size":
-            auto_wrap_policy = size_based_auto_wrap_policy(self.config.fsdp_min_num_params)
-        else:
-            auto_wrap_policy = None
-
-        # Setup mixed precision
-        mixed_precision_config = None
-        if self.config.mixed_precision != "no":
-            mixed_precision_config = MixedPrecision(
-                param_dtype=torch.bfloat16
-                if self.config.mixed_precision == "bf16"
-                else torch.float16,
-                reduce_dtype=torch.bfloat16
-                if self.config.mixed_precision == "bf16"
-                else torch.float16,
-                buffer_dtype=torch.bfloat16
-                if self.config.mixed_precision == "bf16"
-                else torch.float16,
+            # Wrap model with DDP
+            model = DistributedDataParallel(
+                model,
+                device_ids=[self.distributed_config.local_rank]
+                if torch.cuda.is_available()
+                else None,
+                output_device=self.distributed_config.local_rank
+                if torch.cuda.is_available()
+                else None,
+                find_unused_parameters=True,
+            )
+        elif self.distributed_config.use_fsdp:
+            # FSDP preparation
+            from torch.distributed.fsdp import CPUOffload
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from torch.distributed.fsdp import MixedPrecision, StateDictType
+            from torch.distributed.fsdp.wrap import (
+                size_based_auto_wrap_policy,
+                transformer_auto_wrap_policy,
             )
 
-        # Setup CPU offload if enabled
-        cpu_offload = CPUOffload(offload_params=True) if self.config.fsdp_offload_params else None
+            if self.distributed_config.gradient_checkpointing:
+                model.gradient_checkpointing_enable()
 
-        # Wrap model with FSDP
-        self.model = self.FSDP(
-            self.model,
-            auto_wrap_policy=auto_wrap_policy,
-            mixed_precision=mixed_precision_config,
-            cpu_offload=cpu_offload,
-            device_id=self.config.local_rank,
-        )
+            # Setup FSDP wrapping policy
+            if self.distributed_config.fsdp_auto_wrap_policy == "transformer":
+                auto_wrap_policy = transformer_auto_wrap_policy
+            elif self.distributed_config.fsdp_auto_wrap_policy == "size":
+                auto_wrap_policy = size_based_auto_wrap_policy(
+                    self.distributed_config.fsdp_min_num_params
+                )
+            else:
+                auto_wrap_policy = None
 
-        return self.model
+            # Setup mixed precision
+            mixed_precision_config = None
+            if self.distributed_config.mixed_precision != "no":
+                mixed_precision_config = MixedPrecision(
+                    param_dtype=torch.bfloat16
+                    if self.distributed_config.mixed_precision == "bf16"
+                    else torch.float16,
+                    reduce_dtype=torch.bfloat16
+                    if self.distributed_config.mixed_precision == "bf16"
+                    else torch.float16,
+                    buffer_dtype=torch.bfloat16
+                    if self.distributed_config.mixed_precision == "bf16"
+                    else torch.float16,
+                )
 
-    def prepare_dataloader(self, dataset: Dataset, is_train: bool = True) -> DataLoader:
-        """Prepare dataloader for FSDP training"""
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=self.config.world_size,
-            rank=self.config.rank,
-            shuffle=is_train,
-        )
-
-        return DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True,
-        )
-
-
-class DeepSpeedTrainer(BaseDistributedTrainer):
-    """DeepSpeed trainer"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.config.distributed_backend != DistributedBackend.DEEPSPEED:
-            raise ValueError("DeepSpeedTrainer requires distributed_backend=DEEPSPEED")
-
-        # Import DeepSpeed
-        try:
-            import deepspeed
-
-            self.deepspeed = deepspeed
-        except ImportError:
-            raise ImportError(
-                "DeepSpeed is not installed. Please install it with 'pip install deepspeed'"
+            # Setup CPU offload if enabled
+            cpu_offload = (
+                CPUOffload(offload_params=True)
+                if self.distributed_config.fsdp_offload_params
+                else None
             )
 
-        # Create DeepSpeed config if not provided
-        if not self.config.deepspeed_config_path:
-            self._create_deepspeed_config()
+            # Wrap model with FSDP
+            model = FSDP(
+                model,
+                auto_wrap_policy=auto_wrap_policy,
+                mixed_precision=mixed_precision_config,
+                cpu_offload=cpu_offload,
+                device_id=self.distributed_config.local_rank,
+            )
+        elif self.distributed_config.distributed_backend == DistributedBackend.DEEPSPEED:
+            # DeepSpeed preparation
+            try:
+                import deepspeed
+
+                self.deepspeed = deepspeed
+            except ImportError:
+                raise ImportError(
+                    "DeepSpeed is not installed. Please install it with 'pip install deepspeed'"
+                )
+
+            if self.distributed_config.gradient_checkpointing:
+                model.gradient_checkpointing_enable()
+
+            # Create DeepSpeed config if not provided
+            if not self.distributed_config.deepspeed_config_path:
+                self._create_deepspeed_config()
+
+            # Initialize DeepSpeed engine
+            model, optimizer, _, scheduler = self.deepspeed.initialize(
+                model=model,
+                model_parameters=model.parameters(),
+                config=self.distributed_config.deepspeed_config_path,
+            )
+
+            return model
+
+        return model
 
     def _create_deepspeed_config(self):
         """Create DeepSpeed configuration file"""
@@ -355,8 +291,9 @@ class DeepSpeedTrainer(BaseDistributedTrainer):
         import tempfile
 
         deepspeed_config = {
-            "train_batch_size": self.config.batch_size * self.config.world_size,
-            "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
+            "train_batch_size": self.distributed_config.batch_size
+            * self.distributed_config.world_size,
+            "gradient_accumulation_steps": self.distributed_config.gradient_accumulation_steps,
             "optimizer": {
                 "type": "AdamW",
                 "params": {"lr": 2e-4, "betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 0.01},
@@ -365,21 +302,21 @@ class DeepSpeedTrainer(BaseDistributedTrainer):
                 "type": "WarmupLR",
                 "params": {"warmup_min_lr": 0, "warmup_max_lr": 2e-4, "warmup_num_steps": 100},
             },
-            "fp16": {"enabled": self.config.mixed_precision == "fp16"},
-            "bf16": {"enabled": self.config.mixed_precision == "bf16"},
+            "fp16": {"enabled": self.distributed_config.mixed_precision == "fp16"},
+            "bf16": {"enabled": self.distributed_config.mixed_precision == "bf16"},
             "zero_optimization": {
-                "stage": self.config.deepspeed_stage,
+                "stage": self.distributed_config.deepspeed_stage,
                 "offload_optimizer": {"device": "cpu", "pin_memory": True}
-                if self.config.deepspeed_offload_optimizer
+                if self.distributed_config.deepspeed_offload_optimizer
                 else None,
                 "offload_param": {"device": "cpu", "pin_memory": True}
-                if self.config.deepspeed_offload_param
+                if self.distributed_config.deepspeed_offload_param
                 else None,
-                "reduce_bucket_size": self.config.deepspeed_zero_reduce_bucket_size,
-                "reduce_scatter": self.config.deepspeed_zero_reduce_scatter,
-                "contiguous_gradients": self.config.deepspeed_zero_contiguous_gradients,
+                "reduce_bucket_size": self.distributed_config.deepspeed_zero_reduce_bucket_size,
+                "reduce_scatter": self.distributed_config.deepspeed_zero_reduce_scatter,
+                "contiguous_gradients": self.distributed_config.deepspeed_zero_contiguous_gradients,
             },
-            "gradient_checkpointing": self.config.gradient_checkpointing,
+            "gradient_checkpointing": self.distributed_config.gradient_checkpointing,
         }
 
         # Create temporary file for DeepSpeed config
@@ -387,137 +324,146 @@ class DeepSpeedTrainer(BaseDistributedTrainer):
         with os.fdopen(fd, "w") as f:
             json.dump(deepspeed_config, f, indent=2)
 
-        self.config.deepspeed_config_path = path
+        self.distributed_config.deepspeed_config_path = path
         logger.info(f"Created DeepSpeed config at {path}")
 
-    def prepare_model(self) -> PreTrainedModel:
-        """Prepare model for DeepSpeed training"""
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
+    def _prepare_dataset_for_training(self, dataset: Dataset) -> Dataset:
+        """
+        Prepare dataset for distributed training.
 
-        # Initialize DeepSpeed engine
-        self.model_engine, optimizer, _, scheduler = self.deepspeed.initialize(
-            model=self.model,
-            model_parameters=self.model.parameters(),
-            config=self.config.deepspeed_config_path,
-        )
+        This method extends the parent class's _prepare_dataset_for_training method
+        to add distributed training capabilities.
+        """
+        # First, prepare the dataset using the parent class method
+        formatted_dataset = super()._prepare_dataset_for_training(dataset)
 
-        return self.model_engine
+        # Apply distributed training specific preparations
+        if self.distributed_config.distributed_backend != DistributedBackend.NONE:
+            # Create a distributed sampler
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                formatted_dataset,
+                num_replicas=self.distributed_config.world_size,
+                rank=self.distributed_config.rank,
+                shuffle=True,
+            )
 
-    def prepare_dataloader(self, dataset: Dataset, is_train: bool = True) -> DataLoader:
-        """Prepare dataloader for DeepSpeed training"""
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=self.config.world_size,
-            rank=self.config.rank,
-            shuffle=is_train,
-        )
+            # Create a DataLoader with the distributed sampler
+            dataloader = DataLoader(
+                formatted_dataset,
+                batch_size=self.distributed_config.batch_size,
+                sampler=sampler,
+                num_workers=4,
+                pin_memory=True,
+            )
 
-        return DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True,
-        )
+            # Return the dataset with the distributed sampler attached
+            formatted_dataset.distributed_sampler = sampler
+            formatted_dataset.distributed_dataloader = dataloader
 
+        return formatted_dataset
 
-class AccelerateTrainer(BaseDistributedTrainer):
-    """Accelerate trainer"""
+    def train(
+        self,
+        train_dataset: Dataset,
+        val_dataset: Optional[Dataset] = None,
+        val_split: float = 0.1,
+        output_dir: str = "./model_output",
+        num_train_epochs: int = 3,
+        per_device_train_batch_size: int = 4,
+        gradient_accumulation_steps: int = 4,
+        learning_rate: float = 2e-4,
+        warmup_ratio: float = 0.1,
+        max_steps: Optional[int] = None,
+        logging_steps: int = 10,
+        save_steps: int = 100,
+        save_strategy: str = "epoch",
+        save_total_limit: int = 1,
+        load_best_model_at_end: bool = True,
+        metric_for_best_model: str = "eval_loss",
+        greater_is_better: bool = False,
+        callbacks: Optional[List[Any]] = None,
+        random_seed: int = 42,
+        push_to_hub_strategy: str = "end",
+        wandb_config: Optional[Dict[str, Any]] = None,
+        optimizer_config: Optional[Dict[str, Any]] = None,
+        lr_scheduler_config: Optional[Dict[str, Any]] = None,
+        responses_only_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Train the model with distributed training capabilities.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.config.distributed_backend != DistributedBackend.ACCELERATE:
-            raise ValueError("AccelerateTrainer requires distributed_backend=ACCELERATE")
+        This method extends the parent class's train method to add distributed training capabilities.
+        """
+        # Update distributed config with training parameters
+        self.distributed_config.batch_size = per_device_train_batch_size
+        self.distributed_config.gradient_accumulation_steps = gradient_accumulation_steps
 
-    def prepare_model(self) -> PreTrainedModel:
-        """Prepare model for Accelerate training"""
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-
-        # Model will be prepared by accelerator.prepare() in the train method
-        return self.model
-
-    def prepare_dataloader(self, dataset: Dataset, is_train: bool = True) -> DataLoader:
-        """Prepare dataloader for Accelerate training"""
-        # For Accelerate, we use a regular DataLoader with DistributedSampler
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=self.config.world_size,
-            rank=self.config.rank,
-            shuffle=is_train,
-        )
-
-        return DataLoader(
-            dataset,
-            batch_size=self.config.batch_size,
-            sampler=sampler,
-            num_workers=4,
-            pin_memory=True,
+        # Call the parent class's train method
+        return super().train(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            val_split=val_split,
+            output_dir=output_dir,
+            num_train_epochs=num_train_epochs,
+            per_device_train_batch_size=per_device_train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            learning_rate=learning_rate,
+            warmup_ratio=warmup_ratio,
+            max_steps=max_steps,
+            logging_steps=logging_steps,
+            save_steps=save_steps,
+            save_strategy=save_strategy,
+            save_total_limit=save_total_limit,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=greater_is_better,
+            callbacks=callbacks,
+            random_seed=random_seed,
+            push_to_hub_strategy=push_to_hub_strategy,
+            wandb_config=wandb_config,
+            optimizer_config=optimizer_config,
+            lr_scheduler_config=lr_scheduler_config,
+            responses_only_config=responses_only_config,
         )
 
 
 def create_distributed_trainer(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
+    prompt_creator: Any,
     train_dataset: Dataset,
     eval_dataset: Optional[Dataset] = None,
-    config: Optional[DistributedTrainingConfig] = None,
-) -> BaseDistributedTrainer:
+    distributed_config: Optional[DistributedTrainingConfig] = None,
+    lora_config: Optional[Any] = None,
+    destination_hub_config: Optional[Any] = None,
+    debug_samples: int = 3,
+) -> DistributedTrainer:
     """
-    Factory function to create the appropriate distributed trainer based on configuration
+    Factory function to create a distributed trainer based on configuration
 
     Args:
         model: The model to train
         tokenizer: The tokenizer for the model
+        prompt_creator: PromptCreator instance for formatting prompts
         train_dataset: The training dataset
         eval_dataset: The evaluation dataset (optional)
-        config: The distributed training configuration
+        distributed_config: The distributed training configuration
+        lora_config: Optional LoRA configuration for parameter-efficient training
+        destination_hub_config: Optional configuration for pushing to HuggingFace Hub
+        debug_samples: Number of random samples to log during training for debugging
 
     Returns:
-        An instance of the appropriate distributed trainer
+        An instance of the DistributedTrainer
     """
-    if config is None:
-        config = DistributedTrainingConfig()
+    if distributed_config is None:
+        distributed_config = DistributedTrainingConfig()
 
-    # Determine which trainer to use based on configuration
-    if config.distributed_backend == DistributedBackend.DEEPSPEED:
-        return DeepSpeedTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            config=config,
-        )
-    elif config.distributed_backend == DistributedBackend.ACCELERATE:
-        return AccelerateTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            config=config,
-        )
-    elif config.use_fsdp:
-        return FSDPTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            config=config,
-        )
-    elif config.use_ddp or config.distributed_backend == DistributedBackend.TORCH_RUN:
-        return DDPTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            config=config,
-        )
-    else:
-        # No distributed training
-        return QwenTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-        )
+    return DistributedTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        prompt_creator=prompt_creator,
+        lora_config=lora_config,
+        destination_hub_config=destination_hub_config,
+        distributed_config=distributed_config,
+        debug_samples=debug_samples,
+    )
