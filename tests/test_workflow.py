@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 import torch
-import wandb
 import yaml
 from datasets import Dataset, load_from_disk
 from huggingface_hub import HfApi, HfFolder
@@ -15,6 +14,8 @@ from huggingface_hub.utils import HfHubHTTPError
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from unsloth import FastLanguageModel
+
+import wandb
 
 # Add the project root directory to Python path
 project_root = Path(__file__).parent.parent

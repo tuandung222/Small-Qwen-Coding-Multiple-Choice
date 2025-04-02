@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-import wandb
 from datasets import Dataset
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
+import wandb
 from src.model.qwen_handler import QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
@@ -980,6 +980,11 @@ class ModelLoadingAlertCallback(TrainerCallback):
         """Show alert at the beginning of training if Unsloth was attempted but not used."""
         if self.use_unsloth and not self.alert_shown:
             try:
+                # Check if trainer is available
+                if self.trainer is None:
+                    logger.warning("Trainer not available in ModelLoadingAlertCallback")
+                    return control
+
                 # Check if the model is using Unsloth
                 model = self.trainer.model
                 if not hasattr(model, "is_unsloth_model") or not model.is_unsloth_model:

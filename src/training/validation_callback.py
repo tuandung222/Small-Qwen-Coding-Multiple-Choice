@@ -5,8 +5,9 @@ import os
 from typing import Dict, Optional
 
 import torch
-import wandb
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
+
+import wandb
 
 logger = logging.getLogger(__name__)
 

@@ -7,12 +7,13 @@ import time
 from pathlib import Path
 
 import torch
-import wandb
+import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
 from datasets import load_dataset
 from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+import wandb
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.training.callbacks import (
@@ -1070,6 +1071,8 @@ def main():
             lr_scheduler_config=lr_scheduler_config,
             responses_only_config=response_only_config,
             attention_config=attention_config,
+            # Set run_name explicitly to avoid warning
+            run_name=run_name,
         )
 
         # Log results

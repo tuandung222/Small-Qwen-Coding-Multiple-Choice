@@ -3,6 +3,7 @@
 # Set environment variables for reproducibility
 export PYTHONHASHSEED=42
 export CUDA_LAUNCH_BLOCKING=1
+export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 # Run the training script with comprehensive features
 python src/run.py \
@@ -39,33 +40,33 @@ python src/run.py \
     --early-stopping-delta 0.01 \
     --validation-steps 50 \
     --metric-for-best "eval_loss" \
-    --greater-is-better false \
-    --validate-at-start true \
+    --greater-is-better \
+    --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
     --logging-steps 100 \
     --save-steps 500 \
     --save-total-limit 3 \
     --push-strategy "best" \
-    --push-to-hub true \
+    --push-to-hub \
     \
     --dataset "tuandunghcmut/coding-mcq-reasoning" \
     --val-split 0.04 \
     --random-seed 42 \
     --output-dir "model_output" \
     \
-    --use-flash-attention true \
+    --use-flash-attention \
     --attention-implementation "flash_attention_2" \
-    --force-attn-implementation true \
+    --force-attn-implementation \
     \
-    --train-on-responses-only true \
+    --train-on-responses-only \
     --instruction-token "<|im_start|>user\n" \
     --response-token "<|im_start|>assistant\n" \
     \
-    --prompt-track-diversity true \
-    --prompt-track-quality true \
-    --prompt-categorize true \
-    --prompt-comparison true \
+    --prompt-track-diversity \
+    --prompt-track-quality \
+    --prompt-categorize \
+    --prompt-comparison \
     --max-prompts-to-save 100 \
     --debug-samples 3 \
     2>&1 | tee training.log
