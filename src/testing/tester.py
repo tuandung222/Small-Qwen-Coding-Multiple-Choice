@@ -2,15 +2,16 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
+from datasets import Dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
-
-from ..data.prompt_creator import PromptCreator
-from ..data.response_parser import ResponseParser
-from ..model.qwen_handler import QwenModelHandler
+from data.prompt_creator import PromptCreator
+from data.response_parser import ResponseParser
+from model.qwen_handler import QwenModelHandler
 
 
 class MultipleChoiceTester:

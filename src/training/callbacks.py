@@ -5,10 +5,9 @@ import torch
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 import wandb
-
-from ..data.prompt_creator import PromptCreator
-from ..data.response_parser import ResponseParser
-from ..model.qwen_handler import QwenModelHandler
+from data.prompt_creator import PromptCreator
+from data.response_parser import ResponseParser
+from model.qwen_handler import QwenModelHandler
 
 
 class ValidationCallback(TrainerCallback):

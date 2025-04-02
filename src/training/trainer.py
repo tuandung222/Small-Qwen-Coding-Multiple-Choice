@@ -10,10 +10,11 @@ from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArgum
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
 
-from ..data.prompt_creator import PromptCreator
-from ..data.response_parser import ResponseParser
-from ..model.qwen_handler import HubConfig, QwenModelHandler
-from ..utils.auth import setup_authentication
+from data.prompt_creator import PromptCreator
+from data.response_parser import ResponseParser
+from model.qwen_handler import HubConfig, QwenModelHandler
+from utils.auth import setup_authentication
+
 from .callbacks import EarlyStoppingCallback, ValidationCallback
 
 # define logger

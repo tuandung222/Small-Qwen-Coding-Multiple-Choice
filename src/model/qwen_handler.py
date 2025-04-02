@@ -5,12 +5,13 @@ from enum import Enum
 from typing import Any, Dict, Optional, Union
 
 import torch
+import unsloth
 from huggingface_hub import HfApi
 from huggingface_hub.utils import HfHubHTTPError
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 from unsloth import FastLanguageModel
 
-from ..utils.auth import setup_authentication
+from utils.auth import setup_authentication
 
 
 class ModelSource(str, Enum):
