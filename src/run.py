@@ -13,12 +13,12 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
-from data.prompt_creator import PromptCreator
-from model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
-from training.callbacks import EarlyStoppingCallback, ValidationCallback
-from training.trainer import QwenTrainer
-from utils.auth import setup_authentication
-from utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
+from src.data.prompt_creator import PromptCreator
+from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
+from src.training.callbacks import EarlyStoppingCallback, ValidationCallback
+from src.training.trainer import QwenTrainer
+from src.utils.auth import setup_authentication
+from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
 
 # Setup logging
 logging.basicConfig(
