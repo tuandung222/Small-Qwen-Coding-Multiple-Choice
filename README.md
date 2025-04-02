@@ -182,6 +182,9 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
               [--target-modules TARGET_MODULES] [--fan-in-fan-out FAN_IN_FAN_OUT]
               [--use-gradient-checkpointing USE_GRADIENT_CHECKPOINTING]
               [--modules-to-save MODULES_TO_SAVE]
+              [--train-on-responses-only] [--instruction-token INSTRUCTION_TOKEN]
+              [--response-token RESPONSE_TOKEN] [--instruction-token-id INSTRUCTION_TOKEN_ID]
+              [--response-token-id RESPONSE_TOKEN_ID]
 ```
 
 ### Key Parameters
@@ -203,6 +206,11 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
 | `--private` | Make the repository private | False |
 | `--test-mode` | Use only 2 examples | False |
 | `--test-training-mode` | Use only one batch of data | False |
+| `--train-on-responses-only` | Enable response-only training | False |
+| `--instruction-token` | Token/prefix indicating start of instruction | `<|im_start|>user\n` |
+| `--response-token` | Token/prefix indicating start of response | `<|im_start|>assistant\n` |
+| `--instruction-token-id` | Token ID for instruction start (optional) | None |
+| `--response-token-id` | Token ID for response start (optional) | None |
 
 ### Optimizer Configuration
 
@@ -297,6 +305,35 @@ python -m src.run --peft-type adalora --adalora-target-r 4 --adalora-init-r 8 --
 
 # Using Prefix Tuning
 python -m src.run --peft-type prefix
+```
+
+For the complete list of parameters, run `python -m src.run --help`.
+
+### Response-Only Training
+
+Unsloth provides a feature called `train_on_responses_only` that allows you to focus the training specifically on the assistant's responses rather than the entire conversation. This can be more efficient for instruction tuning as it concentrates the learning on the output generation rather than the input understanding.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--train-on-responses-only` | Enable response-only training | False |
+| `--instruction-token` | Token/prefix indicating start of instruction | `<|im_start|>user\n` |
+| `--response-token` | Token/prefix indicating start of response | `<|im_start|>assistant\n` |
+| `--instruction-token-id` | Token ID for instruction start (optional) | None |
+| `--response-token-id` | Token ID for response start (optional) | None |
+
+This mode works by identifying instruction and response segments in the training data and applying a special mask to focus the training loss calculation only on the assistant's responses.
+
+Example usage for response-only training:
+
+```python
+# Basic response-only training with default tokens
+python -m src.run --train-on-responses-only
+
+# Custom token configuration for Qwen2.5 format
+python -m src.run --train-on-responses-only --instruction-token "<|im_start|>user\n" --response-token "<|im_start|>assistant\n"
+
+# Using token IDs instead of strings (if you know the exact token IDs in your tokenizer)
+python -m src.run --train-on-responses-only --instruction-token-id 83769 --response-token-id 83942
 ```
 
 For the complete list of parameters, run `python -m src.run --help`.

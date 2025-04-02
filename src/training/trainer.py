@@ -10,6 +10,7 @@ from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArgum
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
+from unsloth.chat_templates import train_on_responses_only
 
 from src.model.qwen_handler import HubConfig, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
@@ -561,6 +562,7 @@ class QwenTrainer:
         wandb_config: Optional[Dict[str, Any]] = None,
         optimizer_config: Optional[Dict[str, Any]] = None,
         lr_scheduler_config: Optional[Dict[str, Any]] = None,
+        responses_only_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Train the model with comprehensive configuration and monitoring.
@@ -575,6 +577,11 @@ class QwenTrainer:
         - Uses DataCollatorForLanguageModeling for efficient batching
         - Handles padding and attention masks automatically
         - Ensures inputs are properly formatted for the model
+
+        Response-Only Training (Unsloth feature):
+        - Option to train only on model responses using Unsloth's train_on_responses_only
+        - Identifies instruction and response segments using configurable tokens
+        - Enables more focused training on generated responses rather than instructions
 
         Validation Strategy:
         - If val_dataset is None, splits train_dataset using val_split ratio
@@ -622,6 +629,7 @@ class QwenTrainer:
             wandb_config: Optional configuration for Weights & Biases logging
             optimizer_config: Optional configuration for optimizer selection and parameters
             lr_scheduler_config: Optional configuration for learning rate scheduler selection and parameters
+            responses_only_config: Optional configuration for training only on responses with Unsloth
 
         Returns:
             Dict containing training metrics and results
@@ -827,6 +835,41 @@ class QwenTrainer:
             callbacks=callbacks,
             tokenizer=self.tokenizer,
         )
+
+        # Apply response-only training if configured
+        if responses_only_config and responses_only_config.get("enabled", False):
+            logger.info("Applying Unsloth's train_on_responses_only feature")
+
+            instruction_token = responses_only_config.get("instruction_token", "<|im_start|>user\n")
+            response_token = responses_only_config.get("response_token", "<|im_start|>assistant\n")
+            instruction_token_id = responses_only_config.get("instruction_token_id", None)
+            response_token_id = responses_only_config.get("response_token_id", None)
+
+            logger.info(f"Using instruction token: {instruction_token}")
+            logger.info(f"Using response token: {response_token}")
+
+            if instruction_token_id is not None:
+                logger.info(f"Using instruction token ID: {instruction_token_id}")
+            if response_token_id is not None:
+                logger.info(f"Using response token ID: {response_token_id}")
+
+            # Create a backup of the original trainer in case we need it
+            original_trainer = self.trainer
+
+            # Apply the response-only training transformation
+            try:
+                self.trainer = train_on_responses_only(
+                    self.trainer,
+                    instruction_part=instruction_token,
+                    response_part=response_token,
+                    instruction_token_id=instruction_token_id,
+                    response_token_id=response_token_id,
+                )
+                logger.info("Successfully applied response-only training transformation")
+            except Exception as e:
+                logger.error(f"Failed to apply response-only training: {str(e)}")
+                logger.info("Falling back to standard training")
+                self.trainer = original_trainer
 
         # Add custom learning rate tracking callback
         class LRMonitorCallback(TrainerCallback):

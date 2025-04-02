@@ -11,6 +11,7 @@ from datasets import load_dataset
 from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from unsloth.chat_templates import train_on_responses_only
 
 import wandb
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
@@ -431,6 +432,38 @@ def parse_args():
         help="The index of the last epoch when resuming training",
     )
 
+    # Response-only training configuration
+    parser.add_argument(
+        "--train-on-responses-only",
+        action="store_true",
+        default=False,
+        help="Train only on assistant responses using Unsloth's train_on_responses_only feature",
+    )
+    parser.add_argument(
+        "--instruction-token",
+        type=str,
+        default="<|im_start|>user\n",
+        help="Token/prefix that indicates the start of user instruction when using train-on-responses-only",
+    )
+    parser.add_argument(
+        "--response-token",
+        type=str,
+        default="<|im_start|>assistant\n",
+        help="Token/prefix that indicates the start of assistant response when using train-on-responses-only",
+    )
+    parser.add_argument(
+        "--instruction-token-id",
+        type=int,
+        default=None,
+        help="Token ID that indicates start of instruction (optional, overrides instruction-token)",
+    )
+    parser.add_argument(
+        "--response-token-id",
+        type=int,
+        default=None,
+        help="Token ID that indicates start of response (optional, overrides response-token)",
+    )
+
     return parser.parse_args()
 
 
@@ -809,6 +842,20 @@ def main():
             "last_epoch": args.lr_scheduler_last_epoch,
         }
 
+        # Configure response-only training if enabled
+        responses_only_config = None
+        if args.train_on_responses_only:
+            responses_only_config = {
+                "enabled": True,
+                "instruction_token": args.instruction_token,
+                "response_token": args.response_token,
+                "instruction_token_id": args.instruction_token_id,
+                "response_token_id": args.response_token_id,
+            }
+            logger.info("Training on responses only with Unsloth's feature enabled")
+            logger.info(f"Instruction token: {args.instruction_token}")
+            logger.info(f"Response token: {args.response_token}")
+
         # Start training
         logger.info("Starting training with all callbacks enabled...")
         logger.info(f"Using optimizer: {args.optimizer}")
@@ -842,6 +889,8 @@ def main():
             optimizer_config=optimizer_config,
             # LR scheduler configuration
             lr_scheduler_config=lr_scheduler_config,
+            # Response-only training configuration
+            responses_only_config=responses_only_config,
         )
 
         # Log results
