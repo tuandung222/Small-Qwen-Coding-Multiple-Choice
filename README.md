@@ -185,46 +185,164 @@ Key differences between formats:
 
 ## ⚙️ Command-Line Interface
 
-### Training Arguments
+The project provides comprehensive command-line interfaces for both training and synthesis tasks. Below are the detailed arguments and their usage:
+
+### Training Script (`src/run.py`)
 
 ```bash
 python src/run.py [arguments]
 ```
 
-Key training arguments:
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--experiment-name` | Name for this experiment | auto-generated |
-| `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
-| `--epochs` | Number of training epochs | 3 |
-| `--batch-size` | Per device batch size | 24 |
-| `--learning-rate` | Learning rate | 2e-4 |
-| `--lora-r` | LoRA attention dimension | 8 |
-| `--lora-alpha` | LoRA alpha parameter | 32 |
+#### Model Configuration
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct | `--source-model "your-model/name"` |
+| `--destination-repo` | HF Hub repo for saving | tuandunghcmut/Qwen25_Coder_MultipleChoice_v3 | `--destination-repo "your-username/repo-name"` |
+| `--max-seq-length` | Maximum sequence length | 2048 | `--max-seq-length 4096` |
+| `--quantization` | Model quantization level | 4bit | `--quantization "8bit"` |
 
-### Synthesis Arguments
+#### Training Parameters
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--epochs` | Number of training epochs | 3 | `--epochs 5` |
+| `--batch-size` | Per device batch size | 24 | `--batch-size 32` |
+| `--grad-accum` | Gradient accumulation steps | 4 | `--grad-accum 8` |
+| `--learning-rate` | Learning rate | 2e-4 | `--learning-rate 1e-4` |
+| `--warmup-ratio` | Warmup steps ratio | 0.1 | `--warmup-ratio 0.2` |
+| `--weight-decay` | Weight decay for optimizer | 0.01 | `--weight-decay 0.1` |
+
+#### LoRA Configuration
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--lora-r` | LoRA attention dimension | 8 | `--lora-r 16` |
+| `--lora-alpha` | LoRA alpha parameter | 32 | `--lora-alpha 64` |
+| `--lora-dropout` | LoRA dropout rate | 0.05 | `--lora-dropout 0.1` |
+| `--target-modules` | Modules to apply LoRA | q_proj,k_proj,v_proj,o_proj,... | `--target-modules "q_proj,v_proj"` |
+
+#### Output & Monitoring
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--output-dir` | Directory for outputs | ./model_output | `--output-dir "./my_experiment"` |
+| `--experiment-name` | Name for experiment | timestamp | `--experiment-name "lora_test_1"` |
+| `--save-steps` | Steps between saves | 500 | `--save-steps 1000` |
+| `--logging-steps` | Steps between logs | 100 | `--logging-steps 50` |
+
+#### Example Commands
+
+1. Basic Training:
+```bash
+python src/run.py \
+    --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
+    --epochs 3 \
+    --batch-size 24 \
+    --learning-rate 2e-4
+```
+
+2. Advanced Training with LoRA:
+```bash
+python src/run.py \
+    --experiment-name "lora_experiment" \
+    --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
+    --epochs 5 \
+    --batch-size 32 \
+    --learning-rate 1e-4 \
+    --lora-r 16 \
+    --lora-alpha 64 \
+    --warmup-ratio 0.2 \
+    --weight-decay 0.01 \
+    --max-seq-length 2048 \
+    --quantization "4bit"
+```
+
+### Synthesis Script (`src/data_synthesis/gpt4o_generated.py`)
 
 ```bash
 python src/data_synthesis/gpt4o_generated.py [arguments]
 ```
 
-Key synthesis arguments:
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--model` | OpenAI model to use | gpt-4o |
-| `--data-path` | Path to dataset | ./data/train |
-| `--sample-size` | Number of examples | None (all) |
-| `--temperature` | Generation temperature | 0.2 |
-| `--concurrent-requests` | Parallel requests | 5 |
+#### Model Configuration
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--model` | OpenAI model to use | gpt-4o | `--model "gpt-3.5-turbo"` |
+| `--temperature` | Generation temperature | 0.2 | `--temperature 0.7` |
+| `--max-tokens` | Maximum tokens per response | 2048 | `--max-tokens 4096` |
+| `--api-key` | OpenAI API key | None | `--api-key "sk-..."` |
+
+#### Data Processing
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--data-path` | Path to dataset | ./data/train | `--data-path "./my_data"` |
+| `--sample-size` | Number of examples | None (all) | `--sample-size 100` |
+| `--random-seed` | Random seed | 42 | `--random-seed 123` |
+| `--concurrent-requests` | Parallel API requests | 5 | `--concurrent-requests 10` |
+
+#### Output Configuration
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--output-dir` | Directory for outputs | ./synthesis_results | `--output-dir "./results"` |
+| `--quiet` | Suppress verbose output | False | `--quiet` |
+
+#### Example Commands
+
+1. Basic Synthesis:
+```bash
+python src/data_synthesis/gpt4o_generated.py \
+    --model "gpt-4o" \
+    --data-path "/path/to/dataset" \
+    --api-key "your-api-key"
+```
+
+2. Advanced Synthesis:
+```bash
+python src/data_synthesis/gpt4o_generated.py \
+    --model "gpt-4o" \
+    --data-path "/path/to/dataset" \
+    --sample-size 100 \
+    --temperature 0.2 \
+    --max-tokens 2048 \
+    --concurrent-requests 5 \
+    --output-dir "./synthesis_results" \
+    --random-seed 42
+```
 
 ### Monitoring Arguments
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--prompt-track-diversity` | Track prompt diversity | True |
-| `--prompt-track-quality` | Track quality metrics | True |
-| `--prompt-interactive` | Interactive selection | False |
-| `--max-prompts-to-save` | Max prompts to save | 100 |
+These arguments control the monitoring and visualization of training progress:
+
+| Argument | Description | Default | Example Use Case |
+|----------|-------------|---------|-----------------|
+| `--prompt-track-diversity` | Track prompt diversity | True | Monitor variety in generated prompts |
+| `--prompt-track-quality` | Track quality metrics | True | Monitor prompt effectiveness |
+| `--prompt-interactive` | Interactive selection | False | Manual prompt curation |
+| `--prompt-categorize` | Auto-categorize prompts | True | Organize prompts by type |
+| `--prompt-comparison` | Compare prompts | True | Analyze prompt differences |
+| `--max-prompts-to-save` | Max prompts to save | 100 | Limit storage usage |
+
+#### Example Monitoring Setup:
+```bash
+python src/run.py \
+    --experiment-name "monitored_run" \
+    --prompt-track-diversity \
+    --prompt-track-quality \
+    --prompt-interactive \
+    --max-prompts-to-save 200 \
+    --logging-steps 50
+```
+
+### Additional Features
+
+1. **Test Modes**:
+   - `--test-mode`: Use only 2 examples for quick testing
+   - `--test-training-mode`: Use one batch for minimal training testing
+
+2. **Hub Integration**:
+   - `--push-strategy`: Choose when to push to hub (best/end/all/no)
+   - `--private`: Make the repository private
+
+3. **Advanced Training**:
+   - `--train-on-responses-only`: Focus training on responses
+   - `--use-flash-attention`: Enable Flash Attention 2
+   - `--attention-implementation`: Choose attention implementation
 
 ## 🎯 Features
 
