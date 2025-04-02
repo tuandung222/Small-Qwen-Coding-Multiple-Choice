@@ -21,8 +21,8 @@ import wandb
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from src.data.prompt_creator import PromptCreator
 from src.model.qwen_handler import ModelSource, QwenModelHandler
+from src.prompt_processors.prompt_creator import PromptCreator
 from src.train import setup_model_and_trainer, setup_wandb_logging, train
 from src.training.callbacks import EarlyStoppingCallback, ValidationCallback
 from src.training.trainer import QwenTrainer

@@ -10,9 +10,9 @@ from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArgum
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
 
-from src.data.prompt_creator import PromptCreator
-from src.data.response_parser import ResponseParser
 from src.model.qwen_handler import HubConfig, QwenModelHandler
+from src.prompt_processors.prompt_creator import PromptCreator
+from src.prompt_processors.response_parser import ResponseParser
 from src.utils.auth import setup_authentication
 
 from .callbacks import EarlyStoppingCallback, ValidationCallback
@@ -558,6 +558,7 @@ class QwenTrainer:
         random_seed: int = 42,
         push_to_hub_strategy: str = "end",
         wandb_config: Optional[Dict[str, Any]] = None,
+        optimizer_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Train the model with comprehensive configuration and monitoring.
@@ -590,6 +591,11 @@ class QwenTrainer:
           * "all": Push after each save
           * "no": Don't push to hub
 
+        Optimizer Configuration:
+        - Configurable optimizer type: adamw_torch, adamw_hf, adam8bit, pagedadam, lion, adafactor
+        - Customizable optimizer parameters (beta1, beta2, epsilon, etc.)
+        - Support for 8-bit optimizers for memory efficiency
+
         Args:
             train_dataset: Dataset for training
             val_dataset: Optional dataset for validation
@@ -612,6 +618,7 @@ class QwenTrainer:
             random_seed: Random seed for dataset splitting and shuffling
             push_to_hub_strategy: When to push to hub ("end", "best", "all", "no")
             wandb_config: Optional configuration for Weights & Biases logging
+            optimizer_config: Optional configuration for optimizer selection and parameters
 
         Returns:
             Dict containing training metrics and results
@@ -703,6 +710,20 @@ class QwenTrainer:
             )
         warmup_steps = int(total_steps * warmup_ratio)
 
+        # Default optimizer config if not provided
+        if optimizer_config is None:
+            optimizer_config = {
+                "optimizer_type": "adamw_torch",
+                "weight_decay": 0.01,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "epsilon": 1e-8,
+                "max_grad_norm": 1.0,
+                "optim_bits": 8,
+            }
+
+        logger.info(f"Using optimizer: {optimizer_config['optimizer_type']}")
+
         # Setup training arguments
         training_args_dict = {
             # Basic training configuration
@@ -727,8 +748,12 @@ class QwenTrainer:
             "fp16": not is_bf16_supported(),
             "bf16": is_bf16_supported(),
             # Optimizer configuration
-            "optim": "paged_adamw_8bit",
-            "weight_decay": 0.01,
+            "optim": optimizer_config["optimizer_type"],
+            "weight_decay": optimizer_config["weight_decay"],
+            "adam_beta1": optimizer_config["beta1"],
+            "adam_beta2": optimizer_config["beta2"],
+            "adam_epsilon": optimizer_config["epsilon"],
+            "max_grad_norm": optimizer_config["max_grad_norm"],
             # Integration configuration
             "report_to": "wandb",
             "push_to_hub": bool(self.destination_hub_config),

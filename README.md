@@ -169,6 +169,9 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
               [--push-strategy {best,end,all,no}]
               [--save-total-limit SAVE_TOTAL_LIMIT] [--dataset DATASET]
               [--val-split VAL_SPLIT] [--random-seed RANDOM_SEED]
+              [--optimizer OPTIMIZER] [--adam-beta1 ADAM_BETA1] [--adam-beta2 ADAM_BETA2]
+              [--adam-epsilon ADAM_EPSILON] [--max-grad-norm MAX_GRAD_NORM]
+              [--optim-bits OPTIM_BITS]
 ```
 
 ### Key Parameters
@@ -191,6 +194,33 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
 | `--test-mode` | Use only 2 examples | False |
 | `--test-training-mode` | Use only one batch of data | False |
 
+### Optimizer Configuration
+
+You can customize the optimizer used during training with the following parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--optimizer` | Optimizer type | adamw_torch |
+| `--weight-decay` | Weight decay for regularization | 0.01 |
+| `--adam-beta1` | Beta1 for Adam-based optimizers | 0.9 |
+| `--adam-beta2` | Beta2 for Adam-based optimizers | 0.999 |
+| `--adam-epsilon` | Epsilon for Adam-based optimizers | 1e-8 |
+| `--max-grad-norm` | Maximum gradient norm for clipping | 1.0 |
+| `--optim-bits` | Quantization bits for 8-bit optimizers | 8 |
+
+The `--optimizer` parameter supports several options:
+- `adamw_torch`: PyTorch's AdamW implementation (default)
+- `adamw_hf`: Hugging Face's AdamW implementation
+- `adam8bit`: 8-bit Adam for memory efficiency
+- `pagedadam`: Paged Adam for large models
+- `lion`: Lion optimizer (less memory, potentially better generalization)
+- `adafactor`: Adafactor optimizer (memory efficient alternative to Adam)
+
+Example usage with custom optimizer:
+```python
+python -m src.run --experiment-name lion_test --optimizer lion --weight-decay 0.02 --adam-beta1 0.9 --adam-beta2 0.99
+```
+
 For the complete list of parameters, run `python -m src.run --help`.
 
 ### Inference
@@ -199,8 +229,8 @@ You can use the trained model for inference:
 
 ```python
 from model.qwen_handler import QwenModelHandler
-from data.prompt_creator import PromptCreator
-from data.response_parser import ResponseParser
+from prompt_processors.prompt_creator import PromptCreator
+from prompt_processors.response_parser import ResponseParser
 
 # Initialize model handler
 model_handler = QwenModelHandler(
@@ -234,7 +264,7 @@ print(f"Reasoning: {result['reasoning']}")
 
 ```
 ├── src/
-│   ├── data/
+│   ├── prompt_processors/
 │   │   ├── prompt_creator.py  # Creates TEACHER_REASONED training and YAML_REASONING inference prompts
 │   │   └── response_parser.py  # Parses model responses
 │   ├── model/

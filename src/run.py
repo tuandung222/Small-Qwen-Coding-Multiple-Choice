@@ -13,8 +13,8 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
-from src.data.prompt_creator import PromptCreator
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
+from src.prompt_processors.prompt_creator import PromptCreator
 from src.training.callbacks import EarlyStoppingCallback, ValidationCallback
 from src.training.trainer import QwenTrainer
 from src.utils.auth import setup_authentication
@@ -287,6 +287,34 @@ def parse_args():
         help="Random seed for reproducibility",
     )
 
+    # Optimizer configuration
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw_torch",
+        choices=["adamw_torch", "adamw_hf", "adam8bit", "pagedadam", "lion", "adafactor"],
+        help="Optimizer to use for training",
+    )
+    parser.add_argument(
+        "--adam-beta1", type=float, default=0.9, help="Beta1 for Adam-based optimizers"
+    )
+    parser.add_argument(
+        "--adam-beta2", type=float, default=0.999, help="Beta2 for Adam-based optimizers"
+    )
+    parser.add_argument(
+        "--adam-epsilon", type=float, default=1e-8, help="Epsilon for Adam-based optimizers"
+    )
+    parser.add_argument(
+        "--max-grad-norm", type=float, default=1.0, help="Maximum gradient norm for clipping"
+    )
+    parser.add_argument(
+        "--optim-bits",
+        type=int,
+        default=8,
+        choices=[8, 32],
+        help="Quantization bits for 8-bit optimizers",
+    )
+
     return parser.parse_args()
 
 
@@ -552,8 +580,20 @@ def main():
         }
         push_to_hub_strategy = push_strategy_map.get(args.push_strategy, "best")
 
+        # Configure optimizer parameters
+        optimizer_config = {
+            "optimizer_type": args.optimizer,
+            "weight_decay": args.weight_decay,
+            "beta1": args.adam_beta1,
+            "beta2": args.adam_beta2,
+            "epsilon": args.adam_epsilon,
+            "max_grad_norm": args.max_grad_norm,
+            "optim_bits": args.optim_bits,
+        }
+
         # Start training
         logger.info("Starting training with all callbacks enabled...")
+        logger.info(f"Using optimizer: {args.optimizer}")
         results = trainer.train(
             train_dataset=train_dataset,
             val_split=args.val_split,
@@ -579,6 +619,8 @@ def main():
             random_seed=args.random_seed,
             # Pass the callbacks
             callbacks=callbacks,
+            # Optimizer configuration
+            optimizer_config=optimizer_config,
         )
 
         # Log results
