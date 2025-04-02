@@ -340,6 +340,7 @@ class ModelLoadingAlertCallback(TrainerCallback):
         """
         self.use_unsloth = use_unsloth
         self.alert_shown = False
+        self.trainer = None
 
     def on_train_begin(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs

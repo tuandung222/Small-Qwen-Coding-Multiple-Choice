@@ -916,6 +916,11 @@ class QwenTrainer:
         self.trainer.add_callback(prompt_monitor)
         self.trainer.add_callback(model_loading_alert)
 
+        # Set trainer attribute for callbacks that need it
+        lr_monitor.trainer = self.trainer
+        prompt_monitor.trainer = self.trainer
+        model_loading_alert.trainer = self.trainer
+
         logger.info("Added monitoring callbacks: learning rate, prompts, and model loading alerts")
 
         # Run training

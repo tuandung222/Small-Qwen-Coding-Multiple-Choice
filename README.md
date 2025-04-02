@@ -1,6 +1,6 @@
 # Qwen-Coder-MCQ: Fine-tuning Qwen2.5 for Multiple-Choice Coding Questions
 
-This project provides a framework for fine-tuning Qwen2.5-Coder-1.5B-Instruct models on multiple-choice coding questions with structured reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
+This project provides a framework for fine-tuning **Qwen2.5-Coder-1.5B-Instruct** models on multiple-choice coding questions with structured reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
 
 ## Features
 
