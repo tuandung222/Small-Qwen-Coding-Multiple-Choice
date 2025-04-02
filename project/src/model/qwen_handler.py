@@ -20,7 +20,7 @@ class QwenModelHandler:
     def __init__(
         self,
         model_name: str = "Qwen/Qwen1.5-7B",
-        max_seq_length: int = 768,
+        max_seq_length: int = 2048,
         quantization: Optional[str] = None,
         device_map: str = "auto",
         cache_dir: Optional[str] = None,
@@ -137,29 +137,22 @@ class QwenModelHandler:
         
         return tokenizer, model
       
-    def generate_with_streaming(
-        self,
-        prompt: str,
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
-        stream: bool = True
-    ) -> Union[str, TextIteratorStreamer]:
+    def generate_with_streaming(self, prompt, temperature=0.7, max_tokens=2048, stream=True):
         """
-        Generate completion with optional streaming
+        Generate completion with optional streaming and error handling
         
         Args:
-            prompt: Input prompt text
+            prompt: Input prompt
             temperature: Sampling temperature
-            max_tokens: Maximum number of tokens to generate
+            max_tokens: Maximum tokens to generate
             stream: Whether to stream the output
             
         Returns:
-            Either the generated text or a streamer object
+            Generated text (even when streaming is enabled)
         """
         try:
-            # Enable faster inference for Unsloth models
-            if self.model_source == ModelSource.UNSLOTH:
-                FastLanguageModel.for_inference(self.model)
+            # Enable faster inference
+            FastLanguageModel.for_inference(self.model)
             
             # Format as chat
             messages = [{"role": "user", "content": prompt}]
@@ -169,45 +162,82 @@ class QwenModelHandler:
                 add_generation_prompt=True
             )
             
-            # Tokenize input
-            model_inputs = self.tokenizer([chat_text], return_tensors="pt").to(self.model.device)
+            # Tokenize input with proper padding
+            model_inputs = self.tokenizer(
+                [chat_text], 
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_attention_mask=True,
+            ).to(self.model.device)
             
-            # Generate with streaming if requested
+            # Add position IDs explicitly
+            seq_length = model_inputs.input_ids.shape[1]
+            position_ids = torch.arange(seq_length, dtype=torch.int32).unsqueeze(0).to(self.model.device)
+            model_inputs["position_ids"] = position_ids
+            
             if stream:
-                # Set up streamer
-                streamer = TextIteratorStreamer(
+                from transformers import TextStreamer
+                
+                # Use TextStreamer for better notebook integration
+                streamer = TextStreamer(
                     self.tokenizer,
                     skip_prompt=True,
                     skip_special_tokens=True
                 )
                 
-                # Start generation in a thread
-                generation_kwargs = {
-                    "input_ids": model_inputs.input_ids,
-                    "attention_mask": model_inputs.attention_mask,
-                    "temperature": temperature,
-                    "max_new_tokens": max_tokens,
-                    "streamer": streamer,
-                    "do_sample": temperature > 0.0,
-                    "use_cache": True,
-                    "min_p": 0.1 if temperature > 0.0 else None,
-                }
-                
-                thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
-                thread.start()
-                
-                return streamer
-            else:
-                # Generate without streaming
+                # Generate with streaming
                 generated_ids = self.model.generate(
                     input_ids=model_inputs.input_ids,
                     attention_mask=model_inputs.attention_mask,
+                    position_ids=model_inputs.position_ids,
                     temperature=temperature,
                     max_new_tokens=max_tokens,
+                    streamer=streamer,
                     do_sample=temperature > 0.0,
                     use_cache=True,
                     min_p=0.1 if temperature > 0.0 else None,
+                    return_dict_in_generate=True,
+                    output_scores=False,
                 )
+                
+                # Decode the generated text
+                generated_text = self.tokenizer.decode(
+                    generated_ids.sequences[0][model_inputs.input_ids.shape[1]:],
+                    skip_special_tokens=True
+                )
+                
+                return generated_text
+                
+            else:
+                # Generate without streaming
+                try:
+                    generated_ids = self.model.generate(
+                        input_ids=model_inputs.input_ids,
+                        attention_mask=model_inputs.attention_mask,
+                        position_ids=model_inputs.position_ids,
+                        temperature=temperature,
+                        max_new_tokens=max_tokens,
+                        do_sample=temperature > 0.0,
+                        use_cache=True,
+                        min_p=0.1 if temperature > 0.0 else None,
+                    )
+                except RuntimeError as e:
+                    if "shape" in str(e) and "position" in str(e).lower():
+                        # Fallback: try without explicit position IDs
+                        print("Falling back to generation without explicit position IDs...")
+                        generated_ids = self.model.generate(
+                            input_ids=model_inputs.input_ids,
+                            attention_mask=model_inputs.attention_mask,
+                            temperature=temperature,
+                            max_new_tokens=max_tokens,
+                            do_sample=temperature > 0.0,
+                            use_cache=True,
+                            min_p=0.1 if temperature > 0.0 else None,
+                        )
+                    else:
+                        raise
                 
                 # Decode the generated text
                 generated_text = self.tokenizer.decode(
@@ -219,7 +249,7 @@ class QwenModelHandler:
                 
         except Exception as e:
             print(f"Error during generation: {str(e)}")
-            raise
+            return f"Error during generation: {str(e)}"
             
     def calculate_perplexity(self, prompt: str, answer: str, temperature: float = 0.0) -> float:
         """
