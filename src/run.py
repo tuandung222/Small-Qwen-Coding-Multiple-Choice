@@ -243,6 +243,44 @@ def parse_args():
         help="Number of steps between model checkpoints (test modes)",
     )
 
+    # Prompt monitoring configuration
+    parser.add_argument(
+        "--prompt-track-diversity",
+        action="store_true",
+        default=True,
+        help="Track prompt diversity during training",
+    )
+    parser.add_argument(
+        "--prompt-track-quality",
+        action="store_true",
+        default=True,
+        help="Track prompt quality metrics during training",
+    )
+    parser.add_argument(
+        "--prompt-interactive",
+        action="store_true",
+        default=False,
+        help="Enable interactive prompt selection mode",
+    )
+    parser.add_argument(
+        "--prompt-categorize",
+        action="store_true",
+        default=True,
+        help="Automatically categorize prompts",
+    )
+    parser.add_argument(
+        "--prompt-comparison",
+        action="store_true",
+        default=True,
+        help="Enable prompt comparison features",
+    )
+    parser.add_argument(
+        "--max-prompts-to-save",
+        type=int,
+        default=100,
+        help="Maximum number of prompts to save for analysis",
+    )
+
     # LoRA configuration
     parser.add_argument("--lora-r", type=int, default=8, help="LoRA attention dimension")
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter")
@@ -760,10 +798,23 @@ def main():
 
         # Prompt monitor callback
         prompt_monitor = PromptMonitorCallback(
-            dataset=train_dataset, tokenizer=trainer.tokenizer, logging_steps=args.logging_steps
+            dataset=train_dataset,
+            tokenizer=trainer.tokenizer,
+            logging_steps=args.logging_steps,
+            save_to_file=True,
+            log_to_wandb=True,
+            max_prompts_to_save=args.max_prompts_to_save,
+            analyze_tokens=True,
+            show_token_stats=True,
+            output_dir=output_dir,
+            track_diversity=args.prompt_track_diversity,
+            track_quality=args.prompt_track_quality,
+            enable_interactive=args.prompt_interactive,
+            categorize_prompts=args.prompt_categorize,
+            enable_comparison=args.prompt_comparison,
         )
         callbacks.append(prompt_monitor)
-        logger.info("Added prompt monitoring callback")
+        logger.info("Added prompt monitoring callback with enhanced visualization features")
 
         # Model loading alert callback
         model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)

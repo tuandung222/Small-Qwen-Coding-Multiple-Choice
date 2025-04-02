@@ -1,5 +1,7 @@
 import logging
+import os
 import random
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -278,27 +280,413 @@ class LRMonitorCallback(TrainerCallback):
 
 
 class PromptMonitorCallback(TrainerCallback):
-    """Custom callback to show random prompts during training."""
+    """Custom callback to show random prompts during training with enhanced visualization."""
 
-    def __init__(self, dataset: Dataset, tokenizer: Any, logging_steps: int = 10):
+    def __init__(
+        self,
+        dataset: Dataset,
+        tokenizer: Any,
+        logging_steps: int = 10,
+        save_to_file: bool = True,
+        log_to_wandb: bool = True,
+        max_prompts_to_save: int = 100,
+        analyze_tokens: bool = True,
+        show_token_stats: bool = True,
+        output_dir: Optional[str] = None,
+        track_diversity: bool = True,
+        track_quality: bool = True,
+        enable_interactive: bool = False,
+        categorize_prompts: bool = True,
+        enable_comparison: bool = False,
+    ):
         """
-        Initialize the prompt monitor callback.
+        Initialize the prompt monitor callback with enhanced features.
 
         Args:
             dataset: The training dataset
             tokenizer: The tokenizer used for the model
             logging_steps: Number of steps between showing prompts
+            save_to_file: Whether to save prompts to a file in the experiment folder
+            log_to_wandb: Whether to log prompts to wandb
+            max_prompts_to_save: Maximum number of prompts to save to file
+            analyze_tokens: Whether to analyze token distribution
+            show_token_stats: Whether to show token statistics in terminal
+            output_dir: Directory to save prompt files (defaults to trainer output_dir)
+            track_diversity: Whether to track prompt diversity over time
+            track_quality: Whether to track prompt quality metrics
+            enable_interactive: Whether to enable interactive prompt selection
+            categorize_prompts: Whether to categorize prompts automatically
+            enable_comparison: Whether to enable prompt comparison features
         """
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.logging_steps = logging_steps
         self.last_prompt = None
         self.last_prompt_idx = None
+        self.save_to_file = save_to_file
+        self.log_to_wandb = log_to_wandb
+        self.max_prompts_to_save = max_prompts_to_save
+        self.analyze_tokens = analyze_tokens
+        self.show_token_stats = show_token_stats
+        self.output_dir = output_dir
+        self.prompt_history = []
+        self.trainer = None
+        self.prompt_file = None
+        self.prompt_file_path = None
+
+        # New features
+        self.track_diversity = track_diversity
+        self.track_quality = track_quality
+        self.enable_interactive = enable_interactive
+        self.categorize_prompts = categorize_prompts
+        self.enable_comparison = enable_comparison
+
+        # Initialize diversity tracking
+        self.diversity_scores = []
+        self.last_prompt_embedding = None
+
+        # Initialize quality tracking
+        self.quality_scores = []
+
+        # Initialize categorization
+        self.prompt_categories = {}
+        self.category_counts = {}
+
+        # Initialize comparison data
+        self.comparison_prompts = []
+
+        # For interactive mode
+        self.interactive_mode = False
+        self.marked_prompts = set()
+
+    def on_train_begin(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ) -> TrainerControl:
+        """Initialize prompt file at the beginning of training."""
+        if self.save_to_file and self.output_dir is None:
+            self.output_dir = args.output_dir
+
+        if self.save_to_file and self.output_dir:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.prompt_file_path = os.path.join(self.output_dir, "prompt_history.json")
+            self.prompt_file = open(self.prompt_file_path, "w")
+            self.prompt_file.write("[\n")  # Start JSON array
+            logger.info(f"Saving prompts to {self.prompt_file_path}")
+
+            # Create additional files for enhanced features
+            if self.track_diversity:
+                diversity_file = os.path.join(self.output_dir, "prompt_diversity.json")
+                with open(diversity_file, "w") as f:
+                    f.write("[]")
+                logger.info(f"Created diversity tracking file: {diversity_file}")
+
+            if self.track_quality:
+                quality_file = os.path.join(self.output_dir, "prompt_quality.json")
+                with open(quality_file, "w") as f:
+                    f.write("[]")
+                logger.info(f"Created quality tracking file: {quality_file}")
+
+            if self.categorize_prompts:
+                categories_file = os.path.join(self.output_dir, "prompt_categories.json")
+                with open(categories_file, "w") as f:
+                    f.write("{}")
+                logger.info(f"Created categories file: {categories_file}")
+
+        return control
+
+    def on_train_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ) -> TrainerControl:
+        """Close prompt file at the end of training and save additional data."""
+        if self.save_to_file and self.prompt_file:
+            self.prompt_file.write("\n]")  # End JSON array
+            self.prompt_file.close()
+            logger.info(f"Saved {len(self.prompt_history)} prompts to {self.prompt_file_path}")
+
+            # Save additional data
+            if self.track_diversity and self.output_dir:
+                diversity_file = os.path.join(self.output_dir, "prompt_diversity.json")
+                with open(diversity_file, "w") as f:
+                    import json
+
+                    json.dump(self.diversity_scores, f, indent=2)
+                logger.info(f"Saved diversity scores to {diversity_file}")
+
+            if self.track_quality and self.output_dir:
+                quality_file = os.path.join(self.output_dir, "prompt_quality.json")
+                with open(quality_file, "w") as f:
+                    import json
+
+                    json.dump(self.quality_scores, f, indent=2)
+                logger.info(f"Saved quality scores to {quality_file}")
+
+            if self.categorize_prompts and self.output_dir:
+                categories_file = os.path.join(self.output_dir, "prompt_categories.json")
+                with open(categories_file, "w") as f:
+                    import json
+
+                    json.dump(self.category_counts, f, indent=2)
+                logger.info(f"Saved category counts to {categories_file}")
+
+            if self.enable_comparison and self.output_dir and self.comparison_prompts:
+                comparison_file = os.path.join(self.output_dir, "prompt_comparisons.json")
+                with open(comparison_file, "w") as f:
+                    import json
+
+                    json.dump(self.comparison_prompts, f, indent=2)
+                logger.info(f"Saved comparison data to {comparison_file}")
+
+        return control
+
+    def _analyze_tokens(self, text: str) -> Dict[str, Any]:
+        """Analyze token distribution in the prompt."""
+        tokens = self.tokenizer.encode(text)
+        token_ids = tokens
+        token_texts = [self.tokenizer.decode([t]) for t in tokens]
+
+        # Count token frequencies
+        token_freq = {}
+        for token_id in token_ids:
+            token_freq[token_id] = token_freq.get(token_id, 0) + 1
+
+        # Sort by frequency
+        sorted_tokens = sorted(token_freq.items(), key=lambda x: x[1], reverse=True)
+
+        # Get top tokens
+        top_tokens = sorted_tokens[:10]
+        top_token_texts = [(self.tokenizer.decode([t[0]]), t[1]) for t in top_tokens]
+
+        return {
+            "token_count": len(tokens),
+            "unique_tokens": len(token_freq),
+            "top_tokens": top_token_texts,
+            "token_ids": token_ids,
+            "token_texts": token_texts,
+        }
+
+    def _calculate_prompt_quality(self, text: str) -> Dict[str, float]:
+        """Calculate quality metrics for the prompt."""
+        # Basic quality metrics
+        metrics = {
+            "length": len(text),
+            "word_count": len(text.split()),
+            "avg_word_length": sum(len(word) for word in text.split()) / max(1, len(text.split())),
+            "sentence_count": text.count(".") + text.count("!") + text.count("?"),
+            "question_count": text.count("?"),
+            "code_block_count": text.count("```"),
+        }
+
+        # Calculate complexity (simple approximation)
+        words = text.split()
+        unique_words = set(words)
+        metrics["vocabulary_richness"] = len(unique_words) / max(1, len(words))
+
+        # Calculate readability (Flesch-Kincaid approximation)
+        if metrics["sentence_count"] > 0:
+            metrics["readability"] = (
+                0.39 * (len(words) / metrics["sentence_count"])
+                + 11.8 * (len(unique_words) / len(words))
+                - 15.59
+            )
+        else:
+            metrics["readability"] = 0
+
+        return metrics
+
+    def _calculate_prompt_diversity(self, text: str) -> float:
+        """Calculate diversity score compared to previous prompts."""
+        if not self.prompt_history:
+            return 1.0  # First prompt is considered maximally diverse
+
+        # Simple token-based diversity
+        current_tokens = set(self.tokenizer.encode(text))
+
+        # Calculate Jaccard similarity with previous prompts
+        similarities = []
+        for prev_prompt in self.prompt_history[-5:]:  # Compare with last 5 prompts
+            prev_tokens = set(prev_prompt.get("token_analysis", {}).get("token_ids", []))
+            if prev_tokens:
+                intersection = len(current_tokens.intersection(prev_tokens))
+                union = len(current_tokens.union(prev_tokens))
+                similarity = intersection / max(1, union)
+                similarities.append(similarity)
+
+        # Diversity is inverse of average similarity
+        avg_similarity = sum(similarities) / max(1, len(similarities))
+        diversity = 1.0 - avg_similarity
+
+        return diversity
+
+    def _categorize_prompt(self, text: str) -> str:
+        """Categorize the prompt based on content."""
+        # Simple keyword-based categorization
+        text_lower = text.lower()
+
+        if "function" in text_lower or "def " in text_lower:
+            return "function_definition"
+        elif "class" in text_lower or "object" in text_lower:
+            return "class_definition"
+        elif "error" in text_lower or "exception" in text_lower:
+            return "error_handling"
+        elif "loop" in text_lower or "for " in text_lower or "while " in text_lower:
+            return "loops"
+        elif "if " in text_lower or "else" in text_lower:
+            return "conditionals"
+        elif "import" in text_lower or "from " in text_lower:
+            return "imports"
+        elif "return" in text_lower:
+            return "return_statements"
+        elif "?" in text_lower:
+            return "questions"
+        elif "```" in text_lower:
+            return "code_blocks"
+        else:
+            return "general"
+
+    def _save_prompt_to_file(self, prompt_data: Dict[str, Any]) -> None:
+        """Save prompt data to file."""
+        if not self.save_to_file or not self.prompt_file:
+            return
+
+        # Add comma if not the first entry
+        if self.prompt_history:
+            self.prompt_file.write(",\n")
+
+        # Write prompt data as JSON
+        import json
+
+        json.dump(prompt_data, self.prompt_file, indent=2)
+
+        # Add to history
+        self.prompt_history.append(prompt_data)
+
+        # Trim history if needed
+        if len(self.prompt_history) > self.max_prompts_to_save:
+            logger.warning(f"Reached maximum prompts to save ({self.max_prompts_to_save})")
+
+        # Update category counts
+        if self.categorize_prompts and "category" in prompt_data:
+            category = prompt_data["category"]
+            self.category_counts[category] = self.category_counts.get(category, 0) + 1
+
+    def _log_to_wandb(self, prompt_data: Dict[str, Any]) -> None:
+        """Log prompt data to wandb."""
+        if not self.log_to_wandb:
+            return
+
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                # Create a table for the prompt
+                prompt_table = wandb.Table(
+                    columns=["step", "prompt", "token_count", "unique_tokens", "category"]
+                )
+                prompt_table.add_data(
+                    prompt_data["step"],
+                    prompt_data["prompt"],
+                    prompt_data["token_analysis"]["token_count"],
+                    prompt_data["token_analysis"]["unique_tokens"],
+                    prompt_data.get("category", "unknown"),
+                )
+
+                # Log the table
+                wandb.log(
+                    {
+                        "prompts/current": prompt_table,
+                        "prompts/token_count": prompt_data["token_analysis"]["token_count"],
+                        "prompts/unique_tokens": prompt_data["token_analysis"]["unique_tokens"],
+                    }
+                )
+
+                # Log top tokens as a bar chart
+                if "top_tokens" in prompt_data["token_analysis"]:
+                    top_tokens_data = {
+                        token: count for token, count in prompt_data["token_analysis"]["top_tokens"]
+                    }
+                    wandb.log(
+                        {
+                            "prompts/top_tokens": wandb.plot.bar(
+                                wandb.Table(
+                                    data=[[k, v] for k, v in top_tokens_data.items()],
+                                    columns=["token", "count"],
+                                ),
+                                "token",
+                                "count",
+                                title="Top Tokens in Prompt",
+                            )
+                        }
+                    )
+
+                # Log quality metrics if available
+                if "quality_metrics" in prompt_data:
+                    for metric, value in prompt_data["quality_metrics"].items():
+                        wandb.log({f"prompts/quality/{metric}": value})
+
+                # Log diversity score if available
+                if "diversity_score" in prompt_data:
+                    wandb.log({"prompts/diversity_score": prompt_data["diversity_score"]})
+
+                # Log category distribution
+                if self.category_counts:
+                    category_table = wandb.Table(
+                        data=[[k, v] for k, v in self.category_counts.items()],
+                        columns=["category", "count"],
+                    )
+                    wandb.log(
+                        {
+                            "prompts/category_distribution": wandb.plot.bar(
+                                category_table, "category", "count", title="Prompt Categories"
+                            )
+                        }
+                    )
+        except ImportError:
+            logger.warning("wandb not installed, skipping logging")
+        except Exception as e:
+            logger.warning(f"Error logging to wandb: {e}")
+
+    def _handle_interactive_mode(self, prompt_data: Dict[str, Any]) -> None:
+        """Handle interactive prompt selection if enabled."""
+        if not self.enable_interactive:
+            return
+
+        try:
+            import sys
+
+            print("\n" + "=" * 80)
+            print("INTERACTIVE PROMPT MODE")
+            print("=" * 80)
+            print(f"Step: {prompt_data['step']}")
+            print(f"Category: {prompt_data.get('category', 'unknown')}")
+            print(f"Token Count: {prompt_data['token_analysis']['token_count']}")
+            print("-" * 80)
+            print(prompt_data["prompt"])
+            print("-" * 80)
+            print("Options:")
+            print("  [s] Save this prompt for later comparison")
+            print("  [m] Mark this prompt as interesting")
+            print("  [c] Continue to next prompt")
+            print("  [q] Quit interactive mode")
+
+            choice = input("Enter your choice: ").strip().lower()
+
+            if choice == "s":
+                self.comparison_prompts.append(prompt_data)
+                print(f"Saved prompt for comparison. Total saved: {len(self.comparison_prompts)}")
+            elif choice == "m":
+                self.marked_prompts.add(prompt_data["step"])
+                print("Marked prompt as interesting")
+            elif choice == "q":
+                self.interactive_mode = False
+                print("Exiting interactive mode")
+
+        except Exception as e:
+            logger.warning(f"Error in interactive mode: {e}")
 
     def on_step_end(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
     ) -> TrainerControl:
-        """Show a random prompt at each logging step."""
+        """Show a random prompt at each logging step with enhanced visualization."""
         if state.global_step % self.logging_steps == 0:
             try:
                 # Sample a random example that's different from the last one
@@ -316,10 +704,87 @@ class PromptMonitorCallback(TrainerCallback):
 
                 # Only show if it's different from the last one
                 if prompt != self.last_prompt:
+                    # Analyze tokens if enabled
+                    token_analysis = {}
+                    if self.analyze_tokens:
+                        token_analysis = self._analyze_tokens(prompt)
+
+                    # Calculate quality metrics if enabled
+                    quality_metrics = {}
+                    if self.track_quality:
+                        quality_metrics = self._calculate_prompt_quality(prompt)
+                        self.quality_scores.append(
+                            {"step": state.global_step, "metrics": quality_metrics}
+                        )
+
+                    # Calculate diversity score if enabled
+                    diversity_score = 0.0
+                    if self.track_diversity:
+                        diversity_score = self._calculate_prompt_diversity(prompt)
+                        self.diversity_scores.append(
+                            {"step": state.global_step, "score": diversity_score}
+                        )
+
+                    # Categorize prompt if enabled
+                    category = "unknown"
+                    if self.categorize_prompts:
+                        category = self._categorize_prompt(prompt)
+
+                    # Create prompt data
+                    prompt_data = {
+                        "step": state.global_step,
+                        "epoch": state.epoch,
+                        "prompt": prompt,
+                        "example_idx": idx,
+                        "token_analysis": token_analysis,
+                        "quality_metrics": quality_metrics,
+                        "diversity_score": diversity_score,
+                        "category": category,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+
+                    # Save to file
+                    self._save_prompt_to_file(prompt_data)
+
+                    # Log to wandb
+                    self._log_to_wandb(prompt_data)
+
+                    # Handle interactive mode if enabled
+                    if self.enable_interactive and self.interactive_mode:
+                        self._handle_interactive_mode(prompt_data)
+
+                    # Print to terminal
                     print("\n" + "=" * 80)
                     print(f"Random Training Prompt (Step {state.global_step}):")
                     print("-" * 80)
                     print(prompt)
+
+                    # Show token statistics if enabled
+                    if self.show_token_stats and token_analysis:
+                        print("-" * 80)
+                        print(f"Token Count: {token_analysis['token_count']}")
+                        print(f"Unique Tokens: {token_analysis['unique_tokens']}")
+                        print("Top Tokens:")
+                        for token, count in token_analysis.get("top_tokens", [])[:5]:
+                            print(f"  {token}: {count}")
+
+                    # Show quality metrics if enabled
+                    if self.track_quality and quality_metrics:
+                        print("-" * 80)
+                        print("Quality Metrics:")
+                        for metric, value in quality_metrics.items():
+                            print(f"  {metric}: {value:.2f}")
+
+                    # Show diversity score if enabled
+                    if self.track_diversity:
+                        print("-" * 80)
+                        print(f"Diversity Score: {diversity_score:.4f}")
+
+                    # Show category if enabled
+                    if self.categorize_prompts:
+                        print("-" * 80)
+                        print(f"Category: {category}")
+
                     print("=" * 80 + "\n")
                     self.last_prompt = prompt
 

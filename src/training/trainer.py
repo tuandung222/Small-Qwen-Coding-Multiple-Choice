@@ -905,7 +905,15 @@ class QwenTrainer:
 
         # Add the prompt monitor
         prompt_monitor = PromptMonitorCallback(
-            dataset=formatted_train_dataset, tokenizer=self.tokenizer, logging_steps=logging_steps
+            dataset=formatted_train_dataset,
+            tokenizer=self.tokenizer,
+            logging_steps=logging_steps,
+            save_to_file=True,
+            log_to_wandb=True,
+            max_prompts_to_save=100,
+            analyze_tokens=True,
+            show_token_stats=True,
+            output_dir=output_dir,
         )
 
         # Add the model loading alert callback
