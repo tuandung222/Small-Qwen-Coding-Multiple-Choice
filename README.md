@@ -1,12 +1,12 @@
 # Qwen-Coder-MCQ: Fine-tuning Qwen2.5 for Multiple-Choice Coding Questions
 
-This project provides a framework for fine-tuning Qwen2.5 Coder models on multiple-choice coding questions with structured YAML reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
+This project provides a framework for fine-tuning Qwen2.5 Coder models on multiple-choice coding questions with structured reasoning. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation.
 
 ## Features
 
 - **Parameter-efficient fine-tuning** with LoRA
 - **Optimized training** using Unsloth
-- **Structured reasoning** with YAML-format outputs
+- **Multiple reasoning paradigms** including scientific, socratic, legal, and philosophical approaches
 - **Comprehensive evaluation** framework
 - **HuggingFace Hub integration** for model sharing
 - **Flexible configuration** via command line arguments
@@ -54,32 +54,55 @@ The environment variables required are:
 
 ### Training
 
-This project provides several scripts for easy model training:
+The project provides a Python module with a command-line interface for training. You can import the module in your code or run it directly from the command line.
 
-1. **Standard Training** with full customization:
-   ```bash
-   python src/run.py --experiment-name full_training --epochs 3 --batch-size 16
-   ```
+#### Python Module Import
 
-2. **Test Training Mode** for validating with minimal data (one batch):
-   ```bash
-   python src/run.py --test-training-mode --epochs 1 --experiment-name test_batch
-   ```
+```python
+# Import the main module
+from src.run import main
 
-3. **Shell Script Training** with all callbacks enabled:
-   ```bash
-   ./scripts/train_with_callbacks.sh comprehensive_training --batch-size 16
-   ```
+# Run the training with default parameters
+if __name__ == "__main__":
+    main()
+```
 
-4. **Ultra-Fast Test Mode** with just 2 examples:
-   ```bash
-   ./scripts/train_with_callbacks.sh quick_test --test-mode --epochs 1
-   ```
+#### Direct Script Execution
 
-All training methods support extensive configuration. View options with:
+```python
+# Run standard training
+python -m src.run --experiment-name full_training --epochs 3 --batch-size 16
 
-```bash
-python src/run.py --help
+# Run quick test with minimal data
+python -m src.run --test-mode --epochs 1 --experiment-name quick_test
+
+# Run test with a single batch of data
+python -m src.run --test-training-mode --epochs 1 --experiment-name test_batch
+```
+
+#### Training Arguments
+
+You can configure training by defining arguments either programmatically or through the command line:
+
+```python
+# Programmatic configuration example
+import sys
+from src.run import main
+
+# Define command-line arguments
+sys.argv = [
+    "run.py",
+    "--experiment-name", "custom_experiment",
+    "--source-model", "unsloth/Qwen2.5-Coder-1.5B-Instruct",
+    "--prompt-template", "socratic",
+    "--batch-size", "16",
+    "--epochs", "3",
+    "--learning-rate", "2e-4",
+    "--early-stopping-patience", "3"
+]
+
+# Run with these arguments
+main()
 ```
 
 ### Training Output Structure
@@ -102,7 +125,7 @@ You can always access your most recent experiment using the `outputs/latest` sym
 
 ### Using Weights & Biases for Experiment Tracking
 
-All training modes automatically integrate with Weights & Biases (WandB):
+Training automatically integrates with Weights & Biases (WandB):
 
 ```bash
 wandb login
@@ -115,23 +138,57 @@ This enables real-time tracking of:
 - Model gradients
 - Training samples with predictions
 
-### Advanced Configuration
+### Available Reasoning Paradigms
 
-The training script provides extensive configuration options for experimentation:
+The model supports multiple reasoning paradigms through different prompt templates:
 
-```bash
-python src/run.py \
-  --experiment-name lora_config_test \
-  --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
-  --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v2" \
-  --batch-size 16 \
-  --lora-r 16 \
-  --lora-alpha 64 \
-  --prompt-template "teacher_reasoned" \
-  --push-strategy "best"
+| Template | Description | Best For |
+|----------|-------------|----------|
+| `yaml_reasoning` | Structured YAML format | General purpose |
+| `basic` | Simple answer-only format | Speed, simplicity |
+| `teacher_reasoned` | Teacher-guided reasoning | Learning from experts |
+| `options` | Options-focused format | Multiple choice |
+| `socratic` | Socratic questioning | Educational contexts |
+| `scientist` | Scientific method | Analytical questions |
+| `lawyer` | Legal reasoning | Evidence evaluation |
+| `debugger` | Debugging methodology | Programming questions |
+| `philosopher` | Philosophical analysis | Abstract concepts |
+| `expert_novice` | Expert-novice dialogue | Tutoring scenarios |
+| `pros_cons` | Pros/cons analysis | Decision making |
+| `code_review` | Code review process | Programming reviews |
+| `math_proof` | Mathematical proof | Mathematical problems |
+
+To use a specific paradigm:
+
+```python
+python -m src.run --prompt-template scientist
 ```
 
-#### Key Parameters
+### Complete Command Line Interface
+
+Here's the full syntax for the training module:
+
+```
+usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION_REPO]
+              [--max-seq-length MAX_SEQ_LENGTH] [--quantization {4bit,8bit,none}]
+              [--epochs EPOCHS] [--batch-size BATCH_SIZE] [--grad-accum GRAD_ACCUM]
+              [--learning-rate LEARNING_RATE] [--warmup-ratio WARMUP_RATIO]
+              [--weight-decay WEIGHT_DECAY] [--output-dir OUTPUT_DIR]
+              [--early-stopping-patience EARLY_STOPPING_PATIENCE]
+              [--early-stopping-delta EARLY_STOPPING_DELTA]
+              [--prompt-template {yaml_reasoning,basic,teacher_reasoned,options,socratic,scientist,lawyer,debugger,philosopher,expert_novice,pros_cons,code_review,math_proof}]
+              [--test-mode] [--test-training-mode] [--experiment-name EXPERIMENT_NAME]
+              [--debug-samples DEBUG_SAMPLES] [--logging-steps LOGGING_STEPS]
+              [--save-steps SAVE_STEPS] [--test-logging-steps TEST_LOGGING_STEPS]
+              [--test-save-steps TEST_SAVE_STEPS] [--lora-r LORA_R]
+              [--lora-alpha LORA_ALPHA] [--lora-dropout LORA_DROPOUT] [--private]
+              [--save-method {lora,merged_16bit,merged_4bit,gguf}]
+              [--push-strategy {best,end,all,no}]
+              [--save-total-limit SAVE_TOTAL_LIMIT] [--dataset DATASET]
+              [--val-split VAL_SPLIT] [--random-seed RANDOM_SEED]
+```
+
+### Key Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -143,7 +200,7 @@ python src/run.py \
 | `--learning-rate` | Learning rate | 2e-4 |
 | `--warmup-ratio` | Proportion of steps for warmup | 0.1 |
 | `--weight-decay` | Weight decay for optimizer | 0.01 |
-| `--prompt-template` | Prompt format to use | yaml_reasoning |
+| `--prompt-template` | Reasoning paradigm to use | yaml_reasoning |
 | `--lora-r` | LoRA attention dimension | 8 |
 | `--lora-alpha` | LoRA alpha parameter | 32 |
 | `--quantization` | Model quantization level | 4bit |
@@ -152,7 +209,7 @@ python src/run.py \
 | `--test-mode` | Use only 2 examples | False |
 | `--test-training-mode` | Use only one batch of data | False |
 
-For the complete list of parameters, run `python src/run.py --help`.
+For the complete list of parameters, run `python -m src.run --help`.
 
 ### Inference
 
@@ -171,7 +228,7 @@ model_handler = QwenModelHandler(
 )
 
 # Create prompt
-prompt_creator = PromptCreator(PromptCreator.YAML_REASONING)
+prompt_creator = PromptCreator(PromptCreator.SOCRATIC)  # Use any reasoning paradigm
 question = "Which of these is a valid Python dictionary comprehension?"
 choices = [
     "{x: x**2 for x in range(10)}",
@@ -186,7 +243,7 @@ response = model_handler.generate_with_streaming(prompt, temperature=0.1)
 
 # Parse response
 parser = ResponseParser()
-result = parser.parse_yaml_response(response)
+result = parser.parse_response(response)
 print(f"Answer: {result['answer']}")
 print(f"Reasoning: {result['reasoning']}")
 ```
@@ -196,7 +253,7 @@ print(f"Reasoning: {result['reasoning']}")
 ```
 ├── src/
 │   ├── data/
-│   │   ├── prompt_creator.py  # Creates prompts for the model
+│   │   ├── prompt_creator.py  # Creates prompts with multiple reasoning paradigms
 │   │   └── response_parser.py  # Parses model responses
 │   ├── model/
 │   │   └── qwen_handler.py    # Handles model loading and inference
@@ -209,7 +266,6 @@ print(f"Reasoning: {result['reasoning']}")
 │   │   ├── auth.py            # Authentication utilities
 │   │   └── wandb_logger.py    # Weights & Biases integration
 │   └── run.py                 # Main training script
-├── scripts/                   # Utility scripts
 ├── outputs/                   # Training outputs folder
 │   └── latest                 # Symlink to latest run
 ├── .env.example               # Example environment variables
