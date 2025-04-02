@@ -27,6 +27,11 @@ This project provides a framework for fine-tuning **Qwen2.5-Coder-1.5B-Instruct*
 - [Dataset](#dataset)
 - [Advanced Features](#advanced-features)
 - [Examples and Showcase](#examples-and-showcase)
+- [System Architecture](#system-architecture)
+  - [Overall System Design](#overall-system-design)
+  - [Training Architecture](#training-architecture)
+  - [Data Processing Pipeline](#data-processing-pipeline)
+  - [Monitoring System](#monitoring-system)
 
 ## 🏗️ Architecture
 
