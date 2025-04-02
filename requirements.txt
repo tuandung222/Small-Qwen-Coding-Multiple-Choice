@@ -1,0 +1,31 @@
+# Core deep learning libraries
+torch>=2.2.0
+transformers>=4.41.2
+peft>=0.9.0
+accelerate>=0.30.0
+flash-attn>=2.5.6
+bitsandbytes>=0.43.0
+
+# Unsloth for optimized LLM training
+unsloth>=2024.8.1
+
+# Data processing and utilities
+datasets>=2.18.0
+pandas>=2.2.0
+numpy>=1.26.4
+scikit-learn>=1.4.1
+tqdm>=4.66.2
+pyyaml>=6.0.1
+huggingface_hub>=0.20.3
+
+# Visualization and UI
+matplotlib>=3.8.3
+gradio>=4.19.2
+wandb>=0.16.3
+
+# Testing and API integration
+pytest>=7.4.0
+openai>=1.12.0
+
+# Optional: for GGUF export support
+sentencepiece>=0.1.99
