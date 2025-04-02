@@ -6,7 +6,8 @@ This project provides a framework for fine-tuning Qwen2.5 Coder models on multip
 
 - **Parameter-efficient fine-tuning** with LoRA
 - **Optimized training** using Unsloth
-- **Multiple reasoning paradigms** including scientific, socratic, legal, and philosophical approaches
+- **Structured reasoning** with YAML-format outputs for inference
+- **Teacher-reasoned approach** for training
 - **Comprehensive evaluation** framework
 - **HuggingFace Hub integration** for model sharing
 - **Flexible configuration** via command line arguments
@@ -94,7 +95,6 @@ sys.argv = [
     "run.py",
     "--experiment-name", "custom_experiment",
     "--source-model", "unsloth/Qwen2.5-Coder-1.5B-Instruct",
-    "--prompt-template", "socratic",
     "--batch-size", "16",
     "--epochs", "3",
     "--learning-rate", "2e-4",
@@ -138,31 +138,15 @@ This enables real-time tracking of:
 - Model gradients
 - Training samples with predictions
 
-### Available Reasoning Paradigms
+### Prompt Format
 
-The model supports multiple reasoning paradigms through different prompt templates:
+This project uses two specific prompt formats:
 
-| Template | Description | Best For |
-|----------|-------------|----------|
-| `yaml_reasoning` | Structured YAML format | General purpose |
-| `basic` | Simple answer-only format | Speed, simplicity |
-| `teacher_reasoned` | Teacher-guided reasoning | Learning from experts |
-| `options` | Options-focused format | Multiple choice |
-| `socratic` | Socratic questioning | Educational contexts |
-| `scientist` | Scientific method | Analytical questions |
-| `lawyer` | Legal reasoning | Evidence evaluation |
-| `debugger` | Debugging methodology | Programming questions |
-| `philosopher` | Philosophical analysis | Abstract concepts |
-| `expert_novice` | Expert-novice dialogue | Tutoring scenarios |
-| `pros_cons` | Pros/cons analysis | Decision making |
-| `code_review` | Code review process | Programming reviews |
-| `math_proof` | Mathematical proof | Mathematical problems |
+1. **TEACHER_REASONED**: Default format for training the model. This provides a teacher-guided reasoning approach that helps the model learn step-by-step problem solving.
 
-To use a specific paradigm:
+2. **YAML_REASONING**: Default format for inference. This provides structured YAML output that's easy to parse and use in applications.
 
-```python
-python -m src.run --prompt-template scientist
-```
+These prompt formats are designed to work together, with the TEACHER_REASONED format providing rich training data and the YAML_REASONING format providing clean, structured outputs during inference.
 
 ### Complete Command Line Interface
 
@@ -176,7 +160,6 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
               [--weight-decay WEIGHT_DECAY] [--output-dir OUTPUT_DIR]
               [--early-stopping-patience EARLY_STOPPING_PATIENCE]
               [--early-stopping-delta EARLY_STOPPING_DELTA]
-              [--prompt-template {yaml_reasoning,basic,teacher_reasoned,options,socratic,scientist,lawyer,debugger,philosopher,expert_novice,pros_cons,code_review,math_proof}]
               [--test-mode] [--test-training-mode] [--experiment-name EXPERIMENT_NAME]
               [--debug-samples DEBUG_SAMPLES] [--logging-steps LOGGING_STEPS]
               [--save-steps SAVE_STEPS] [--test-logging-steps TEST_LOGGING_STEPS]
@@ -200,7 +183,6 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
 | `--learning-rate` | Learning rate | 2e-4 |
 | `--warmup-ratio` | Proportion of steps for warmup | 0.1 |
 | `--weight-decay` | Weight decay for optimizer | 0.01 |
-| `--prompt-template` | Reasoning paradigm to use | yaml_reasoning |
 | `--lora-r` | LoRA attention dimension | 8 |
 | `--lora-alpha` | LoRA alpha parameter | 32 |
 | `--quantization` | Model quantization level | 4bit |
@@ -227,8 +209,8 @@ model_handler = QwenModelHandler(
     quantization="4bit"  # For efficient inference
 )
 
-# Create prompt
-prompt_creator = PromptCreator(PromptCreator.SOCRATIC)  # Use any reasoning paradigm
+# Create prompt (using YAML_REASONING as the default inference prompt type)
+prompt_creator = PromptCreator(PromptCreator.YAML_REASONING)
 question = "Which of these is a valid Python dictionary comprehension?"
 choices = [
     "{x: x**2 for x in range(10)}",
@@ -243,7 +225,7 @@ response = model_handler.generate_with_streaming(prompt, temperature=0.1)
 
 # Parse response
 parser = ResponseParser()
-result = parser.parse_response(response)
+result = parser.parse_yaml_response(response)
 print(f"Answer: {result['answer']}")
 print(f"Reasoning: {result['reasoning']}")
 ```
@@ -253,7 +235,7 @@ print(f"Reasoning: {result['reasoning']}")
 ```
 ├── src/
 │   ├── data/
-│   │   ├── prompt_creator.py  # Creates prompts with multiple reasoning paradigms
+│   │   ├── prompt_creator.py  # Creates TEACHER_REASONED training and YAML_REASONING inference prompts
 │   │   └── response_parser.py  # Parses model responses
 │   ├── model/
 │   │   └── qwen_handler.py    # Handles model loading and inference
