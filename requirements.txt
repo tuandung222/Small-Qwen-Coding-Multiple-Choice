@@ -6,6 +6,7 @@ accelerate>=0.25.0
 bitsandbytes>=0.41.0
 unsloth>=0.3.0
 lion-pytorch>=0.2.2
+flash-attn>=2.3.0
 
 # Data Processing and Management
 datasets>=2.15.0
