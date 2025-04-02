@@ -1,17 +1,22 @@
 import os
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Union
 
 import torch
 import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
-from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from huggingface_hub import HfApi, snapshot_download, upload_folder
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TextIteratorStreamer,
+)
 from unsloth import FastLanguageModel
 
-from utils.auth import setup_authentication
+from src.utils.auth import setup_authentication
 
 
 class ModelSource(str, Enum):

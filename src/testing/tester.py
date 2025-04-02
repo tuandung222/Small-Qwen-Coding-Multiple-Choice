@@ -9,9 +9,9 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
-from data.prompt_creator import PromptCreator
-from data.response_parser import ResponseParser
-from model.qwen_handler import QwenModelHandler
+from src.data.prompt_creator import PromptCreator
+from src.data.response_parser import ResponseParser
+from src.model.qwen_handler import QwenModelHandler
 
 
 class MultipleChoiceTester:
