@@ -4,23 +4,28 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import huggingface_hub
 import torch
 import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
 from huggingface_hub import HfApi, snapshot_download, upload_folder
+from peft import PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
+    PreTrainedModel,
+    PreTrainedTokenizer,
     TextIteratorStreamer,
 )
 from unsloth import FastLanguageModel
+from unsloth.chat_templates import train_on_responses_only
 
 from src.utils.auth import setup_authentication
+from src.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ModelSource(str, Enum):
@@ -55,7 +60,7 @@ class QwenModelHandler:
         device_map: str = "auto",
         source_hub_config: Optional[HubConfig] = None,
         destination_hub_config: Optional[HubConfig] = None,
-        attn_implementation: str = "default",
+        attn_implementation: str = "eager",
         force_attn_implementation: bool = False,
     ):
         """
@@ -69,7 +74,7 @@ class QwenModelHandler:
             device_map: Device mapping strategy for the model
             source_hub_config: Configuration for the source model on Hugging Face Hub
             destination_hub_config: Configuration for the destination model on Hugging Face Hub
-            attn_implementation: Attention implementation to use (default, flash_attention_2, sdpa, eager, xformers)
+            attn_implementation: Attention implementation to use (eager, flash_attention_2, sdpa, xformers)
             force_attn_implementation: Whether to force the attention implementation even if not optimal
         """
         self.model_name = model_name
@@ -82,6 +87,10 @@ class QwenModelHandler:
         self.attn_implementation = attn_implementation
         self.force_attn_implementation = force_attn_implementation
 
+        # Initialize model and tokenizer
+        self.model: Optional[PreTrainedModel] = None
+        self.tokenizer: Optional[PreTrainedTokenizer] = None
+
         # Log model configuration
         logger.info(f"Loading {model_name} from {model_source}, max_seq_length={max_seq_length}")
 
@@ -90,7 +99,6 @@ class QwenModelHandler:
 
     def _check_attention_support(self):
         """Check if the specified attention implementation is supported on the current hardware"""
-
         # Check for Flash Attention 2 support
         has_flash_attn = False
         try:
@@ -141,7 +149,6 @@ class QwenModelHandler:
 
         # Check PyTorch version for SDPA
         if self.attn_implementation == "sdpa":
-            import torch
             from packaging import version
 
             torch_version = torch.__version__
@@ -192,7 +199,12 @@ class QwenModelHandler:
         """Load the model and tokenizer based on the specified source"""
         try:
             if self.model_source == ModelSource.UNSLOTH:
-                self._load_from_unsloth()
+                try:
+                    self._load_from_unsloth()
+                except Exception as e:
+                    logger.error(f"Failed to load model with Unsloth: {str(e)}")
+                    logger.warning("Falling back to standard HuggingFace loading")
+                    self._load_from_huggingface()
             else:
                 self._load_from_huggingface()
 
@@ -259,7 +271,7 @@ class QwenModelHandler:
             self.model_name,
             token=self.source_hub_config.token if self.source_hub_config else None,
             trust_remote_code=True,
-            padding_side="right",
+            padding_side="left" if attn_implementation == "flash_attention_2" else "right",
             model_max_length=self.max_seq_length,
         )
 
@@ -284,32 +296,27 @@ class QwenModelHandler:
             # Setup model args
             model_args = {
                 "max_seq_length": self.max_seq_length,
+                "dtype": None,
+                "load_in_4bit": self.quantization == "4bit",
+                "load_in_8bit": self.quantization == "8bit",
+                "attn_implementation": attn_implementation,
+                "max_memory": max_memory,
+                "token": self.source_hub_config.token if self.source_hub_config else None,
+                "trust_remote_code": True,
             }
 
-            # Add quantization config
-            if self.quantization == "4bit":
-                model_args["load_in_4bit"] = True
-            elif self.quantization == "8bit":
-                model_args["load_in_8bit"] = True
-
-            # Add attention implementation if not default
-            if attn_implementation != "default":
-                model_args["attn_implementation"] = attn_implementation
-                logger.info(f"Using attention implementation: {attn_implementation}")
-
-            # Load model and tokenizer
+            # Load model and tokenizer using Unsloth
             self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-                model_name=self.model_name,
-                token=self.source_hub_config.token if self.source_hub_config else None,
-                max_memory=max_memory,
-                **model_args,
+                model_name=self.model_name, **model_args
             )
 
-            # Set device map to auto
-            self.model.to_device_map(self.device_map)
+            # Set padding side based on attention implementation
+            if attn_implementation == "flash_attention_2":
+                self.tokenizer.padding_side = "left"
+                logger.info("Set tokenizer padding_side to 'left' for Flash Attention 2")
 
-        except ImportError:
-            logger.error("Unsloth import failed. Please install unsloth with: pip install unsloth")
+        except Exception as e:
+            logger.error(f"Error loading model with Unsloth: {str(e)}")
             raise
 
     def generate_response(
@@ -425,7 +432,7 @@ class QwenModelHandler:
         # Calculate loss
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, labels=target_ids)
-            neg_log_likelihood = outputs.loss.item()
+        neg_log_likelihood = outputs.loss.item()
 
         # Count tokens in answer
         answer_length = target_ids.shape[1] - prompt_length
