@@ -5,9 +5,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-from transformers import TrainerCallback
-
 import wandb
+from transformers import TrainerCallback
 
 from .auth import setup_authentication
 
