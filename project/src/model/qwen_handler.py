@@ -14,6 +14,29 @@ class ModelSource(str, Enum):
     HUGGINGFACE = "huggingface"
     UNSLOTH = "unsloth"
 
+class HubConfig:
+    """Configuration for HuggingFace Hub interactions"""
+    def __init__(
+        self,
+        model_id: str,
+        token: Optional[str] = None,
+        private: bool = False,
+        save_method: str = "lora"
+    ):
+        """
+        Initialize hub configuration
+        
+        Args:
+            model_id: Model ID on HuggingFace Hub (e.g., 'organization/model-name')
+            token: HuggingFace token for authentication
+            private: Whether to make the repository private
+            save_method: Method to use for saving model ("lora", "merged_16bit", "merged_4bit", "gguf")
+        """
+        self.model_id = model_id
+        self.token = token
+        self.private = private
+        self.save_method = save_method
+
 class QwenModelHandler:
     """Handler for Qwen models with inference and saving capabilities"""
     
@@ -26,7 +49,8 @@ class QwenModelHandler:
         cache_dir: Optional[str] = None,
         model_source: str = ModelSource.HUGGINGFACE,
         max_retries: int = 3,
-        retry_delay: int = 5
+        retry_delay: int = 5,
+        source_hub_config: Optional[HubConfig] = None
     ):
         """
         Initialize model and tokenizer
@@ -40,6 +64,7 @@ class QwenModelHandler:
             model_source: Source of the model ("huggingface" or "unsloth")
             max_retries: Maximum number of retries for model loading
             retry_delay: Delay between retries in seconds
+            source_hub_config: Configuration for loading from HuggingFace Hub
         """
         # Setup authentication
         setup_authentication()
@@ -52,6 +77,7 @@ class QwenModelHandler:
         self.model_source = ModelSource(model_source)
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.source_hub_config = source_hub_config
         
         # Convert quantization parameter to load_in_4bit parameter
         self.load_in_4bit = quantization == "4bit"
@@ -113,6 +139,7 @@ class QwenModelHandler:
             dtype=dtype,
             load_in_4bit=self.load_in_4bit,
             cache_dir=self.cache_dir,
+            token=self.source_hub_config.token if self.source_hub_config else None
         )
         
         return tokenizer, model
@@ -124,6 +151,7 @@ class QwenModelHandler:
             self.model_name,
             trust_remote_code=True,
             cache_dir=self.cache_dir,
+            token=self.source_hub_config.token if self.source_hub_config else None
         )
         
         # Load model
@@ -133,6 +161,7 @@ class QwenModelHandler:
             device_map=self.device_map,
             load_in_4bit=self.load_in_4bit,
             cache_dir=self.cache_dir,
+            token=self.source_hub_config.token if self.source_hub_config else None
         )
         
         return tokenizer, model
@@ -320,47 +349,38 @@ class QwenModelHandler:
         print(f"Model saved to {output_dir} using method {save_method}")
         return output_dir
         
-    def push_to_hub(
-        self,
-        repo_id: str,
-        token: Optional[str] = None,
-        save_method: str = "lora",
-        private: bool = False
-    ) -> str:
+    def push_to_hub(self, hub_config: HubConfig) -> str:
         """
         Push model to Hugging Face Hub
         
         Args:
-            repo_id: Repository ID on Hugging Face Hub
-            token: Optional Hugging Face token
-            save_method: Method to use for saving
-            private: Whether to make the repository private
+            hub_config: Configuration for pushing to HuggingFace Hub
             
         Returns:
             URL of the pushed model
         """
         if self.model_source == ModelSource.UNSLOTH:
             # Use Unsloth's hub methods
-            if save_method == "lora":
-                self.model.push_to_hub_merged(repo_id, self.tokenizer, save_method="lora", token=token)
-            elif save_method == "merged_16bit":
-                self.model.push_to_hub_merged(repo_id, self.tokenizer, save_method="merged_16bit", token=token)
-            elif save_method == "merged_4bit":
-                self.model.push_to_hub_merged(repo_id, self.tokenizer, save_method="merged_4bit", token=token)
-            elif save_method == "gguf":
+            if hub_config.save_method == "lora":
+                self.model.push_to_hub_merged(hub_config.model_id, self.tokenizer, save_method="lora", token=hub_config.token)
+            elif hub_config.save_method == "merged_16bit":
+                self.model.push_to_hub_merged(hub_config.model_id, self.tokenizer, save_method="merged_16bit", token=hub_config.token)
+            elif hub_config.save_method == "merged_4bit":
+                self.model.push_to_hub_merged(hub_config.model_id, self.tokenizer, save_method="merged_4bit", token=hub_config.token)
+            elif hub_config.save_method == "gguf":
                 self.model.push_to_hub_gguf(
-                    repo_id, 
+                    hub_config.model_id, 
                     self.tokenizer, 
                     quantization_method=["q4_k_m", "q5_k_m"], 
-                    token=token
+                    token=hub_config.token
                 )
             else:
-                raise ValueError(f"Unknown save method: {save_method}")
+                raise ValueError(f"Unknown save method: {hub_config.save_method}")
         else:
             # Use Hugging Face's hub methods
-            self.model.push_to_hub(repo_id, token=token)
-            self.tokenizer.push_to_hub(repo_id, token=token)
+            self.model.push_to_hub(hub_config.model_id, token=hub_config.token, private=hub_config.private)
+            self.tokenizer.push_to_hub(hub_config.model_id, token=hub_config.token, private=hub_config.private)
         
-        hub_url = f"https://huggingface.co/{repo_id}"
+        hub_url = f"https://huggingface.co/{hub_config.model_id}"
         print(f"Model successfully pushed to: {hub_url}")
         return hub_url

@@ -80,23 +80,90 @@ def train(
     model_source: str = ModelSource.HUGGINGFACE,
 ) -> dict:
     """
-    Train a model on the given dataset
+    Train a model with comprehensive validation, checkpointing, and monitoring capabilities.
+    
+    This function provides a complete training pipeline with the following features:
+    1. Flexible Validation:
+       - Configure validation frequency with 'validation_strategy'
+       - Options: "epoch" (validate after each epoch), "steps" (validate every N steps), "no" (no validation)
+       - For steps-based validation, use TrainingArguments.eval_steps to set frequency
+    
+    2. Checkpoint Management:
+       - 'checkpoint_strategy' determines how checkpoints are saved:
+         * "best": Save only the best performing checkpoint based on validation metrics
+         * "last": Save only the final checkpoint
+         * "all": Save both best and last checkpoints
+       - Automatically loads the best checkpoint after training if load_best_model_at_end=True
+    
+    3. HuggingFace Hub Integration:
+       - Automatically pushes checkpoints to Hub when improvements are detected
+       - Controlled through model_handler's hub_model_id and hub_token
+       - Set hub_model_id=None to disable pushing to Hub
+    
+    4. Early Stopping:
+       - Monitors validation metrics and stops training if no improvement
+       - Configure patience through EarlyStoppingCallback
+       - Default patience is 3 validations without improvement
+    
+    5. Metric Monitoring:
+       - Tracks and logs multiple metrics during training
+       - Configurable through TrainingArguments.metric_for_best_model
+       - Supports both minimization (e.g., loss) and maximization (e.g., accuracy) metrics
+       - Set greater_is_better in TrainingArguments to specify metric direction
     
     Args:
-        model_name: Name of the model to train
-        train_path: Path to training dataset
-        val_path: Path to validation dataset
-        output_dir: Directory to save model outputs
-        num_train_epochs: Number of training epochs
-        per_device_train_batch_size: Batch size per device
-        validation_strategy: Validation strategy ("epoch", "steps", "no")
-        checkpoint_strategy: Checkpoint strategy ("best", "last", "all")
-        train_on_response_only: Whether to train only on responses
-        verbose: Whether to print verbose output
-        model_source: Source of the model ("huggingface" or "unsloth")
-        
+        model_name (str): Name/path of the model to train (from HuggingFace or Unsloth)
+        train_path (str): Path to the training dataset directory
+        val_path (str, optional): Path to validation dataset. If None, will split train_dataset
+        output_dir (str): Directory to save model checkpoints and outputs
+        num_train_epochs (int): Number of training epochs
+        per_device_train_batch_size (int): Training batch size per GPU/CPU
+        validation_strategy (str): When to perform validation:
+            - "epoch": Validate after each epoch
+            - "steps": Validate every N steps (configure N in TrainingArguments)
+            - "no": Disable validation
+        checkpoint_strategy (str): How to save model checkpoints:
+            - "best": Only save the best performing checkpoint
+            - "last": Only save the final checkpoint
+            - "all": Save both best and last checkpoints
+        train_on_response_only (bool): Whether to train only on assistant responses
+        verbose (bool): Whether to print detailed training information
+        model_source (str): Source of the model (ModelSource.HUGGINGFACE or ModelSource.UNSLOTH)
+    
     Returns:
-        Dictionary containing training results
+        dict: Training results containing:
+            - training_stats: Dictionary of training metrics
+            - best_val_metric: Best validation metric achieved
+            - best_checkpoint_path: Path to the best checkpoint
+    
+    Examples:
+        # Basic training with default settings
+        results = train(
+            model_name="Qwen/Qwen1.5-7B",
+            train_path="./data/train",
+            val_path="./data/val",
+            output_dir="./output"
+        )
+        
+        # Training with custom validation and early stopping
+        results = train(
+            model_name="Qwen/Qwen1.5-7B",
+            train_path="./data/train",
+            validation_strategy="steps",  # Validate every N steps
+            checkpoint_strategy="all",    # Save all checkpoints
+            verbose=True
+        )
+        
+        # Training with Unsloth optimization
+        results = train(
+            model_name="unsloth/Qwen2.5-7B",
+            train_path="./data/train",
+            model_source=ModelSource.UNSLOTH
+        )
+    
+    Raises:
+        ValueError: If input paths don't exist or strategies are invalid
+        RuntimeError: If model preparation or training fails
     """
     # Validate inputs
     if not os.path.exists(train_path):

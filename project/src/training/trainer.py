@@ -2,7 +2,7 @@ import torch
 from transformers import Trainer, TrainingArguments
 from typing import Optional, Dict, Any, List, Union
 import os
-from ..model.qwen_handler import QwenModelHandler
+from ..model.qwen_handler import QwenModelHandler, HubConfig
 from ..data.prompt_creator import PromptCreator
 from ..data.response_parser import ResponseParser
 from .callbacks import ValidationCallback, EarlyStoppingCallback
@@ -12,6 +12,13 @@ from trl import SFTTrainer
 from peft import LoraConfig, get_peft_model
 from datasets import Dataset
 from ..utils.auth import setup_authentication
+
+def is_bf16_supported():
+    """Check if BF16 is supported on the current device"""
+    try:
+        return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    except:
+        return False
 
 class QwenTrainer:
     """
@@ -39,8 +46,7 @@ class QwenTrainer:
         tokenizer=tokenizer,
         prompt_creator=PromptCreator(PromptCreator.TEACHER_REASONED),
         lora_config=lora_config,
-        hub_token="your_token",  # Optional
-        hub_model_id="your/model"  # Optional
+        destination_hub_config=destination_hub_config,
     )
     
     results = trainer.train(
@@ -59,8 +65,8 @@ class QwenTrainer:
         tokenizer: Any,
         prompt_creator: PromptCreator,
         lora_config: Optional[LoraConfig] = None,
-        hub_token: Optional[str] = None,
-        hub_model_id: Optional[str] = None,
+        destination_hub_config: Optional[HubConfig] = None,
+        debug_samples: int = 3,  # Number of samples to log for debugging
     ):
         """
         Initialize the QwenTrainer with model, tokenizer, and configuration.
@@ -70,8 +76,9 @@ class QwenTrainer:
             tokenizer: The tokenizer associated with the model
             prompt_creator: PromptCreator instance for formatting prompts
             lora_config: Optional LoRA configuration for parameter-efficient training
-            hub_token: Optional HuggingFace Hub token for model pushing
-            hub_model_id: Optional model ID for HuggingFace Hub
+            destination_hub_config: Optional configuration for pushing to HuggingFace Hub
+            debug_samples: Number of random samples to log during training for debugging.
+                         Set to 0 to disable debug logging. Default: 3
         
         The trainer will:
         1. Set up authentication if needed
@@ -86,8 +93,7 @@ class QwenTrainer:
         self.tokenizer = tokenizer
         self.prompt_creator = prompt_creator
         self.lora_config = lora_config
-        self.hub_token = hub_token
-        self.hub_model_id = hub_model_id
+        self.destination_hub_config = destination_hub_config
         
         # Initialize training state
         self.peft_model = None
@@ -104,6 +110,9 @@ class QwenTrainer:
             self.max_seq_length = min(2048, self.model.config.max_position_embeddings)
         else:
             self.max_seq_length = 2048  # Default fallback
+        
+        self.debug_samples = debug_samples
+        self.debug_examples = []  # Store debug examples
     
     def validate(
         self,
@@ -155,6 +164,16 @@ class QwenTrainer:
             with open(os.path.join(output_dir, "val_metric.txt"), "w") as f:
                 f.write(str(val_metric))
 
+    def load_checkpoint(self, checkpoint_path):
+        """Load model from checkpoint"""
+        self.model = self.model.from_pretrained(checkpoint_path)
+        self.tokenizer = self.tokenizer.from_pretrained(checkpoint_path)
+
+    def setup(self):
+        """Setup trainer with LoRA if configured"""
+        if self.lora_config:
+            self.model = get_peft_model(self.model, self.lora_config)
+            
     def prepare_model_for_training(self) -> Any:
         """
         Prepare model for training with LoRA configuration.
@@ -167,6 +186,10 @@ class QwenTrainer:
         
         Returns:
             The prepared model ready for training
+        
+        Raises:
+            RuntimeError: If model preparation fails
+            Exception: If Unsloth optimization fails and fallback is needed
         """
         if self.lora_config:
             try:
@@ -176,6 +199,8 @@ class QwenTrainer:
                 lora_alpha = self.lora_config.lora_alpha
                 lora_dropout = self.lora_config.lora_dropout
                 target_modules = self.lora_config.target_modules
+                
+                print("Attempting to use Unsloth's LoRA implementation...")
                 
                 # Use Unsloth's LoRA implementation
                 self.peft_model = FastLanguageModel.get_peft_model(
@@ -200,17 +225,111 @@ class QwenTrainer:
                 print(f"Failed to use Unsloth's LoRA implementation: {e}")
                 print("Falling back to standard PEFT LoRA")
                 
-                # Fallback to standard PEFT LoRA
-                self.peft_model = get_peft_model(self.model, self.lora_config)
-                self.peft_model.print_trainable_parameters()
-                return self.peft_model
+                try:
+                    # Fallback to standard PEFT LoRA
+                    self.peft_model = get_peft_model(self.model, self.lora_config)
+                    self.peft_model.print_trainable_parameters()
+                    return self.peft_model
+                except Exception as e:
+                    print(f"Failed to apply standard PEFT LoRA: {e}")
+                    return None
         
-        # If no LoRA config, return the base model
-        self.model.train()
-        return self.model
+        # If no LoRA config, prepare base model
+        try:
+            self.model.train()
+            return self.model
+        except Exception as e:
+            print(f"Failed to prepare base model: {e}")
+            return None
 
-    def prepare_dataset(self, dataset: Any, prompt_type: Optional[str] = None, verbose: bool = False) -> Any:
-        """Prepare dataset for SFTTrainer by returning text field"""
+    def _log_debug_examples(self, dataset: Dataset, epoch: int = 0):
+        """
+        Log debug examples to wandb for monitoring training data.
+        
+        Args:
+            dataset: The dataset to sample from
+            epoch: Current training epoch
+        
+        The function will:
+        1. Sample random examples from the dataset
+        2. Format them with the chat template
+        3. Log them to wandb with epoch information
+        4. Include both raw input and tokenized format
+        """
+        if self.debug_samples <= 0:
+            return
+
+        try:
+            import wandb
+            if not wandb.run:
+                return
+
+            # Sample random indices
+            import random
+            indices = random.sample(range(len(dataset)), min(self.debug_samples, len(dataset)))
+            
+            debug_table = []
+            for idx in indices:
+                example = dataset[idx]
+                
+                # Get raw text
+                raw_text = example["text"]
+                
+                # Get tokenized form
+                tokens = self.tokenizer.encode(raw_text)
+                decoded = self.tokenizer.decode(tokens)
+                
+                # Calculate token statistics
+                n_tokens = len(tokens)
+                
+                debug_table.append({
+                    "epoch": epoch,
+                    "example_idx": idx,
+                    "raw_text": raw_text,
+                    "tokenized_text": decoded,
+                    "n_tokens": n_tokens,
+                })
+            
+            # Log to wandb
+            wandb.log({
+                "debug/training_examples": wandb.Table(data=debug_table),
+                "debug/epoch": epoch,
+                "debug/max_tokens": max(ex["n_tokens"] for ex in debug_table),
+                "debug/min_tokens": min(ex["n_tokens"] for ex in debug_table),
+                "debug/avg_tokens": sum(ex["n_tokens"] for ex in debug_table) / len(debug_table)
+            })
+            
+            # Store examples for later reference
+            self.debug_examples = debug_table
+            
+            print(f"\nLogged {len(debug_table)} debug examples for epoch {epoch}")
+            print("Example preview:")
+            for ex in debug_table[:1]:  # Show first example
+                print(f"\nExample {ex['example_idx']} ({ex['n_tokens']} tokens):")
+                print(f"Raw text preview: {ex['raw_text'][:200]}...")
+                
+        except Exception as e:
+            print(f"Warning: Failed to log debug examples: {e}")
+
+    def prepare_dataset(self, dataset: Any, prompt_type: Optional[str] = None, verbose: bool = False, epoch: int = 0) -> Any:
+        """
+        Prepare dataset for training with debug logging support.
+        
+        Args:
+            dataset: The dataset to prepare
+            prompt_type: Optional prompt type to use
+            verbose: Whether to print verbose information
+            epoch: Current training epoch (used for debug logging)
+        
+        Returns:
+            Transformed dataset ready for training
+        
+        Debug Logging:
+            - If self.debug_samples > 0, will log random examples to wandb
+            - Logs both raw and tokenized text
+            - Includes token statistics
+            - Samples are logged at the start of each epoch
+        """
         # Temporarily set prompt type if provided
         original_prompt_type = None
         if prompt_type is not None:
@@ -219,29 +338,40 @@ class QwenTrainer:
             
         if verbose:
             print(f"Preparing dataset with prompt type: {self.prompt_creator.prompt_type}")
-            if self.prompt_creator.is_teacher_mode() and "yml_str" not in dataset.features:
-                print("WARNING: Teacher mode enabled but 'yml_str' field not found in dataset")
+            print(f"Dataset columns: {list(dataset.features.keys())}")
             
         def format_example(example: Dict[str, Any]) -> Dict[str, str]:
             """Transform function applied to each example during training"""
-            questions = example["question"]
-            choices = example["choices"] 
-            answer = example["answer"]
+            # Extract teacher-guided fields if available
+            teacher_response = None
+            if self.prompt_creator.is_teacher_mode():
+                teacher_fields = {
+                    "understanding": example.get("teacher_understanding", ""),
+                    "analysis": example.get("teacher_analysis", ""),
+                    "reasoning": example.get("teacher_reasoning", ""),
+                    "conclusion": example.get("teacher_conclusion", ""),
+                    "answer": example.get("teacher_answer", "")
+                }
+                teacher_response = "\n".join(f"{k}: {v}" for k, v in teacher_fields.items() if v)
             
-            # For teacher mode, use the yml_str if available
-            assistant_response = None
-            if self.prompt_creator.is_teacher_mode() and "yml_str" in example:
-                assistant_response = example["yml_str"]
+            # Get question and choices
+            question = example.get("question", example.get("text", ""))  # Fallback to 'text' if 'question' not found
+            choices = example.get("choices", example.get("list_choices", []))  # Fallback to 'list_choices'
+            if isinstance(choices, str):
+                try:
+                    import ast
+                    choices = ast.literal_eval(choices)
+                except:
+                    choices = choices.split(",")
             
-            # Call create_training_prompt without task_id parameter
+            # Create user prompt
             user_prompt = self.prompt_creator.create_training_prompt(
-                question=questions,
+                question=question,
                 choices=choices
             )
             
-            if assistant_response is None:
-                # Default to simple answer format if no teacher completion available
-                assistant_response = answer
+            # Use teacher response or fallback to simple answer
+            assistant_response = teacher_response if teacher_response else example.get("answer", "")
             
             # Apply chat template for training
             text = self.tokenizer.apply_chat_template(
@@ -251,31 +381,35 @@ class QwenTrainer:
                 add_generation_prompt=False
             )
             
-            # Return text field for SFTTrainer
-            return {"text": text}
+            # Return formatted example
+            return {
+                "text": text,
+                "input_ids": None,  # Will be computed by the trainer
+                "attention_mask": None,  # Will be computed by the trainer
+                "labels": None  # Will be computed by the trainer
+            }
         
-        # Use map instead of with_transform for reliable transformation
-        columns_to_remove = [col for col in ['task_id', 'question', 'choices', 'answer', 'yml_str'] 
-                            if col in dataset.features]
-        
+        # Transform dataset
         transformed_dataset = dataset.map(
-            format_example, 
-            remove_columns=columns_to_remove,
-            batched=False
+            format_example,
+            remove_columns=dataset.column_names,
+            desc="Preparing dataset"
         )
+        
+        # Log debug examples if enabled
+        self._log_debug_examples(transformed_dataset, epoch=epoch)
         
         # Preview the transformed data
         if verbose:
-            print("Preview of transformed data:")
-            print(f"Keys: {list(transformed_dataset[0].keys())}")
+            print("\nPreview of transformed data:")
+            print(f"Columns: {list(transformed_dataset.features.keys())}")
             sample_text = transformed_dataset[0]['text']
             sample_length = len(self.tokenizer.encode(sample_text))
-            print(f"Text sample: {sample_text[:100]}...")
-            print(f"Encoded length of first sample: {sample_length} tokens")
+            print(f"Sample text length: {sample_length} tokens")
+            print(f"Sample text preview:\n{sample_text[:200]}...")
             
-            # Check for potential length issues
             if sample_length > self.max_seq_length:
-                print(f"WARNING: Sample exceeds max sequence length ({sample_length} > {self.max_seq_length})")
+                print(f"\nWARNING: Sample exceeds max sequence length ({sample_length} > {self.max_seq_length})")
             
         # Restore original prompt type if changed
         if original_prompt_type is not None:
@@ -283,6 +417,136 @@ class QwenTrainer:
             
         return transformed_dataset
     
+    def _generate_wandb_run_name(
+        self,
+        num_train_epochs: int,
+        learning_rate: float,
+        batch_size: int,
+        model_name: str,
+        scheduler_type: str = "cosine",
+        warmup_ratio: float = 0.1
+    ) -> str:
+        """
+        Generate a professional and informative wandb run name.
+        
+        Format: {model_variant}_{training_type}_{batch_size}b_{lr}lr_{epochs}e_{scheduler}_{warmup_ratio}wu_{timestamp}
+        Example: qwen1.5-7b_lora-ft_32b_2.0e-4lr_3e_cosine_0.1wu_20240220
+        """
+        # Extract model variant (e.g., "qwen1.5-7b" from "Qwen/Qwen1.5-7B")
+        model_variant = model_name.split('/')[-1].lower()
+        
+        # Determine training type
+        training_type = "lora-ft" if self.lora_config else "full-ft"
+        
+        # Format learning rate (e.g., 2e-4)
+        lr_str = f"{learning_rate:.0e}".replace('e-0', 'e-')
+        
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y%m%d")
+        
+        # Add scheduler and warmup info
+        scheduler_info = f"{scheduler_type}_{warmup_ratio:.1f}wu"
+        
+        # Construct run name with scheduler info
+        run_name = f"{model_variant}_{training_type}_{batch_size}b_{lr_str}lr_{num_train_epochs}e_{scheduler_info}_{timestamp}"
+        
+        return run_name
+
+    def _setup_wandb_config(
+        self,
+        num_train_epochs: int,
+        learning_rate: float,
+        batch_size: int,
+        gradient_accumulation_steps: int,
+        max_steps: Optional[int],
+        warmup_steps: int,
+        warmup_ratio: float,
+        user_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Setup a comprehensive wandb configuration."""
+        model_name = self.model.config.name_or_path
+        
+        # Generate run name
+        run_name = self._generate_wandb_run_name(
+            num_train_epochs=num_train_epochs,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            model_name=model_name,
+            warmup_ratio=warmup_ratio
+        )
+        
+        # Calculate effective batch size
+        effective_batch_size = batch_size * gradient_accumulation_steps
+        
+        # Setup default configuration
+        default_config = {
+            "project": "Qwen2.5-Coder-1.5B-Instruct-Coding-Multiple-Choice",
+            "name": run_name,
+            "tags": [
+                "qwen",
+                "multiple-choice",
+                "coding",
+                "lora" if self.lora_config else "full-finetune",
+                f"{model_name}",
+            ],
+            "notes": f"Training {model_name} for coding multiple choice tasks",
+            "config": {
+                # Model Configuration
+                "model": {
+                    "name": model_name,
+                    "type": "decoder-only",
+                    "parameters": sum(p.numel() for p in self.model.parameters()),
+                },
+                
+                # Training Configuration
+                "training": {
+                    "epochs": num_train_epochs,
+                    "learning_rate": learning_rate,
+                    "batch_size_per_device": batch_size,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                    "effective_batch_size": effective_batch_size,
+                    "max_steps": max_steps,
+                    "warmup_steps": warmup_steps,
+                    "sequence_length": self.max_seq_length,
+                },
+                
+                # LoRA Configuration
+                "lora": self.lora_config.__dict__ if self.lora_config else None,
+                
+                # Hardware Configuration
+                "hardware": {
+                    "precision": "bf16" if is_bf16_supported() else "fp16",
+                    "device": str(self.model.device),
+                },
+                
+                # Dataset Information
+                "dataset": {
+                    "type": "multiple-choice",
+                    "domain": "coding",
+                },
+            },
+            "group": f"{model_name}_experiments",
+        }
+        
+        # Update with user-provided config if any
+        if user_config:
+            # Deep update the configuration
+            for key, value in user_config.items():
+                if isinstance(value, dict) and key in default_config:
+                    default_config[key].update(value)
+                else:
+                    default_config[key] = value
+        
+        default_config["config"]["training"].update({
+            "scheduler": {
+                "type": "cosine",
+                "warmup_ratio": warmup_ratio,
+                "warmup_steps": warmup_steps,
+            }
+        })
+        
+        return default_config
+
     def train(
         self,
         train_dataset: Dataset,
@@ -293,7 +557,7 @@ class QwenTrainer:
         per_device_train_batch_size: int = 4,
         gradient_accumulation_steps: int = 4,
         learning_rate: float = 2e-4,
-        warmup_steps: int = 100,
+        warmup_ratio: float = 0.1,
         max_steps: Optional[int] = None,
         logging_steps: int = 10,
         save_steps: int = 100,
@@ -304,17 +568,11 @@ class QwenTrainer:
         greater_is_better: bool = False,
         callbacks: Optional[List[Any]] = None,
         random_seed: int = 42,
+        push_to_hub_strategy: str = "end",
+        wandb_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Train the model using optimized settings for Qwen models.
-        
-        This method:
-        1. Prepares datasets with proper prompt formatting
-        2. Automatically splits training data for validation if needed
-        3. Configures training arguments for optimal performance
-        4. Sets up LoRA if configured
-        5. Handles mixed precision training automatically
-        6. Manages checkpointing and validation
+        Train the model with comprehensive logging and debugging support.
         
         Args:
             train_dataset: Dataset for training
@@ -325,7 +583,7 @@ class QwenTrainer:
             per_device_train_batch_size: Batch size per GPU/CPU
             gradient_accumulation_steps: Number of steps to accumulate gradients
             learning_rate: Learning rate for training
-            warmup_steps: Number of warmup steps for learning rate scheduler
+            warmup_ratio: Ratio of total steps to use for warmup (default: 0.1)
             max_steps: Maximum number of training steps (overrides num_train_epochs)
             logging_steps: Number of steps between logging updates
             save_steps: Number of steps between model saves
@@ -336,39 +594,79 @@ class QwenTrainer:
             greater_is_better: Whether higher metric values are better
             callbacks: Optional list of training callbacks
             random_seed: Random seed for dataset splitting and shuffling
-            
+            push_to_hub_strategy: When to push to hub ("end", "best", "all", "no")
+            wandb_config: Optional configuration for Weights & Biases logging
+        
         Returns:
             Dictionary containing training results and metrics
         """
-        # If no validation dataset is provided, split the training dataset
-        if val_dataset is None and load_best_model_at_end:
-            print(f"No validation dataset provided. Splitting training data with {val_split:.1%} validation split...")
-            # Shuffle and split the dataset
-            shuffled_dataset = train_dataset.shuffle(seed=random_seed)
-            split_datasets = shuffled_dataset.train_test_split(
-                test_size=val_split,
-                seed=random_seed
-            )
-            train_dataset = split_datasets["train"]
-            val_dataset = split_datasets["test"]
-            print(f"Split dataset into {len(train_dataset)} training and {len(val_dataset)} validation examples")
-        
-        # Prepare datasets with proper prompt formatting
-        train_dataset = self.prepare_dataset(train_dataset, verbose=True)
-        if val_dataset is not None:
-            val_dataset = self.prepare_dataset(val_dataset, verbose=True)
-        
-        # Import required components
-        from transformers import Trainer, TrainingArguments
-        from unsloth import is_bfloat16_supported
-        import os
-        
-        # Prepare model with LoRA if configured
+        # Initialize wandb if needed
+        try:
+            import wandb
+            if wandb.run is None:
+                # Calculate total steps for warmup
+                if max_steps is not None and max_steps > 0:
+                    total_steps = max_steps
+                else:
+                    total_steps = (
+                        len(train_dataset) 
+                        // (per_device_train_batch_size * gradient_accumulation_steps)
+                        * num_train_epochs
+                    )
+                warmup_steps = int(total_steps * warmup_ratio)
+                print(f"Using {warmup_steps} warmup steps ({warmup_ratio:.1%} of {total_steps} total steps)")
+                
+                # Setup wandb configuration
+                wandb_config = self._setup_wandb_config(
+                    num_train_epochs=num_train_epochs,
+                    learning_rate=learning_rate,
+                    batch_size=per_device_train_batch_size,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    max_steps=max_steps,
+                    warmup_steps=warmup_steps,
+                    warmup_ratio=warmup_ratio,
+                    user_config=wandb_config
+                )
+                
+                # Initialize wandb
+                wandb.init(**wandb_config)
+                print(f"Initialized wandb run: {wandb_config['name']}")
+                print(f"Project: {wandb_config['project']}")
+                print(f"Tags: {', '.join(wandb_config['tags'])}")
+        except Exception as e:
+            print(f"Warning: Failed to initialize wandb: {e}")
+            print("Continuing without wandb logging...")
+
+        # Prepare model
         model_to_train = self.prepare_model_for_training()
-        
         if model_to_train is None:
             raise RuntimeError("Model preparation failed")
+
+        # Map push_to_hub_strategy
+        hub_strategy_mapping = {
+            "end": "end",
+            "best": "checkpoint",
+            "all": "every_save",
+            "no": "end"
+        }
         
+        if push_to_hub_strategy not in hub_strategy_mapping:
+            raise ValueError(
+                f"Invalid push_to_hub_strategy: {push_to_hub_strategy}. "
+                "Valid values are: 'end', 'best', 'all', 'no'"
+            )
+
+        # Calculate warmup steps
+        if max_steps is not None and max_steps > 0:
+            total_steps = max_steps
+        else:
+            total_steps = (
+                len(train_dataset) 
+                // (per_device_train_batch_size * gradient_accumulation_steps)
+                * num_train_epochs
+            )
+        warmup_steps = int(total_steps * warmup_ratio)
+
         # Setup training arguments
         training_args_dict = {
             # Basic training configuration
@@ -377,7 +675,10 @@ class QwenTrainer:
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "learning_rate": learning_rate,
             "num_train_epochs": num_train_epochs,
-            "warmup_steps": warmup_steps,
+            "warmup_steps": warmup_steps,  # Use calculated warmup steps
+            
+            # Learning rate schedule
+            "lr_scheduler_type": "cosine_with_warmup",
             
             # Logging and saving configuration
             "logging_steps": logging_steps,
@@ -391,48 +692,62 @@ class QwenTrainer:
             "greater_is_better": greater_is_better,
             
             # Mixed precision training
-            "fp16": not is_bfloat16_supported(),
-            "bf16": is_bfloat16_supported(),
+            "fp16": not is_bf16_supported(),
+            "bf16": is_bf16_supported(),
             
-            # Optimizer and scheduler configuration
-            "optim": "paged_adamw_8bit",  # Memory-efficient optimizer
+            # Optimizer configuration
+            "optim": "paged_adamw_8bit",
             "weight_decay": 0.01,
-            "lr_scheduler_type": "linear",
             
             # Integration configuration
-            "report_to": "wandb" if os.environ.get("WANDB_PROJECT") else "none",
-            "push_to_hub": bool(self.hub_model_id),
-            "hub_model_id": self.hub_model_id,
-            "hub_token": self.hub_token,
+            "report_to": "wandb",
+            "push_to_hub": bool(self.destination_hub_config),
+            "hub_model_id": self.destination_hub_config.model_id if self.destination_hub_config else None,
+            "hub_token": self.destination_hub_config.token if self.destination_hub_config else None,
+            "hub_strategy": hub_strategy_mapping[push_to_hub_strategy],
+            
+            # Dataset and preprocessing configuration
+            "remove_unused_columns": True,
+            "preprocessing_num_workers": 4,
+            "dataloader_num_workers": 4,
+            "dataloader_pin_memory": True,
             
             # Set random seed
             "seed": random_seed,
         }
-        
-        # Handle max_steps vs num_train_epochs
+
+        # Handle max_steps
         if max_steps is not None and max_steps > 0:
             training_args_dict["max_steps"] = max_steps
             training_args_dict.pop("num_train_epochs", None)
-            
-        # Set evaluation strategy to match save strategy if using load_best_model_at_end
+
+        # Set evaluation strategy
         if load_best_model_at_end:
             training_args_dict["evaluation_strategy"] = save_strategy
         else:
-            # Set evaluation strategy based on whether we have a validation dataset
             training_args_dict["evaluation_strategy"] = save_strategy if val_dataset is not None else "no"
-        
+
         # Create training arguments
         training_args = TrainingArguments(**training_args_dict)
-        
-        # Initialize HuggingFace Trainer
+
+        # Create data collator
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,
+            pad_to_multiple_of=8
+        )
+
+        # Initialize Trainer
         self.trainer = Trainer(
             model=model_to_train,
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
+            data_collator=data_collator,
             callbacks=callbacks,
+            tokenizer=self.tokenizer,
         )
-        
+
         # Run training
         train_result = self.trainer.train()
         
@@ -443,10 +758,22 @@ class QwenTrainer:
 
     def push_to_hub(self):
         """Push model to HuggingFace Hub"""
-        if not self.hub_model_id or not self.hub_token:
-            raise ValueError("hub_model_id and hub_token must be provided to push to hub")
+        if not self.destination_hub_config:
+            raise ValueError("destination_hub_config must be provided to push to hub")
             
-        self.trainer.push_to_hub()
+        if not self.trainer:
+            raise ValueError("Trainer not initialized. Call train() first.")
+            
+        try:
+            print(f"Pushing model to hub: {self.destination_hub_config.model_id}")
+            self.trainer.push_to_hub(
+                commit_message="Model trained with QwenTrainer",
+                private=self.destination_hub_config.private
+            )
+            print("Successfully pushed to hub!")
+        except Exception as e:
+            print(f"Failed to push to hub: {str(e)}")
+            raise
 
     def save_results(self, results: Dict[str, Any], output_dir: str = "./results") -> str:
         """Save evaluation results to file"""
@@ -498,20 +825,3 @@ class QwenTrainer:
 
         print(f"Results saved to {results_file}")
         return results_file
-
-    def load_checkpoint(self, checkpoint_path):
-        """Load model from checkpoint"""
-        self.model = self.model.from_pretrained(checkpoint_path)
-        self.tokenizer = self.tokenizer.from_pretrained(checkpoint_path)
-
-    def setup(self):
-        """Setup trainer with LoRA if configured"""
-        if self.lora_config:
-            self.model = get_peft_model(self.model, self.lora_config)
-            
-    def prepare_model_for_training(self):
-        """Prepare model for training"""
-        from peft import get_peft_model
-        if self.lora_config:
-            self.model = get_peft_model(self.model, self.lora_config)
-        self.model.train()
