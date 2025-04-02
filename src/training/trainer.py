@@ -345,8 +345,8 @@ class QwenTrainer:
 
         def format_example(example):
             # Use the prompt creator to format the prompt
-            prompt = self.prompt_creator.create_prompt(
-                question=example["question"], choices=example["choices"], answer=example["answer"]
+            prompt = self.prompt_creator.create_training_prompt(
+                question=example["question"], choices=example["choices"]
             )
 
             # Get the target completion from the example
