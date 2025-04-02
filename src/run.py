@@ -15,7 +15,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import wandb
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
-from src.training.callbacks import EarlyStoppingCallback, ValidationCallback
+from src.training.callbacks import (
+    EarlyStoppingCallback,
+    LRMonitorCallback,
+    ModelLoadingAlertCallback,
+    PromptMonitorCallback,
+    ValidationCallback,
+)
 from src.training.trainer import QwenTrainer
 from src.utils.auth import setup_authentication
 from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
@@ -746,6 +752,23 @@ def main():
         validation_callback = ValidationCallback(trainer_instance=trainer)
         callbacks.append(validation_callback)
         logger.info("Added validation callback for model monitoring")
+
+        # Learning rate monitor callback
+        lr_monitor = LRMonitorCallback()
+        callbacks.append(lr_monitor)
+        logger.info("Added learning rate monitoring callback")
+
+        # Prompt monitor callback
+        prompt_monitor = PromptMonitorCallback(
+            dataset=train_dataset, tokenizer=trainer.tokenizer, logging_steps=args.logging_steps
+        )
+        callbacks.append(prompt_monitor)
+        logger.info("Added prompt monitoring callback")
+
+        # Model loading alert callback
+        model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
+        callbacks.append(model_loading_alert)
+        logger.info("Added model loading alert callback")
 
         # Setup WandB logging if available
         try:
