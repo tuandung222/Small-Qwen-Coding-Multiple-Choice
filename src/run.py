@@ -564,7 +564,6 @@ def main():
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.learning_rate,
             warmup_ratio=args.warmup_ratio,
-            weight_decay=args.weight_decay,
             # Validation and checkpointing
             save_strategy="steps",
             save_steps=save_steps,
