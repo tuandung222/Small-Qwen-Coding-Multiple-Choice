@@ -5,6 +5,9 @@ export PYTHONHASHSEED=42
 export CUDA_LAUNCH_BLOCKING=1
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
+# Install additional dependencies if needed
+pip install -q wandb tqdm numpy pandas prettytable scikit-learn
+
 # Reset training log file if it exists
 if [ -f "training.log" ]; then
     echo "Resetting training.log file..."
@@ -28,14 +31,14 @@ python src/run.py \
     --epochs 5 \
     --batch-size 32 \
     --learning-rate 1e-4 \
-    --grad-accum 4 \
+    --grad-accum 2 \
     --warmup-ratio 0.1 \
     --weight-decay 0.01 \
     --max-seq-length 2048 \
     --quantization "4bit" \
     \
-    --lora-r 8 \
-    --lora-alpha 32 \
+    --lora-r 16 \
+    --lora-alpha 16 \
     --lora-dropout 0.05 \
     --peft-type "lora" \
     --target-modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
@@ -59,7 +62,7 @@ python src/run.py \
     --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
-    --logging-steps 100 \
+    --logging-steps 1 \
     --save-steps 500 \
     --save-total-limit 3 \
     --push-strategy "best" \
@@ -82,6 +85,6 @@ python src/run.py \
     --prompt-track-quality \
     --prompt-categorize \
     --prompt-comparison \
-    --max-prompts-to-save 100 \
+    --max-prompts-to-save 200 \
     --debug-samples 3 \
-    2>&1 | tee training.log
+    2>&1 | tee training.log &

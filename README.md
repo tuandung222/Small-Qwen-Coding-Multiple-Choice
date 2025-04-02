@@ -233,6 +233,18 @@ python src/run.py [arguments]
 | `--save-steps` | Steps between saves | 500 | `--save-steps 1000` |
 | `--logging-steps` | Steps between logs | 100 | `--logging-steps 50` |
 
+#### Validation Parameters
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--validation-steps` | Steps between validations | 50 | `--validation-steps 100` |
+| `--metric-for-best` | Metric to track for best model | eval_loss | `--metric-for-best "eval_accuracy"` |
+| `--greater-is-better` | Whether higher is better | false | `--greater-is-better` |
+| `--validate-at-start` | Run validation before training | false | `--validate-at-start` |
+| `--early-stopping-patience` | Epochs without improvement before stopping | 3 | `--early-stopping-patience 5` |
+| `--early-stopping-delta` | Minimum change to count as improvement | 0.0 | `--early-stopping-delta 0.01` |
+| `--val-split` | Fraction of data for validation | 0.04 | `--val-split 0.1` |
+| `--push-to-hub` | Push models to HuggingFace Hub | false | `--push-to-hub` |
+
 #### Example Commands
 
 1. Basic Training:
@@ -464,6 +476,7 @@ This comprehensive example includes:
    - Comprehensive logging
 
 Save this as `train.sh`, make it executable with `chmod +x train.sh`, and run with `./train.sh`.
+
 ## 🎯 Features
 
 ### Parameter-Efficient Fine-Tuning
@@ -670,119 +683,57 @@ Teacher Reasoning: The solution needs to increment the sequence count (ans) each
 Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
 ```
 
-## 🚀 Advanced Features
+## 🔍 Advanced Features
 
-### Parameter-Efficient Fine-Tuning (PEFT)
+### Prompt Monitoring System
 
-The framework supports multiple PEFT methods for efficient model adaptation:
+The framework includes a comprehensive prompt monitoring system that logs and analyzes prompts during training, providing valuable insights into your training data:
 
-| Method | Description |
-|--------|-------------|
-| **LoRA** | Low-Rank Adaptation with configurable rank, alpha, and dropout |
-| **AdaLoRA** | Adaptive LoRA that dynamically adjusts ranks during training |
-| **Prefix Tuning** | Adds trainable continuous prompts |
-| **Prompt Tuning** | Adds trainable prompt vectors |
-| **IA³** | Scales activations with learned vectors |
-| **LoKr** | Combines LoRA with Kronecker product |
-| **OFT** | Orthogonal fine-tuning approach |
-
-### Attention Implementations
-
-Multiple attention implementations are supported for optimal performance:
-
-| Implementation | Description |
-|----------------|-------------|
-| **Flash Attention 2** | Significantly faster training with appropriate hardware |
-| **SDPA** | PyTorch's Scaled Dot Product Attention |
-| **xFormers** | Memory-efficient attention implementation |
-| **Eager** | Standard eager execution mode |
-| **Default** | Model's default implementation |
-
-### Response-Only Training
-
-Unsloth's response-only training feature allows focusing on assistant responses:
-
-- Identifies instruction and response segments
-- Applies special masking for focused learning
-- Configurable instruction and response tokens
-- Optional token ID specification
-
-### Optimizer and Scheduler Options
-
-Comprehensive training optimization options:
-
-| Category | Options |
-|----------|---------|
-| **Optimizers** | adamw_torch, adamw_hf, adam8bit, pagedadam, lion, adafactor |
-| **Schedulers** | cosine, linear, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt |
-| **Warmup** | Configurable warmup ratio and steps |
-| **Regularization** | Weight decay and gradient clipping |
-
-### Monitoring and Visualization
-
-Advanced monitoring capabilities:
-
-#### Prompt Monitoring
-- **Real-time display** of random training prompts
-- **Token distribution analysis** and visualization
-- **Prompt diversity tracking** with similarity metrics
-- **Quality metrics** (length, complexity, readability)
-- **Automatic prompt categorization**
-- **Interactive prompt selection** and comparison
-- **WandB integration** for prompt analytics
-- **Configurable logging** frequency
-
-#### Training Metrics
-- **Learning rate tracking**
-- **Model loading alerts**
-- **GPU memory and gradient monitoring**
-- **WandB integration** for experiment tracking
-
-### Teacher Synthesis
-
-The project includes a teacher synthesis framework for generating high-quality explanations for multiple-choice questions. See [Teacher Synthesis Documentation](src/data_synthesis/README.md) for detailed information about:
-
-- **Supported OpenAI models** (GPT-4o, GPT-4, GPT-3.5-turbo)
-- **Generation parameters** and configuration
-- **Concurrent processing** capabilities
-- **Metrics tracking** and analysis
-- **Output formats** and structure
-
-## 🎯 Examples and Showcase
-
-### Example 1: SQL Function Question
-
-```yaml
-Task ID: k08183
-Question: What does the SQL function "ROUND()" do?
-Choices: ['Rounds a number to the nearest integer', 'Concatenates two or more strings', 'Converts a string to lowercase', 'Returns the length of a string']
-Answer: A
-Teacher Understanding: The question is asking about the purpose of the SQL function "ROUND()". This function is used in SQL to manipulate numerical data, specifically to adjust the precision of numbers.
-Teacher Analysis:
-- A. Rounds a number to the nearest integer: This is correct. The "ROUND()" function is used to round a numeric value to the nearest integer or to a specified number of decimal places.
-- B. Concatenates two or more strings: This is incorrect. Concatenation of strings is typically done using the "CONCAT()" function in SQL.
-- C. Converts a string to lowercase: This is incorrect. Converting a string to lowercase is done using the "LOWER()" function in SQL.
-- D. Returns the length of a string: This is incorrect. The length of a string is determined using the "LENGTH()" function in SQL.
-Teacher Reasoning: The "ROUND()" function is specifically designed to handle numerical values by rounding them to the nearest integer or specified decimal places, which aligns with option A. The other options describe functions that manipulate strings, not numbers.
-Teacher Conclusion: Answer A is correct because the "ROUND()" function's primary purpose is to round numbers, which is distinct from the string operations described in the other options.
+```bash
+python src/run.py \
+    --logging-steps 100 \
+    --prompt-track-diversity \
+    --prompt-track-quality \
+    --prompt-categorize \
+    --prompt-comparison \
+    --max-prompts-to-save 200
 ```
 
-### Example 2: Algorithm Problem
+#### Prompt Monitoring Features
 
-```yaml
-Task ID: k08183
-Question: Given a sequence of rolls of a k-sided dice, what is the length of the shortest sequence that cannot be formed?
-Choices: ['ans += k - len(seen) + 1', 'ans += 1', 'ans = min(ans + 1, k)', 'ans = ans + 1']
-Answer: B
-Teacher Understanding: The problem asks for the length of the shortest sequence that cannot be formed from the given rolls of a k-sided dice. The solution involves tracking unique rolls and incrementing a counter when all k numbers have been seen.
-Teacher Analysis:
-- A. This option incorrectly adjusts the answer based on the difference between k and the size of the set, which is unnecessary since the goal is to increment when all k numbers are seen.
-- B. This option correctly increments the answer by 1 when all k numbers have been seen, indicating a complete sequence.
-- C. This option uses the min function, which is unnecessary and incorrect because the answer should simply increment by 1 when all k numbers are seen.
-- D. This option is similar to B but is redundant because it doesn't add any new logic beyond incrementing by 1.
-Teacher Reasoning: The solution needs to increment the sequence count (ans) each time a complete set of k unique numbers is seen. Option B correctly increments the count by 1 when the set size equals k, which signifies that a complete sequence of k numbers has been formed and another sequence can start.
-Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
+- **Token Analysis**: Analyzes token distributions, unique tokens, and token entropy
+- **Quality Metrics**: Tracks prompt quality over time, including complexity and coherence
+- **Diversity Tracking**: Monitors the diversity of prompts to ensure varied training
+- **Category Distribution**: Automatically categorizes prompts for better insights
+- **WandB Integration**: Rich visualizations in WandB including tables, charts, and trends
+- **Prompt Comparison**: Ability to compare different prompts during training
+
+#### Viewing Prompt Metrics in WandB
+
+After running training with prompt monitoring enabled, you can view detailed prompt metrics in your WandB dashboard:
+
+1. Navigate to your WandB project
+2. Select your training run
+3. Check the "prompts" section in the dashboard
+4. View various charts including:
+   - Token distribution
+   - Prompt length trends
+   - Category distribution
+   - Quality metrics over time
+   - Diversity scores
+
+This helps you better understand your training data and identify potential issues or biases during training.
+
+### Visualization with tqdm
+
+The training process includes progress bars using tqdm for better visibility:
+
+```bash
+# Training with visible progress bars
+python src/run.py --validation-steps 50
 ```
+
+This provides real-time feedback on both training and validation progress, making it easier to monitor long-running training jobs.
 
 ## 🏗️ Architecture
 

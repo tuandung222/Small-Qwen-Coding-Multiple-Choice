@@ -881,14 +881,16 @@ def main():
             analyze_tokens=True,
             show_token_stats=True,
             output_dir=output_dir,
-            track_diversity=args.prompt_track_diversity,
-            track_quality=args.prompt_track_quality,
-            enable_interactive=args.prompt_interactive,
-            categorize_prompts=args.prompt_categorize,
-            enable_comparison=args.prompt_comparison,
+            track_diversity=True,
+            track_quality=True,
+            enable_interactive=False,  # Interactive mode disabled by default in training runs
+            categorize_prompts=True,
+            enable_comparison=True,
         )
         callbacks.append(prompt_monitor)
-        logger.info("Added prompt monitoring callback with enhanced visualization features")
+        logger.info(
+            "Added prompt monitoring callback with enhanced visualization features and wandb integration"
+        )
 
         # Model loading alert callback
         model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)

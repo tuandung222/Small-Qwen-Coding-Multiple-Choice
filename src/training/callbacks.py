@@ -1,15 +1,35 @@
+import json
 import logging
+import math
 import os
 import random
+import shutil
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
-import numpy as np
+import datasets
+import pandas as pd
 import torch
 from datasets import Dataset
+from tqdm import tqdm
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 import wandb
+
+# Check for optional dependencies
+try:
+    from prettytable import PrettyTable
+
+    PRETTYTABLE_AVAILABLE = True
+except ImportError:
+    PRETTYTABLE_AVAILABLE = False
+
+# pandas is already imported at the top
+PANDAS_AVAILABLE = True
+
 from src.model.qwen_handler import QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
@@ -65,25 +85,133 @@ class ValidationCallback(TrainerCallback):
         **kwargs,
     ):
         """Run initial validation before training starts if validate_at_start is True."""
+        # Verify that we have access to the necessary components
+        self._verify_components()
+
         if self.validate_at_start:
             logger.info("Running initial validation before training starts...")
-            metrics = self._run_validation()
+            try:
+                # Run validation
+                metrics = self._run_validation()
 
-            # Log metrics
-            self._log_metrics(metrics, 0)  # Use step 0 for initial validation
-
-            # Check for improvement (this will be the first validation)
-            current_metric = metrics.get(self.metric_for_best)
-            if current_metric is not None:
-                improved = self._check_improvement(current_metric)
-                if improved:
-                    self._handle_improvement(metrics, 0)
+                # Check if metrics are empty (validation failed)
+                if not metrics or len(metrics) == 0:
+                    logger.warning("Initial validation returned no metrics. Using dummy values.")
+                    # Create dummy metrics for logging purposes
+                    metrics = {
+                        "eval_loss": 0.0,
+                        "eval_perplexity": 1.0,
+                        "validation_step": 0,
+                        "validation_epoch": 0,
+                        "note": "Initial validation - dummy metrics",
+                    }
+                elif "eval_loss" in metrics and metrics["eval_loss"] == 0.0:
+                    # This could indicate the validation didn't actually run properly
+                    logger.warning(
+                        "Initial validation returned suspicious metrics (loss=0). This might indicate an issue."
+                    )
+                    metrics["note"] = "Initial validation - suspicious metrics"
                 else:
-                    # If no improvement, still update best metric
-                    self.best_metric = current_metric
-                    logger.info(f"Initial {self.metric_for_best}: {self.best_metric:.4f}")
+                    logger.info("Initial validation completed successfully.")
+                    metrics.setdefault("note", "Initial validation successful")
 
-            logger.info("Initial validation completed.")
+                # Log metrics
+                self._log_metrics(metrics, 0)  # Use step 0 for initial validation
+
+                # Check for improvement only if we have real metrics
+                if "note" not in metrics or "dummy" not in metrics["note"]:
+                    current_metric = metrics.get(self.metric_for_best)
+                    if current_metric is not None:
+                        improved = self._check_improvement(current_metric)
+                        if improved:
+                            self._handle_improvement(metrics, 0)
+                        else:
+                            # If no improvement, still update best metric
+                            self.best_metric = current_metric
+                            logger.info(f"Initial {self.metric_for_best}: {self.best_metric:.4f}")
+                else:
+                    logger.warning("Skipping best model update due to dummy metrics.")
+            except Exception as e:
+                logger.error(f"Initial validation failed with error: {e}")
+                import traceback
+
+                logger.error(f"Error details: {traceback.format_exc()}")
+                logger.info("Continuing with training despite initial validation failure.")
+
+            logger.info("Initial validation phase completed.")
+
+    def _verify_components(self):
+        """Verify that we have access to the necessary components for validation."""
+        # Check trainer
+        if self.trainer is None:
+            logger.error("ValidationCallback is missing trainer instance!")
+            return False
+
+        # Check model
+        if not hasattr(self.trainer, "model") or self.trainer.model is None:
+            logger.error("ValidationCallback cannot access model! Training may fail.")
+            return False
+
+        # Check validation dataset
+        if hasattr(self.trainer, "val_dataset"):
+            if self.trainer.val_dataset is None:
+                logger.warning(
+                    "ValidationCallback: validation dataset is None. Will create from val_split if possible."
+                )
+
+                # Try to check if there's a validation split value to confirm that's expected
+                if hasattr(self.trainer, "val_split"):
+                    logger.info(f"Expected behavior: val_split is set to {self.trainer.val_split}")
+                else:
+                    logger.warning("No val_split attribute found on trainer.")
+            else:
+                dataset_size = (
+                    len(self.trainer.val_dataset)
+                    if hasattr(self.trainer.val_dataset, "__len__")
+                    else "unknown"
+                )
+                logger.info(
+                    f"ValidationCallback: found validation dataset with {dataset_size} examples."
+                )
+
+                # Try to get more details about the dataset
+                try:
+                    if hasattr(self.trainer.val_dataset, "features"):
+                        logger.info(
+                            f"Dataset features: {list(self.trainer.val_dataset.features.keys())}"
+                        )
+
+                    # Check if the dataset has the expected column structure
+                    if hasattr(self.trainer.val_dataset, "column_names"):
+                        logger.info(f"Dataset columns: {self.trainer.val_dataset.column_names}")
+                    elif hasattr(self.trainer.val_dataset, "__getitem__"):
+                        # Try to check first example structure
+                        first_example = self.trainer.val_dataset[0]
+                        if isinstance(first_example, dict):
+                            logger.info(f"First example keys: {list(first_example.keys())}")
+
+                            # Check specifically for input_ids and attention_mask which are needed for evaluation
+                            required_keys = ["input_ids", "attention_mask", "labels"]
+                            missing_keys = [
+                                key for key in required_keys if key not in first_example
+                            ]
+                            if missing_keys:
+                                logger.warning(
+                                    f"Dataset is missing these required keys: {missing_keys}"
+                                )
+                            else:
+                                logger.info("Dataset contains all required keys for evaluation.")
+                except Exception as e:
+                    logger.warning(f"Error inspecting validation dataset: {e}")
+
+                return True
+        else:
+            logger.warning(
+                "ValidationCallback cannot access validation dataset! Validation will not work correctly."
+            )
+            return False
+
+        return True
 
     def on_step_end(
         self,
@@ -123,14 +251,49 @@ class ValidationCallback(TrainerCallback):
             # Get validation dataset
             val_dataset = self.trainer.val_dataset
             if val_dataset is None:
+                logger.warning("Validation dataset is None. Cannot perform validation.")
                 return {}
 
+            # Check if validation dataset is empty
+            if hasattr(val_dataset, "__len__") and len(val_dataset) == 0:
+                logger.warning(
+                    "Validation dataset is empty (zero length). Cannot perform validation."
+                )
+                return {}
+
+            # Log validation dataset info for debugging
+            dataset_size = len(val_dataset) if hasattr(val_dataset, "__len__") else "unknown"
+            logger.info(f"Starting validation on dataset with {dataset_size} examples...")
+
             # Run evaluation with response-only loss calculation
-            metrics = self.trainer.evaluate(
-                val_dataset,
-                metric_key_prefix="eval",
-                compute_loss_on_response_only=True,  # New parameter to indicate response-only loss
-            )
+            logger.info("Running evaluation on validation dataset...")
+
+            # Try to use custom evaluation with progress bar if possible
+            try:
+                metrics = self._evaluate_with_progress(val_dataset)
+                logger.info(
+                    f"Custom evaluation with progress bar completed. Found {len(metrics)} metrics."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Custom evaluation with progress bar failed: {e}. Falling back to standard evaluation."
+                )
+                # Fall back to standard evaluation
+                metrics = self.trainer.evaluate(
+                    val_dataset,
+                    metric_key_prefix="eval",
+                    compute_loss_on_response_only=True,
+                )
+                logger.info(f"Standard evaluation completed. Found {len(metrics)} metrics.")
+
+            # If metrics is None or empty, return empty dict
+            if metrics is None:
+                logger.warning("Evaluation returned None. Returning empty metrics.")
+                return {}
+
+            # Check if eval_loss exists
+            if "eval_loss" not in metrics:
+                logger.warning("eval_loss not found in metrics. Evaluation may have failed.")
 
             # Calculate perplexity from response-only loss
             if "eval_loss" in metrics:
@@ -140,9 +303,214 @@ class ValidationCallback(TrainerCallback):
             metrics["validation_step"] = self.trainer.state.global_step
             metrics["validation_epoch"] = self.trainer.state.epoch
 
+            # Add some model information to metrics
+            try:
+                metrics["model_name"] = self.trainer.model.config.name_or_path
+                metrics["model_type"] = (
+                    self.trainer.model.config.model_type
+                    if hasattr(self.trainer.model.config, "model_type")
+                    else "unknown"
+                )
+                # Count trainable parameters
+                trainable_params = sum(
+                    p.numel() for p in self.trainer.model.parameters() if p.requires_grad
+                )
+                total_params = sum(p.numel() for p in self.trainer.model.parameters())
+                metrics["trainable_params"] = trainable_params
+                metrics["total_params"] = total_params
+                metrics["trainable_percentage"] = round(
+                    100 * trainable_params / max(1, total_params), 2
+                )
+            except Exception as e:
+                logger.warning(f"Error adding model information to metrics: {e}")
+
+            # Save sample validation inputs and outputs
+            try:
+                self._save_validation_samples(val_dataset)
+            except Exception as e:
+                logger.warning(f"Error saving validation samples: {e}")
+
+            # Log success
+            logger.info(f"Validation complete. Found {len(metrics)} metrics.")
+
+            return metrics  # Return the metrics dict
+
         except Exception as e:
             logger.error(f"Validation failed: {str(e)}")
+            import traceback
+
+            logger.error(f"Validation error details: {traceback.format_exc()}")
             return {}
+
+    def _evaluate_with_progress(self, eval_dataset) -> Dict[str, float]:
+        """Custom evaluation with tqdm progress bar for better visibility."""
+        # Set model to evaluation mode
+        model = self.trainer.model
+        model.eval()
+
+        # Verify dataset is usable
+        if eval_dataset is None:
+            logger.error("Cannot evaluate with progress: dataset is None")
+            raise ValueError("Dataset is None")
+
+        if not hasattr(eval_dataset, "__len__"):
+            logger.error("Cannot evaluate with progress: dataset has no length")
+            raise ValueError("Dataset has no __len__ method")
+
+        if len(eval_dataset) == 0:
+            logger.error("Cannot evaluate with progress: dataset is empty")
+            raise ValueError("Dataset is empty")
+
+        # Create a dataloader
+        try:
+            if hasattr(self.trainer, "get_eval_dataloader"):
+                logger.info("Using trainer's get_eval_dataloader method")
+                eval_dataloader = self.trainer.get_eval_dataloader(eval_dataset)
+            else:
+                # Fallback to creating a dataloader manually
+                logger.info("Creating evaluation dataloader manually")
+                from torch.utils.data import DataLoader
+
+                # Get the collator
+                data_collator = self.trainer.data_collator
+                if data_collator is None:
+                    logger.warning("No data collator found - using default identity collator")
+
+                    # Define a simple identity collator as fallback
+                    def identity_collator(examples):
+                        return examples
+
+                    data_collator = identity_collator
+
+                # Create dataloader
+                eval_dataloader = DataLoader(
+                    eval_dataset,
+                    batch_size=self.trainer.args.per_device_eval_batch_size,
+                    collate_fn=data_collator,
+                    num_workers=self.trainer.args.dataloader_num_workers,
+                    pin_memory=self.trainer.args.dataloader_pin_memory,
+                )
+
+            logger.info(f"Created eval dataloader with {len(eval_dataloader)} batches")
+        except Exception as e:
+            logger.error(f"Error creating evaluation dataloader: {e}")
+            raise
+
+        # Setup metrics
+        losses = []
+        num_eval_steps = 0
+
+        # Log basic information
+        device = model.device
+        logger.info(f"Running evaluation on device: {device}")
+        desc = "Validation"
+
+        # Wrap with try/except to catch any errors during evaluation
+        try:
+            with torch.no_grad():
+                # Show progress bar for evaluation batches
+                for step, batch in enumerate(tqdm(eval_dataloader, desc=desc, position=0)):
+                    try:
+                        # Move batch to device
+                        batch = {
+                            k: v.to(device) if isinstance(v, torch.Tensor) else v
+                            for k, v in batch.items()
+                        }
+
+                        # Determine if we should compute loss on responses only
+                        if "compute_loss_on_response_only" in batch:
+                            compute_loss_on_response_only = batch.pop(
+                                "compute_loss_on_response_only"
+                            )
+                        else:
+                            compute_loss_on_response_only = True  # Default behavior
+
+                        # Forward pass
+                        outputs = model(**batch)
+
+                        # Get loss
+                        loss = outputs.loss.detach().float()
+                        losses.append(loss.item())
+                        num_eval_steps += 1
+
+                    except Exception as batch_error:
+                        logger.warning(f"Error processing batch {step}: {batch_error}")
+                        # Continue with next batch instead of failing the whole evaluation
+                        continue
+        except Exception as eval_error:
+            logger.error(f"Error during evaluation: {eval_error}")
+            import traceback
+
+            logger.error(f"Evaluation error details: {traceback.format_exc()}")
+            raise
+
+        # Compute average loss
+        if not losses:
+            logger.warning("No valid batches were processed during evaluation")
+            return {"eval_loss": 0.0, "eval_error": "No valid batches"}
+
+        loss_value = torch.tensor(losses).mean().item()
+
+        # Return metrics
+        return {
+            "eval_loss": loss_value,
+            "eval_samples": len(eval_dataset),
+            "eval_batches": len(eval_dataloader),
+            "eval_steps": num_eval_steps,
+        }
+
+    def _save_validation_samples(self, val_dataset, num_samples: int = 3):
+        """Save a few sample inputs and outputs from validation."""
+        if val_dataset is None or len(val_dataset) == 0:
+            return
+
+        # Create directory for validation samples
+        output_dir = self.trainer.args.output_dir
+        samples_dir = os.path.join(output_dir, "validation_samples")
+        os.makedirs(samples_dir, exist_ok=True)
+
+        # Get a few random samples
+        import random
+
+        random.seed(42)  # For reproducibility
+        sample_indices = random.sample(range(len(val_dataset)), min(num_samples, len(val_dataset)))
+
+        # Process each sample
+        sample_texts = []
+        step = self.trainer.state.global_step
+
+        for i, idx in enumerate(sample_indices):
+            try:
+                example = val_dataset[idx]
+
+                # Get the input text if available
+                input_text = ""
+                if "text" in example:
+                    input_text = example["text"]
+                elif "input_ids" in example:
+                    input_text = self.trainer.tokenizer.decode(example["input_ids"])
+
+                # Save to file
+                sample_file = os.path.join(samples_dir, f"sample_{step}_{i}.txt")
+                with open(sample_file, "w", encoding="utf-8") as f:
+                    f.write(f"=== VALIDATION SAMPLE {i+1}/{len(sample_indices)} ===\n")
+                    f.write(f"Step: {step}\n")
+                    f.write("INPUT:\n")
+                    f.write(input_text[:1000] + "..." if len(input_text) > 1000 else input_text)
+                    f.write("\n\n")
+
+                sample_texts.append(f"Sample {i+1}: {input_text[:100]}...")
+            except Exception as e:
+                logger.warning(f"Error processing validation sample {i}: {e}")
+
+        # Create a summary file
+        summary_file = os.path.join(samples_dir, f"samples_summary_step_{step}.txt")
+        with open(summary_file, "w", encoding="utf-8") as f:
+            f.write(f"Validation Samples Summary (Step {step})\n\n")
+            for sample in sample_texts:
+                f.write(f"- {sample}\n")
+
+        logger.info(f"Saved {len(sample_texts)} validation samples to {samples_dir}")
 
     def _calculate_additional_metrics(self, val_dataset) -> Dict[str, float]:
         """Calculate additional validation metrics."""
@@ -173,8 +541,152 @@ class ValidationCallback(TrainerCallback):
 
         return metrics
 
+    def _save_metrics_to_table(
+        self, metrics: Dict[str, float], step: int, output_dir: Optional[str] = None
+    ) -> None:
+        """Save validation metrics to a table format in the output directory."""
+        if output_dir is None:
+            output_dir = self.trainer.args.output_dir
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        metrics_dir = os.path.join(output_dir, "validation_metrics")
+        os.makedirs(metrics_dir, exist_ok=True)
+
+        # Add step information to the metrics
+        metrics_with_info = metrics.copy()
+        metrics_with_info["step"] = step
+        metrics_with_info["timestamp"] = timestamp
+
+        # Save as JSON for completeness
+        json_path = os.path.join(metrics_dir, f"metrics_step_{step}.json")
+        with open(json_path, "w") as f:
+            import json
+
+            json.dump(metrics_with_info, f, indent=2)
+
+        # Create a pretty table representation
+        if PRETTYTABLE_AVAILABLE:
+            table = PrettyTable()
+            table.field_names = ["Metric", "Value"]
+            table.align["Metric"] = "l"
+            table.align["Value"] = "r"
+
+            for key, value in sorted(metrics_with_info.items()):
+                if isinstance(value, float):
+                    table.add_row([key, f"{value:.6f}"])
+                else:
+                    table.add_row([key, str(value)])
+
+            # Save to text file
+            table_path = os.path.join(metrics_dir, f"metrics_table_step_{step}.txt")
+            with open(table_path, "w") as f:
+                f.write(f"Validation Metrics (Step {step})\n")
+                f.write(f"Timestamp: {timestamp}\n")
+                f.write(str(table))
+
+            logger.info(f"Saved metrics table to {table_path}")
+
+        # Create a pandas DataFrame for additional analysis
+        if PANDAS_AVAILABLE:
+            # Convert to DataFrame
+            df = pd.DataFrame([metrics_with_info])
+
+            # Save to CSV for easy analysis
+            csv_path = os.path.join(metrics_dir, f"metrics_step_{step}.csv")
+            df.to_csv(csv_path, index=False)
+
+            # If we have validation history, create a trend DataFrame
+            if len(self.validation_history) > 0:
+                # Create a DataFrame with all validation history
+                history_data = []
+                for history_item in self.validation_history:
+                    history_metrics = history_item["metrics"].copy()
+                    history_metrics["step"] = history_item["step"]
+                    history_data.append(history_metrics)
+
+                # Add current metrics if not in history yet
+                if step != self.validation_history[-1]["step"]:
+                    step_metrics = metrics.copy()
+                    step_metrics["step"] = step
+                    history_data.append(step_metrics)
+
+                history_df = pd.DataFrame(history_data)
+
+                # Save trends to CSV
+                trends_path = os.path.join(metrics_dir, "validation_trends.csv")
+                history_df.to_csv(trends_path, index=False)
+
+                logger.info(f"Saved validation trends to {trends_path}")
+
+            logger.info(f"Saved metrics CSV to {csv_path}")
+
+        # Also save a comprehensive full report with all history and analysis
+        self._save_validation_report(metrics_dir, step)
+
+    def _save_validation_report(self, metrics_dir: str, current_step: int) -> None:
+        """Save a comprehensive validation report with history and analysis."""
+        if not self.validation_history:
+            return
+
+        report_path = os.path.join(metrics_dir, "validation_report.txt")
+
+        with open(report_path, "w") as f:
+            f.write("=== VALIDATION REPORT ===\n\n")
+
+            # Write summary information
+            f.write("SUMMARY:\n")
+            f.write(f"Current Step: {current_step}\n")
+            f.write(f"Best Metric ({self.metric_for_best}): {self.best_metric:.6f}\n")
+            f.write(f"Early Stopping Patience: {self.early_stopping_patience}\n")
+            f.write(f"No Improvement Count: {self.no_improvement_count}\n\n")
+
+            # Write history of the primary metric
+            f.write(f"HISTORY OF {self.metric_for_best.upper()}:\n")
+            for item in self.validation_history:
+                step = item["step"]
+                metric_value = item["metrics"].get(self.metric_for_best, "N/A")
+                if isinstance(metric_value, float):
+                    is_best = metric_value == self.best_metric
+                    marker = " (BEST)" if is_best else ""
+                    f.write(f"Step {step}: {metric_value:.6f}{marker}\n")
+                else:
+                    f.write(f"Step {step}: {metric_value}\n")
+
+            f.write("\n=== END OF REPORT ===\n")
+
+        logger.info(f"Saved comprehensive validation report to {report_path}")
+
     def _log_metrics(self, metrics: Dict[str, float], step: int):
         """Log metrics to various destinations."""
+        # Handle empty metrics
+        if not metrics:
+            logger.warning(f"No metrics available at step {step}. Using dummy metrics.")
+            # Add dummy metrics for initial validation
+            if step == 0:
+                metrics = {
+                    "eval_loss": 0.0,
+                    "eval_perplexity": 1.0,
+                    "validation_step": 0,
+                    "validation_epoch": 0,
+                    "note": "Initial validation - dummy metrics",
+                }
+                self.best_metric = metrics.get(self.metric_for_best, 0.0)
+                logger.info(f"Setting initial {self.metric_for_best} to {self.best_metric}")
+            else:
+                return  # Skip logging if no metrics and not initial step
+
+        # Save metrics to table file
+        try:
+            self._save_metrics_to_table(metrics, step, output_dir=self.trainer.args.output_dir)
+        except Exception as e:
+            logger.warning(f"Failed to save metrics to table: {e}")
+            import traceback
+
+            logger.warning(f"Metrics table error details: {traceback.format_exc()}")
+
         # Log to WandB
         try:
             if wandb.run is not None:
@@ -198,8 +710,8 @@ class ValidationCallback(TrainerCallback):
                             )
                         }
                     )
-        except ImportError:
-            pass
+        except Exception as e:
+            logger.warning(f"Error logging to wandb: {e}")
 
         # Log to console
         logger.info(f"\nValidation metrics at step {step}:")
@@ -542,94 +1054,283 @@ class PromptMonitorCallback(TrainerCallback):
 
             # Create additional files for enhanced features
             if self.track_diversity:
-                diversity_file = os.path.join(self.output_dir, "prompt_diversity.json")
-                with open(diversity_file, "w") as f:
+                self.diversity_file_path = os.path.join(self.output_dir, "prompt_diversity.json")
+                with open(self.diversity_file_path, "w") as f:
                     f.write("[]")
-                logger.info(f"Created diversity tracking file: {diversity_file}")
+                logger.info(f"Created diversity tracking file: {self.diversity_file_path}")
 
             if self.track_quality:
-                quality_file = os.path.join(self.output_dir, "prompt_quality.json")
-                with open(quality_file, "w") as f:
+                self.quality_file_path = os.path.join(self.output_dir, "prompt_quality.json")
+                with open(self.quality_file_path, "w") as f:
                     f.write("[]")
-                logger.info(f"Created quality tracking file: {quality_file}")
+                logger.info(f"Created quality tracking file: {self.quality_file_path}")
 
             if self.categorize_prompts:
-                categories_file = os.path.join(self.output_dir, "prompt_categories.json")
-                with open(categories_file, "w") as f:
+                self.categories_file_path = os.path.join(self.output_dir, "prompt_categories.json")
+                with open(self.categories_file_path, "w") as f:
                     f.write("{}")
-                logger.info(f"Created categories file: {categories_file}")
+                logger.info(f"Created categories file: {self.categories_file_path}")
+
+            # Add an initial example if dataset is available
+            try:
+                if self.dataset and len(self.dataset) > 0:
+                    idx = 0
+                    example = self.dataset[idx]
+                    prompt = example.get("text", "No text available")
+
+                    # Create an initial prompt entry
+                    if prompt:
+                        self._process_prompt(prompt, idx, state.global_step, state.epoch)
+                        logger.info("Added initial prompt example to monitoring files")
+            except Exception as e:
+                logger.warning(f"Failed to add initial prompt example: {e}")
 
         return control
 
-    def on_train_end(
+    def _process_prompt(self, prompt: str, idx: int, step: int, epoch: float) -> Dict[str, Any]:
+        """Process a prompt and generate all necessary data."""
+        # Analyze tokens if enabled
+        token_analysis = {}
+        if self.analyze_tokens:
+            token_analysis = self._analyze_tokens(prompt)
+
+        # Calculate quality metrics if enabled
+        quality_metrics = {}
+        if self.track_quality:
+            quality_metrics = self._calculate_prompt_quality(prompt)
+            self.quality_scores.append({"step": step, "metrics": quality_metrics})
+
+            # Update quality file immediately
+            if hasattr(self, "quality_file_path") and os.path.exists(self.quality_file_path):
+                try:
+                    import json
+
+                    with open(self.quality_file_path, "w") as f:
+                        json.dump(self.quality_scores, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to update quality file: {e}")
+
+        # Calculate diversity score if enabled
+        diversity_score = 0.0
+        if self.track_diversity:
+            diversity_score = self._calculate_prompt_diversity(prompt)
+            self.diversity_scores.append({"step": step, "score": diversity_score})
+
+            # Update diversity file immediately
+            if hasattr(self, "diversity_file_path") and os.path.exists(self.diversity_file_path):
+                try:
+                    import json
+
+                    with open(self.diversity_file_path, "w") as f:
+                        json.dump(self.diversity_scores, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to update diversity file: {e}")
+
+        # Categorize prompt if enabled
+        category = "unknown"
+        if self.categorize_prompts:
+            category = self._categorize_prompt(prompt)
+            self.category_counts[category] = self.category_counts.get(category, 0) + 1
+
+            # Update categories file immediately
+            if hasattr(self, "categories_file_path") and os.path.exists(self.categories_file_path):
+                try:
+                    import json
+
+                    with open(self.categories_file_path, "w") as f:
+                        json.dump(self.category_counts, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Failed to update categories file: {e}")
+
+        # Create prompt data
+        prompt_data = {
+            "step": step,
+            "epoch": epoch,
+            "prompt": prompt,
+            "example_idx": idx,
+            "token_analysis": token_analysis,
+            "quality_metrics": quality_metrics,
+            "diversity_score": diversity_score,
+            "category": category,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Save to file
+        self._save_prompt_to_file(prompt_data)
+
+        # Log to wandb
+        self._log_to_wandb(prompt_data)
+
+        return prompt_data
+
+    def on_step_end(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
     ) -> TrainerControl:
-        """Close prompt file at the end of training and save additional data."""
-        if self.save_to_file and self.prompt_file:
-            self.prompt_file.write("\n]")  # End JSON array
-            self.prompt_file.close()
-            logger.info(f"Saved {len(self.prompt_history)} prompts to {self.prompt_file_path}")
+        """Show a random prompt at each logging step with enhanced visualization."""
+        if state.global_step % self.logging_steps == 0:
+            try:
+                # Sample a random example that's different from the last one
+                max_attempts = 5  # Limit attempts to avoid infinite loop
+                for _ in range(max_attempts):
+                    idx = random.randint(0, len(self.dataset) - 1)
+                    if idx != self.last_prompt_idx:
+                        break
 
-            # Save additional data
-            if self.track_diversity and self.output_dir:
-                diversity_file = os.path.join(self.output_dir, "prompt_diversity.json")
-                with open(diversity_file, "w") as f:
-                    import json
+                example = self.dataset[idx]
+                self.last_prompt_idx = idx
 
-                    json.dump(self.diversity_scores, f, indent=2)
-                logger.info(f"Saved diversity scores to {diversity_file}")
+                # Get the prompt text
+                prompt = example.get("text", "")
+                if not prompt:
+                    logger.warning(f"Example {idx} has no text. Skipping.")
+                    return control
 
-            if self.track_quality and self.output_dir:
-                quality_file = os.path.join(self.output_dir, "prompt_quality.json")
-                with open(quality_file, "w") as f:
-                    import json
+                # Only show if it's different from the last one
+                if prompt != self.last_prompt:
+                    # Process the prompt
+                    prompt_data = self._process_prompt(prompt, idx, state.global_step, state.epoch)
 
-                    json.dump(self.quality_scores, f, indent=2)
-                logger.info(f"Saved quality scores to {quality_file}")
+                    # Handle interactive mode if enabled
+                    if self.enable_interactive and self.interactive_mode:
+                        self._handle_interactive_mode(prompt_data)
 
-            if self.categorize_prompts and self.output_dir:
-                categories_file = os.path.join(self.output_dir, "prompt_categories.json")
-                with open(categories_file, "w") as f:
-                    import json
+                    # Print to terminal
+                    print("\n" + "=" * 80)
+                    print(f"Random Training Prompt (Step {state.global_step}):")
+                    print("-" * 80)
+                    print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
 
-                    json.dump(self.category_counts, f, indent=2)
-                logger.info(f"Saved category counts to {categories_file}")
+                    # Show token statistics if enabled
+                    token_analysis = prompt_data.get("token_analysis", {})
+                    if self.show_token_stats and token_analysis:
+                        print("-" * 80)
+                        print(f"Token Count: {token_analysis.get('token_count', 0)}")
+                        print(f"Unique Tokens: {token_analysis.get('unique_tokens', 0)}")
+                        print("Top Tokens:")
+                        for token, count in token_analysis.get("top_tokens", [])[:5]:
+                            print(f"  {token}: {count}")
 
-            if self.enable_comparison and self.output_dir and self.comparison_prompts:
-                comparison_file = os.path.join(self.output_dir, "prompt_comparisons.json")
-                with open(comparison_file, "w") as f:
-                    import json
+                    # Show quality metrics if enabled
+                    quality_metrics = prompt_data.get("quality_metrics", {})
+                    if self.track_quality and quality_metrics:
+                        print("-" * 80)
+                        print("Quality Metrics:")
+                        for metric, value in list(quality_metrics.items())[:5]:  # Show only first 5
+                            print(f"  {metric}: {value:.2f}")
 
-                    json.dump(self.comparison_prompts, f, indent=2)
-                logger.info(f"Saved comparison data to {comparison_file}")
+                    # Show diversity score if enabled
+                    if self.track_diversity:
+                        diversity_score = prompt_data.get("diversity_score", 0.0)
+                        print("-" * 80)
+                        print(f"Diversity Score: {diversity_score:.4f}")
 
+                    # Show category if enabled
+                    if self.categorize_prompts:
+                        category = prompt_data.get("category", "unknown")
+                        print("-" * 80)
+                        print(f"Category: {category}")
+
+                    print("=" * 80 + "\n")
+                    self.last_prompt = prompt
+
+            except Exception as e:
+                logger.warning(f"Error showing random prompt: {e}")
+                import traceback
+
+                logger.warning(f"Error details: {traceback.format_exc()}")
         return control
 
     def _analyze_tokens(self, text: str) -> Dict[str, Any]:
-        """Analyze token distribution in the prompt."""
-        tokens = self.tokenizer.encode(text)
-        token_ids = tokens
-        token_texts = [self.tokenizer.decode([t]) for t in tokens]
+        """Analyze token distribution and provide comprehensive metrics."""
+        try:
+            # Tokenize the text
+            tokens = self.tokenizer.encode(text)
+            decoded_tokens = [self.tokenizer.decode([t]) for t in tokens]
 
-        # Count token frequencies
-        token_freq = {}
-        for token_id in token_ids:
-            token_freq[token_id] = token_freq.get(token_id, 0) + 1
+            # Basic token counts
+            token_count = len(tokens)
+            unique_tokens = len(set(tokens))
+            unique_ratio = unique_tokens / token_count if token_count > 0 else 0
 
-        # Sort by frequency
-        sorted_tokens = sorted(token_freq.items(), key=lambda x: x[1], reverse=True)
+            # Count token frequencies
+            token_freqs = {}
+            for t in tokens:
+                token_freqs[t] = token_freqs.get(t, 0) + 1
 
-        # Get top tokens
-        top_tokens = sorted_tokens[:10]
-        top_token_texts = [(self.tokenizer.decode([t[0]]), t[1]) for t in top_tokens]
+            # Get top tokens by frequency (include decoded version for readability)
+            top_tokens = sorted(token_freqs.items(), key=lambda x: x[1], reverse=True)[:20]
+            top_tokens_decoded = []
+            for token_id, count in top_tokens:
+                try:
+                    token_text = self.tokenizer.decode([token_id])
+                    # Replace control characters with descriptive text
+                    token_text = token_text.replace("\n", "\\n").replace("\t", "\\t")
+                    if not token_text or token_text.isspace():
+                        token_text = f"[{token_id}]"
+                    top_tokens_decoded.append((token_text, count))
+                except:
+                    top_tokens_decoded.append((str(token_id), count))
 
-        return {
-            "token_count": len(tokens),
-            "unique_tokens": len(token_freq),
-            "top_tokens": top_token_texts,
-            "token_ids": token_ids,
-            "token_texts": token_texts,
-        }
+            # Analyze token length distribution
+            token_lengths = [len(t) for t in decoded_tokens]
+            length_dist = {}
+            for length in token_lengths:
+                length_dist[length] = length_dist.get(length, 0) + 1
+
+            # Calculate sequence entropy (measure of information content)
+            import math
+
+            entropy = 0
+            for count in token_freqs.values():
+                prob = count / token_count
+                entropy -= prob * math.log2(prob)
+
+            # Calculate average token length
+            avg_token_length = sum(token_lengths) / len(token_lengths) if token_lengths else 0
+
+            # Count special tokens
+            special_tokens = 0
+            if hasattr(self.tokenizer, "special_tokens_map"):
+                special_token_ids = set()
+                for token_name, token_value in self.tokenizer.special_tokens_map.items():
+                    try:
+                        # Handle both single tokens and lists of tokens
+                        if isinstance(token_value, str):
+                            token_id = self.tokenizer.convert_tokens_to_ids(token_value)
+                            if token_id != self.tokenizer.unk_token_id:
+                                special_token_ids.add(token_id)
+                        elif isinstance(token_value, list):
+                            for t in token_value:
+                                token_id = self.tokenizer.convert_tokens_to_ids(t)
+                                if token_id != self.tokenizer.unk_token_id:
+                                    special_token_ids.add(token_id)
+                    except:
+                        pass
+
+                special_tokens = sum(1 for t in tokens if t in special_token_ids)
+
+            # Calculate vocabulary coverage
+            vocab_size = getattr(self.tokenizer, "vocab_size", 0)
+            vocab_coverage = unique_tokens / vocab_size if vocab_size > 0 else 0
+
+            # Return comprehensive analysis
+            return {
+                "token_count": token_count,
+                "unique_tokens": unique_tokens,
+                "unique_ratio": unique_ratio,
+                "entropy": entropy,
+                "avg_token_length": avg_token_length,
+                "max_token_length": max(token_lengths) if token_lengths else 0,
+                "min_token_length": min(token_lengths) if token_lengths else 0,
+                "special_tokens": special_tokens,
+                "special_token_ratio": special_tokens / token_count if token_count > 0 else 0,
+                "vocab_coverage": vocab_coverage,
+                "top_tokens": top_tokens_decoded,
+                "token_length_dist": length_dist,
+            }
+        except Exception as e:
+            logger.warning(f"Error analyzing tokens: {e}")
+            return {"token_count": 0, "unique_tokens": 0, "unique_ratio": 0, "error": str(e)}
 
     def _calculate_prompt_quality(self, text: str) -> Dict[str, float]:
         """Calculate quality metrics for the prompt."""
@@ -737,7 +1438,7 @@ class PromptMonitorCallback(TrainerCallback):
             self.category_counts[category] = self.category_counts.get(category, 0) + 1
 
     def _log_to_wandb(self, prompt_data: Dict[str, Any]) -> None:
-        """Log prompt data to wandb."""
+        """Log prompt data to wandb with enhanced visualizations and metrics."""
         if not self.log_to_wandb:
             return
 
@@ -745,72 +1446,171 @@ class PromptMonitorCallback(TrainerCallback):
             import wandb
 
             if wandb.run is not None:
-                # Create a table for the prompt
-                prompt_table = wandb.Table(
-                    columns=["step", "prompt", "token_count", "unique_tokens", "category"]
-                )
-                prompt_table.add_data(
+                # Create a table for the prompt with more detailed information
+                columns = [
+                    "step",
+                    "epoch",
+                    "prompt",
+                    "token_count",
+                    "unique_tokens",
+                    "category",
+                    "diversity_score",
+                ]
+
+                data = [
                     prompt_data["step"],
+                    prompt_data.get("epoch", 0),
                     prompt_data["prompt"],
                     prompt_data["token_analysis"]["token_count"],
                     prompt_data["token_analysis"]["unique_tokens"],
                     prompt_data.get("category", "unknown"),
-                )
+                    prompt_data.get("diversity_score", 0.0),
+                ]
 
-                # Log the table
-                wandb.log(
-                    {
-                        "prompts/current": prompt_table,
-                        "prompts/token_count": prompt_data["token_analysis"]["token_count"],
-                        "prompts/unique_tokens": prompt_data["token_analysis"]["unique_tokens"],
-                    }
-                )
+                # Create detailed prompt table for this step
+                prompt_table = wandb.Table(columns=columns, data=[data])
 
-                # Log top tokens as a bar chart
-                if "top_tokens" in prompt_data["token_analysis"]:
-                    top_tokens_data = {
-                        token: count for token, count in prompt_data["token_analysis"]["top_tokens"]
-                    }
-                    wandb.log(
-                        {
-                            "prompts/top_tokens": wandb.plot.bar(
-                                wandb.Table(
-                                    data=[[k, v] for k, v in top_tokens_data.items()],
-                                    columns=["token", "count"],
-                                ),
-                                "token",
-                                "count",
-                                title="Top Tokens in Prompt",
-                            )
-                        }
+                # Log basic metrics
+                log_data = {
+                    # Current prompt details as table
+                    "prompts/current": prompt_table,
+                    # Basic token statistics
+                    "prompts/token_count": prompt_data["token_analysis"]["token_count"],
+                    "prompts/unique_tokens": prompt_data["token_analysis"]["unique_tokens"],
+                    "prompts/unique_ratio": prompt_data["token_analysis"].get("unique_ratio", 0),
+                    # Tracking step and epoch
+                    "prompts/step": prompt_data["step"],
+                    "prompts/epoch": prompt_data.get("epoch", 0),
+                }
+
+                # Log example index if available
+                if "example_idx" in prompt_data:
+                    log_data["prompts/example_idx"] = prompt_data["example_idx"]
+
+                # Create histograms for token lengths if available
+                if "token_length_dist" in prompt_data["token_analysis"]:
+                    length_dist = prompt_data["token_analysis"]["token_length_dist"]
+                    length_table = wandb.Table(
+                        columns=["length", "count"], data=[[k, v] for k, v in length_dist.items()]
+                    )
+                    log_data["prompts/token_length_dist"] = wandb.plot.bar(
+                        length_table, "length", "count", title="Token Length Distribution"
                     )
 
-                # Log quality metrics if available
-                if "quality_metrics" in prompt_data:
+                # Top tokens visualization
+                if "top_tokens" in prompt_data["token_analysis"]:
+                    top_tokens = prompt_data["token_analysis"]["top_tokens"]
+                    if isinstance(top_tokens, dict):
+                        top_tokens = list(top_tokens.items())
+                    elif (
+                        isinstance(top_tokens, list)
+                        and len(top_tokens) > 0
+                        and isinstance(top_tokens[0], tuple)
+                    ):
+                        # Already in the right format
+                        pass
+                    else:
+                        # Convert to proper format if needed
+                        try:
+                            top_tokens = [(str(t), c) for t, c in top_tokens]
+                        except:
+                            top_tokens = []
+
+                    if top_tokens:
+                        # Limit to top 15 tokens for cleaner visualization
+                        if len(top_tokens) > 15:
+                            top_tokens = top_tokens[:15]
+
+                        tokens_table = wandb.Table(
+                            columns=["token", "count"], data=[[k, v] for k, v in top_tokens]
+                        )
+                        log_data["prompts/top_tokens"] = wandb.plot.bar(
+                            tokens_table, "token", "count", title="Top Tokens in Prompt"
+                        )
+
+                # Log quality metrics as radar chart if available
+                if "quality_metrics" in prompt_data and prompt_data["quality_metrics"]:
+                    # Log individual metrics
                     for metric, value in prompt_data["quality_metrics"].items():
-                        wandb.log({f"prompts/quality/{metric}": value})
+                        log_data[f"prompts/quality/{metric}"] = value
+
+                    # Create radar chart of all metrics
+                    quality_data = [[k, v] for k, v in prompt_data["quality_metrics"].items()]
+                    if quality_data:
+                        quality_table = wandb.Table(columns=["metric", "value"], data=quality_data)
+                        log_data["prompts/quality_radar"] = wandb.plot.bar(
+                            quality_table, "metric", "value", title="Prompt Quality Metrics"
+                        )
 
                 # Log diversity score if available
                 if "diversity_score" in prompt_data:
-                    wandb.log({"prompts/diversity_score": prompt_data["diversity_score"]})
+                    log_data["prompts/diversity_score"] = prompt_data["diversity_score"]
 
-                # Log category distribution
+                # Track history of prompt categories as a stacked bar chart
                 if self.category_counts:
                     category_table = wandb.Table(
                         data=[[k, v] for k, v in self.category_counts.items()],
                         columns=["category", "count"],
                     )
-                    wandb.log(
-                        {
-                            "prompts/category_distribution": wandb.plot.bar(
-                                category_table, "category", "count", title="Prompt Categories"
-                            )
-                        }
+                    log_data["prompts/category_distribution"] = wandb.plot.bar(
+                        category_table, "category", "count", title="Prompt Categories"
                     )
+
+                # Create a histogram of all prompt lengths seen so far
+                if self.prompt_history:
+                    try:
+                        prompt_lengths = [
+                            p["token_analysis"]["token_count"] for p in self.prompt_history
+                        ]
+                        length_data = [[i, l] for i, l in enumerate(prompt_lengths)]
+                        length_histogram = wandb.Table(
+                            columns=["index", "length"], data=length_data
+                        )
+                        log_data["prompts/length_history"] = wandb.plot.line(
+                            length_histogram, "index", "length", title="Prompt Length History"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error creating prompt length history: {e}")
+
+                # Log all data to wandb
+                wandb.log(log_data)
+
+                # Optionally save the full prompt to wandb artifacts for later inspection
+                if (
+                    prompt_data["step"] % (self.logging_steps * 10) == 0
+                ):  # Save every 10th logged prompt
+                    try:
+                        import json
+                        import tempfile
+
+                        # Create a temporary file to store the prompt data
+                        with tempfile.NamedTemporaryFile(
+                            mode="w", delete=False, suffix=".json"
+                        ) as tmp:
+                            json.dump(prompt_data, tmp, indent=2)
+                            prompt_file = tmp.name
+
+                        # Create and save an artifact
+                        artifact = wandb.Artifact(
+                            name=f"prompt_step_{prompt_data['step']}",
+                            type="prompt",
+                            description=f"Training prompt at step {prompt_data['step']}",
+                        )
+                        artifact.add_file(prompt_file)
+                        wandb.log_artifact(artifact)
+
+                        # Clean up temporary file
+                        os.unlink(prompt_file)
+                    except Exception as e:
+                        logger.warning(f"Error saving prompt artifact: {e}")
+
         except ImportError:
             logger.warning("wandb not installed, skipping logging")
         except Exception as e:
             logger.warning(f"Error logging to wandb: {e}")
+            import traceback
+
+            logger.debug(f"Wandb logging error details: {traceback.format_exc()}")
 
     def _handle_interactive_mode(self, prompt_data: Dict[str, Any]) -> None:
         """Handle interactive prompt selection if enabled."""
@@ -850,113 +1650,57 @@ class PromptMonitorCallback(TrainerCallback):
         except Exception as e:
             logger.warning(f"Error in interactive mode: {e}")
 
-    def on_step_end(
+    def on_train_end(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
     ) -> TrainerControl:
-        """Show a random prompt at each logging step with enhanced visualization."""
-        if state.global_step % self.logging_steps == 0:
-            try:
-                # Sample a random example that's different from the last one
-                max_attempts = 5  # Limit attempts to avoid infinite loop
-                for _ in range(max_attempts):
-                    idx = random.randint(0, len(self.dataset) - 1)
-                    if idx != self.last_prompt_idx:
-                        break
+        """Close prompt file at the end of training and save additional data."""
+        if self.save_to_file and self.prompt_file:
+            self.prompt_file.write("\n]")  # End JSON array
+            self.prompt_file.close()
+            logger.info(f"Saved {len(self.prompt_history)} prompts to {self.prompt_file_path}")
 
-                example = self.dataset[idx]
-                self.last_prompt_idx = idx
+            # Save additional data with final updates
+            if self.track_diversity and hasattr(self, "diversity_file_path"):
+                try:
+                    import json
 
-                # Get the prompt text
-                prompt = example["text"]
+                    with open(self.diversity_file_path, "w") as f:
+                        json.dump(self.diversity_scores, f, indent=2)
+                    logger.info(f"Saved final diversity scores to {self.diversity_file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save final diversity scores: {e}")
 
-                # Only show if it's different from the last one
-                if prompt != self.last_prompt:
-                    # Analyze tokens if enabled
-                    token_analysis = {}
-                    if self.analyze_tokens:
-                        token_analysis = self._analyze_tokens(prompt)
+            if self.track_quality and hasattr(self, "quality_file_path"):
+                try:
+                    import json
 
-                    # Calculate quality metrics if enabled
-                    quality_metrics = {}
-                    if self.track_quality:
-                        quality_metrics = self._calculate_prompt_quality(prompt)
-                        self.quality_scores.append(
-                            {"step": state.global_step, "metrics": quality_metrics}
-                        )
+                    with open(self.quality_file_path, "w") as f:
+                        json.dump(self.quality_scores, f, indent=2)
+                    logger.info(f"Saved final quality scores to {self.quality_file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save final quality scores: {e}")
 
-                    # Calculate diversity score if enabled
-                    diversity_score = 0.0
-                    if self.track_diversity:
-                        diversity_score = self._calculate_prompt_diversity(prompt)
-                        self.diversity_scores.append(
-                            {"step": state.global_step, "score": diversity_score}
-                        )
+            if self.categorize_prompts and hasattr(self, "categories_file_path"):
+                try:
+                    import json
 
-                    # Categorize prompt if enabled
-                    category = "unknown"
-                    if self.categorize_prompts:
-                        category = self._categorize_prompt(prompt)
+                    with open(self.categories_file_path, "w") as f:
+                        json.dump(self.category_counts, f, indent=2)
+                    logger.info(f"Saved final category counts to {self.categories_file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save final category counts: {e}")
 
-                    # Create prompt data
-                    prompt_data = {
-                        "step": state.global_step,
-                        "epoch": state.epoch,
-                        "prompt": prompt,
-                        "example_idx": idx,
-                        "token_analysis": token_analysis,
-                        "quality_metrics": quality_metrics,
-                        "diversity_score": diversity_score,
-                        "category": category,
-                        "timestamp": datetime.now().isoformat(),
-                    }
+            if self.enable_comparison and self.comparison_prompts:
+                try:
+                    import json
 
-                    # Save to file
-                    self._save_prompt_to_file(prompt_data)
+                    comparison_file = os.path.join(self.output_dir, "prompt_comparisons.json")
+                    with open(comparison_file, "w") as f:
+                        json.dump(self.comparison_prompts, f, indent=2)
+                    logger.info(f"Saved comparison data to {comparison_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to save comparison data: {e}")
 
-                    # Log to wandb
-                    self._log_to_wandb(prompt_data)
-
-                    # Handle interactive mode if enabled
-                    if self.enable_interactive and self.interactive_mode:
-                        self._handle_interactive_mode(prompt_data)
-
-                    # Print to terminal
-                    print("\n" + "=" * 80)
-                    print(f"Random Training Prompt (Step {state.global_step}):")
-                    print("-" * 80)
-                    print(prompt)
-
-                    # Show token statistics if enabled
-                    if self.show_token_stats and token_analysis:
-                        print("-" * 80)
-                        print(f"Token Count: {token_analysis['token_count']}")
-                        print(f"Unique Tokens: {token_analysis['unique_tokens']}")
-                        print("Top Tokens:")
-                        for token, count in token_analysis.get("top_tokens", [])[:5]:
-                            print(f"  {token}: {count}")
-
-                    # Show quality metrics if enabled
-                    if self.track_quality and quality_metrics:
-                        print("-" * 80)
-                        print("Quality Metrics:")
-                        for metric, value in quality_metrics.items():
-                            print(f"  {metric}: {value:.2f}")
-
-                    # Show diversity score if enabled
-                    if self.track_diversity:
-                        print("-" * 80)
-                        print(f"Diversity Score: {diversity_score:.4f}")
-
-                    # Show category if enabled
-                    if self.categorize_prompts:
-                        print("-" * 80)
-                        print(f"Category: {category}")
-
-                    print("=" * 80 + "\n")
-                    self.last_prompt = prompt
-
-            except Exception as e:
-                logger.warning(f"Error showing random prompt: {e}")
         return control
 
 
