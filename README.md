@@ -393,18 +393,6 @@ python -m src.run --attention-implementation xformers
 python -m src.run --attention-implementation flash_attention_2 --force-attn-implementation
 ```
 
-#### Performance Comparison
-
-Different attention implementations offer trade-offs between speed, memory usage, and hardware compatibility:
-
-| Implementation | Speed | Memory Efficiency | Hardware Requirements |
-|----------------|-------|-------------------|------------------------|
-| default        | ⭐⭐   | ⭐⭐               | Works on all hardware  |
-| flash_attention_2 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐            | CUDA 11.6+, modern GPU |
-| sdpa           | ⭐⭐⭐⭐ | ⭐⭐⭐              | CUDA 11.6+            |
-| eager          | ⭐     | ⭐                 | Works on all hardware  |
-| xformers       | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐           | CUDA compatibility varies |
-
 For more information about this project, visit the [GitHub repository](https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/tree/main).
 
 ### Inference
