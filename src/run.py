@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 
 import torch
-import wandb
 from datasets import load_dataset
 from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+import wandb
 from data.prompt_creator import PromptCreator
 from model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from training.callbacks import EarlyStoppingCallback, ValidationCallback
@@ -145,18 +145,23 @@ def parse_args():
     # Training configuration
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument(
-        "--batch-size", type=int, default=4, help="Per device batch size for training"
+        "--batch-size", type=int, default=32, help="Per device batch size for training"
     )
-    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
-    parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--grad-accum", type=int, default=2, help="Gradient accumulation steps")
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument(
         "--output-dir", type=str, default="./model_output", help="Directory to save model outputs"
     )
     parser.add_argument(
-        "--early-stopping-patience", type=int, default=3, help="Patience for early stopping"
+        "--early-stopping-patience", type=int, default=5, help="Patience for early stopping"
     )
     parser.add_argument(
         "--test-mode", action="store_true", help="Use only 2 dataset instances for quick testing"
+    )
+    parser.add_argument(
+        "--test-training-mode",
+        action="store_true",
+        help="Use only enough examples to fill one batch (batch_size) for minimal training testing",
     )
 
     # Repository configuration
@@ -239,7 +244,7 @@ def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
         raise
 
 
-def load_datasets(hf_token, dataset_id, test_mode=False):
+def load_datasets(hf_token, dataset_id, test_mode=False, test_training_mode=False, batch_size=4):
     """
     Load datasets from HuggingFace Hub
 
@@ -247,6 +252,8 @@ def load_datasets(hf_token, dataset_id, test_mode=False):
         hf_token: HuggingFace token for authentication
         dataset_id: ID of the dataset on HuggingFace Hub
         test_mode: If True, use only 2 dataset instances for quick testing
+        test_training_mode: If True, use only enough examples to fill one batch
+        batch_size: Batch size for training (used when test_training_mode is True)
 
     Returns:
         Dataset: Training dataset
@@ -260,6 +267,16 @@ def load_datasets(hf_token, dataset_id, test_mode=False):
         if test_mode:
             logger.info("TEST MODE ENABLED: Using only 2 dataset instances")
             dataset = dataset.select(range(2))
+            logger.info(f"Dataset reduced to {len(dataset)} examples")
+        elif test_training_mode:
+            # Use one full batch + a few extra examples for validation if needed
+            num_examples = batch_size + max(
+                2, int(batch_size * 0.2)
+            )  # batch_size + 20% for validation
+            logger.info(
+                f"TEST TRAINING MODE ENABLED: Using only {num_examples} dataset instances (one batch + validation)"
+            )
+            dataset = dataset.select(range(min(num_examples, len(dataset))))
             logger.info(f"Dataset reduced to {len(dataset)} examples")
 
         # Log dataset statistics
@@ -293,13 +310,17 @@ def main():
 
         # Initialize model and trainer
         trainer = setup_model_and_trainer(
-            source_hub,
-            destination_hub,
-            max_seq_length=args.max_seq_length,
+            source_hub, destination_hub, max_seq_length=args.max_seq_length
         )
 
         # Load dataset from HuggingFace Hub
-        train_dataset = load_datasets(hf_token, args.dataset, test_mode=args.test_mode)
+        train_dataset = load_datasets(
+            hf_token,
+            args.dataset,
+            test_mode=args.test_mode,
+            test_training_mode=args.test_training_mode,
+            batch_size=args.batch_size,
+        )
 
         # Training configuration
         output_dir = args.output_dir
@@ -328,15 +349,27 @@ def main():
             project_name = f"{model_name}-Coding-MCQ-Training"
 
             # Add test mode indicator to run name if enabled
-            run_prefix = "TEST_" if args.test_mode else ""
+            run_prefix = ""
+            if args.test_mode:
+                run_prefix = "TEST_"
+            elif args.test_training_mode:
+                run_prefix = "TEST-TRAIN_"
+
             run_name = f"{run_prefix}batch{args.batch_size}_lr{args.learning_rate}_e{args.epochs}_{int(time.time())}"
 
             # Add test mode tag if enabled
             tags = ["qwen", "coding", "lora", "multiple-choice", "callbacks"]
             if args.test_mode:
                 tags.append("test_mode")
+            elif args.test_training_mode:
+                tags.append("test_training_mode")
 
-            notes_prefix = "TEST MODE: " if args.test_mode else ""
+            notes_prefix = ""
+            if args.test_mode:
+                notes_prefix = "TEST MODE: "
+            elif args.test_training_mode:
+                notes_prefix = "TEST TRAINING MODE: "
+
             notes = f"{notes_prefix}Training with all callbacks enabled: validation, early stopping (patience={args.early_stopping_patience})"
 
             wandb_config = WandBConfig(
@@ -362,8 +395,13 @@ def main():
             logger.warning("Continuing without WandB callbacks")
 
         # Set logging and save frequency based on test mode
-        logging_steps = 10 if args.test_mode else 100
-        save_steps = 20 if args.test_mode else 500
+        if args.test_mode or args.test_training_mode:
+            logging_steps = 10
+            save_steps = 20
+        else:
+            logging_steps = 100
+            save_steps = 500
+
         logger.info(f"Using logging_steps={logging_steps}, save_steps={save_steps}")
 
         # Start training

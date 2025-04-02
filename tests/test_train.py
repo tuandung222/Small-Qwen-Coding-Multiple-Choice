@@ -7,10 +7,11 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 import torch
-import wandb
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+
+import wandb
 
 # Add the project root directory to Python path
 project_root = Path(__file__).parent.parent
