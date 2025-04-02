@@ -31,6 +31,29 @@ pip install flash-attn --no-build-isolation
 pip install datasets pyyaml
 ```
 
+## Environment Setup
+
+This project requires several API keys for authentication. Create a `.env` file in the root directory with the following variables:
+
+```
+# API Keys for authentication
+OPENAI_API_KEY=your_openai_api_key_here
+HF_TOKEN=your_huggingface_token_here
+WANDB_API_KEY=your_wandb_api_key_here
+```
+
+You can copy the provided `.env.example` file and fill in your credentials:
+
+```bash
+cp .env.example .env
+# Edit the .env file with your actual API keys
+```
+
+These environment variables are required for:
+- `HF_TOKEN`: Accessing Hugging Face models and datasets
+- `WANDB_API_KEY`: Logging experiments to Weights & Biases
+- `OPENAI_API_KEY`: Used if generating teacher completions with OpenAI models
+
 ## Key Classes
 
 The project provides several key classes for working with the model:

@@ -179,8 +179,6 @@ def main():
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
-            # Learning rate schedule
-            lr_scheduler_type="cosine",  # Cosine decay with warmup
             # Hub integration
             push_to_hub_strategy="best",
             # Other settings

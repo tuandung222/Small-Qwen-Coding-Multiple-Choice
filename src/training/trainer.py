@@ -331,118 +331,81 @@ class QwenTrainer:
         except Exception as e:
             print(f"Warning: Failed to log debug examples: {e}")
 
-    def prepare_dataset(
-        self, dataset: Any, prompt_type: Optional[str] = None, verbose: bool = False, epoch: int = 0
-    ) -> Any:
+    def _prepare_dataset_for_training(self, dataset: Dataset) -> Dataset:
         """
-        Prepare dataset for training with debug logging support.
+        Prepare dataset for training by formatting it with the prompt creator.
 
         Args:
-            dataset: The dataset to prepare
-            prompt_type: Optional prompt type to use
-            verbose: Whether to print verbose information
-            epoch: Current training epoch (used for debug logging)
+            dataset: The raw dataset to format
 
         Returns:
-            Transformed dataset ready for training
-
-        Debug Logging:
-            - If self.debug_samples > 0, will log random examples to wandb
-            - Logs both raw and tokenized text
-            - Includes token statistics
-            - Samples are logged at the start of each epoch
+            Formatted dataset ready for training
         """
-        # Temporarily set prompt type if provided
-        original_prompt_type = None
-        if prompt_type is not None:
-            original_prompt_type = self.prompt_creator.prompt_type
-            self.prompt_creator.prompt_type = prompt_type
+        logger.info("Preparing dataset for training...")
 
-        if verbose:
-            print(f"Preparing dataset with prompt type: {self.prompt_creator.prompt_type}")
-            print(f"Dataset columns: {list(dataset.features.keys())}")
-
-        def format_example(example: Dict[str, Any]) -> Dict[str, str]:
-            """Transform function applied to each example during training"""
-            # Extract teacher-guided fields if available
-            teacher_response = None
-            if self.prompt_creator.is_teacher_mode():
-                teacher_fields = {
-                    "understanding": example.get("teacher_understanding", ""),
-                    "analysis": example.get("teacher_analysis", ""),
-                    "reasoning": example.get("teacher_reasoning", ""),
-                    "conclusion": example.get("teacher_conclusion", ""),
-                    "answer": example.get("teacher_answer", ""),
-                }
-                teacher_response = "\n".join(f"{k}: {v}" for k, v in teacher_fields.items() if v)
-
-            # Get question and choices
-            # Fallback to 'text' if 'question' not found
-            question = example.get("question", example.get("text", ""))
-            choices = example.get(
-                "choices", example.get("list_choices", [])
-            )  # Fallback to 'list_choices'
-            if isinstance(choices, str):
-                try:
-                    import ast
-
-                    choices = ast.literal_eval(choices)
-                except:
-                    choices = choices.split(",")
-
-            # Create user prompt
-            user_prompt = self.prompt_creator.create_training_prompt(
-                question=question, choices=choices
+        def format_example(example):
+            # Use the prompt creator to format the prompt
+            prompt = self.prompt_creator.create_prompt(
+                question=example["question"], choices=example["choices"], answer=example["answer"]
             )
 
-            # Use teacher response or fallback to simple answer
-            assistant_response = teacher_response if teacher_response else example.get("answer", "")
+            # Get the target completion from the example
+            if "teacher_reasoning" in example and example["teacher_reasoning"]:
+                # Use teacher reasoning if available
+                completion = example["teacher_reasoning"]
+            else:
+                # Default to just the answer if no reasoning is available
+                completion = f"The answer is {example['answer']}."
 
-            # Apply chat template for training
+            # Format as a conversation
+            messages = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": completion},
+            ]
+
+            # Apply the tokenizer's chat template
             text = self.tokenizer.apply_chat_template(
-                [
-                    {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": assistant_response},
-                ],
-                tokenize=False,
-                add_generation_prompt=False,
+                messages, tokenize=False, add_generation_prompt=False
             )
 
-            # Return formatted example
-            return {
-                "text": text,
-                "input_ids": None,  # Will be computed by the trainer
-                "attention_mask": None,  # Will be computed by the trainer
-                "labels": None,  # Will be computed by the trainer
+            # Tokenize the text
+            tokenized = self.tokenizer(
+                text,
+                max_length=self.max_seq_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
+
+            # Return the input_ids and attention_mask
+            result = {
+                "input_ids": tokenized.input_ids[0],
+                "attention_mask": tokenized.attention_mask[0],
+                "labels": tokenized.input_ids[
+                    0
+                ].clone(),  # For causal LM, labels are the same as input_ids
             }
 
-        # Transform dataset
-        transformed_dataset = dataset.map(
-            format_example, remove_columns=dataset.column_names, desc="Preparing dataset"
+            return result
+
+        # Apply the formatting to each example
+        formatted_dataset = dataset.map(
+            format_example,
+            remove_columns=dataset.column_names,  # Remove all original columns
+            load_from_cache_file=False,
         )
 
-        # Log debug examples if enabled
-        self._log_debug_examples(transformed_dataset, epoch=epoch)
+        logger.info(f"Dataset prepared: {len(formatted_dataset)} examples")
 
-        # Preview the transformed data
-        if verbose:
-            print("\nPreview of transformed data:")
-            print(f"Columns: {list(transformed_dataset.features.keys())}")
-            sample_text = transformed_dataset[0]["text"]
-            sample_length = len(self.tokenizer.encode(sample_text))
-            print(f"Sample text length: {sample_length} tokens")
-            print(f"Sample text preview:\n{sample_text[:200]}...")
+        # Log a few examples for debugging
+        if self.debug_samples > 0:
+            logger.info("Sample formatted examples:")
+            for i in range(min(self.debug_samples, len(formatted_dataset))):
+                sample = formatted_dataset[i]
+                decoded_text = self.tokenizer.decode(sample["input_ids"])
+                logger.info(f"Example {i}:\n{decoded_text[:200]}... (truncated)")
 
-            if sample_length > self.max_seq_length:
-                print(
-                    f"\nWARNING: Sample exceeds max sequence length ({sample_length} > {self.max_seq_length})"
-                )
-
-        # Restore original prompt type if changed
-        if original_prompt_type is not None:
-            self.prompt_creator.prompt_type = original_prompt_type
-
-        return transformed_dataset
+        return formatted_dataset
 
     def _generate_wandb_run_name(
         self,
@@ -698,6 +661,23 @@ class QwenTrainer:
         if model_to_train is None:
             raise RuntimeError("Model preparation failed")
 
+        # Format datasets for training
+        formatted_train_dataset = self._prepare_dataset_for_training(train_dataset)
+        formatted_val_dataset = None
+        if val_dataset is not None:
+            formatted_val_dataset = self._prepare_dataset_for_training(val_dataset)
+        elif val_split > 0:
+            # Split train dataset if no validation dataset is provided
+            logger.info(f"Splitting train dataset with val_split={val_split}")
+            split_datasets = formatted_train_dataset.train_test_split(
+                test_size=val_split, seed=random_seed
+            )
+            formatted_train_dataset = split_datasets["train"]
+            formatted_val_dataset = split_datasets["test"]
+            logger.info(
+                f"Split dataset into {len(formatted_train_dataset)} train and {len(formatted_val_dataset)} validation examples"
+            )
+
         # Map push_to_hub_strategy
         hub_strategy_mapping = {
             "end": "end",
@@ -717,7 +697,7 @@ class QwenTrainer:
             total_steps = max_steps
         else:
             total_steps = (
-                len(train_dataset)
+                len(formatted_train_dataset)
                 // (per_device_train_batch_size * gradient_accumulation_steps)
                 * num_train_epochs
             )
@@ -758,7 +738,7 @@ class QwenTrainer:
             "hub_token": self.destination_hub_config.token if self.destination_hub_config else None,
             "hub_strategy": hub_strategy_mapping[push_to_hub_strategy],
             # Dataset configuration
-            "remove_unused_columns": True,
+            "remove_unused_columns": False,  # Already formatted the dataset
             "dataloader_num_workers": 4,
             "dataloader_pin_memory": True,
             # Set random seed
@@ -772,7 +752,7 @@ class QwenTrainer:
 
         # Set evaluation strategy
         if load_best_model_at_end:
-            if val_dataset is not None:
+            if formatted_val_dataset is not None:
                 training_args_dict["evaluation_strategy"] = save_strategy
             else:
                 print(
@@ -784,7 +764,7 @@ class QwenTrainer:
                 ] = False  # Can't load best model without validation
         else:
             training_args_dict["evaluation_strategy"] = (
-                save_strategy if val_dataset is not None else "no"
+                save_strategy if formatted_val_dataset is not None else "no"
             )
 
         # Create training arguments
@@ -803,8 +783,8 @@ class QwenTrainer:
         self.trainer = Trainer(
             model=model_to_train,
             args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=val_dataset,  # This can be None
+            train_dataset=formatted_train_dataset,
+            eval_dataset=formatted_val_dataset,  # This can be None
             data_collator=data_collator,
             callbacks=callbacks,
             tokenizer=self.tokenizer,
