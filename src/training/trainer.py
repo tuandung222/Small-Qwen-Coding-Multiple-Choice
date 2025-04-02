@@ -17,7 +17,13 @@ from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
 from src.utils.auth import setup_authentication
 
-from .callbacks import EarlyStoppingCallback, ValidationCallback
+from .callbacks import (
+    EarlyStoppingCallback,
+    LRMonitorCallback,
+    ModelLoadingAlertCallback,
+    PromptMonitorCallback,
+    ValidationCallback,
+)
 
 # define logger
 logger = logging.getLogger(__name__)
@@ -208,6 +214,7 @@ class QwenTrainer:
             RuntimeError: If model preparation fails
             Exception: If Unsloth optimization fails and fallback is needed
         """
+        use_unsloth = False
         if self.lora_config:
             try:
                 # Try using Unsloth's optimized LoRA implementation
@@ -217,7 +224,8 @@ class QwenTrainer:
                 lora_dropout = self.lora_config.lora_dropout
                 target_modules = self.lora_config.target_modules
 
-                print("Attempting to use Unsloth's LoRA implementation...")
+                print("\033[92mAttempting to use Unsloth's LoRA implementation...\033[0m")
+                use_unsloth = True
 
                 # Use Unsloth's LoRA implementation
                 self.peft_model = FastLanguageModel.get_peft_model(
@@ -237,30 +245,36 @@ class QwenTrainer:
                     p.numel() for p in self.peft_model.parameters() if p.requires_grad
                 )
                 print(
-                    f"trainable params: {trainable_params:,} || all params: {total_params:,} || trainable%: {100 * trainable_params / total_params:.4f}"
+                    f"\033[92mtrainable params: {trainable_params:,} || all params: {total_params:,} || trainable%: {100 * trainable_params / total_params:.4f}\033[0m"
                 )
 
+                # Mark model as Unsloth model
+                self.peft_model.is_unsloth_model = True
                 return self.peft_model
 
             except Exception as e:
-                print(f"Failed to use Unsloth's LoRA implementation: {e}")
-                print("Falling back to standard PEFT LoRA")
+                print(f"\033[91mFailed to use Unsloth's LoRA implementation: {e}\033[0m")
+                print("\033[91mFalling back to standard PEFT LoRA\033[0m")
 
                 try:
                     # Fallback to standard PEFT LoRA
                     self.peft_model = get_peft_model(self.model, self.lora_config)
                     self.peft_model.print_trainable_parameters()
+                    # Mark model as not using Unsloth
+                    self.peft_model.is_unsloth_model = False
                     return self.peft_model
                 except Exception as e:
-                    print(f"Failed to apply standard PEFT LoRA: {e}")
+                    print(f"\033[91mFailed to apply standard PEFT LoRA: {e}\033[0m")
                     return None
 
         # If no LoRA config, prepare base model
         try:
             self.model.train()
+            # Mark model as not using Unsloth
+            self.model.is_unsloth_model = False
             return self.model
         except Exception as e:
-            print(f"Failed to prepare base model: {e}")
+            print(f"\033[91mFailed to prepare base model: {e}\033[0m")
             return None
 
     def _log_debug_examples(self, dataset: Dataset, epoch: int = 0):
@@ -886,67 +900,23 @@ class QwenTrainer:
                 logger.info("Falling back to standard training")
                 self.trainer = original_trainer
 
-        # Add custom learning rate tracking callback
-        class LRMonitorCallback(TrainerCallback):
-            """Custom callback to track learning rates during training."""
-
-            def on_step_end(self, args, state, control, **kwargs):
-                if state.global_step % args.logging_steps == 0:
-                    try:
-                        # Get learning rate scheduler
-                        lr_scheduler = self.trainer.lr_scheduler
-                        optimizer = self.trainer.optimizer
-
-                        # Get current learning rate
-                        if hasattr(lr_scheduler, "get_last_lr"):
-                            lrs = lr_scheduler.get_last_lr()
-                            current_lr = lrs[0] if lrs else None
-                        else:
-                            # Fallback - try to get from optimizer
-                            current_lr = optimizer.param_groups[0]["lr"]
-
-                        # Log to wandb
-                        if wandb.run is not None:
-                            wandb.log(
-                                {
-                                    "trainer/learning_rate": current_lr,
-                                    "trainer/global_step": state.global_step,
-                                    "trainer/epoch": state.epoch,
-                                    "trainer/total_steps": state.max_steps,
-                                    "trainer/percent_complete": state.global_step
-                                    / state.max_steps
-                                    * 100
-                                    if state.max_steps
-                                    else 0,
-                                }
-                            )
-
-                        # Also log optimizer parameters
-                        if (
-                            wandb.run is not None
-                            and optimizer
-                            and hasattr(optimizer, "param_groups")
-                        ):
-                            for i, param_group in enumerate(optimizer.param_groups):
-                                # Log parameters like weight decay, momentum, etc.
-                                for key, value in param_group.items():
-                                    if key != "params" and not isinstance(value, (list, tuple)):
-                                        wandb.log({f"optimizer/group{i}_{key}": value})
-                    except Exception as e:
-                        logger.warning(f"Error logging learning rate: {e}")
-                return control
-
         # Add the learning rate monitor if not already in callbacks
-        lr_monitor = LRMonitorCallback()
-        lr_monitor.trainer = self.trainer  # Give callback access to trainer
+        lr_monitor = LRMonitorCallback(trainer=self.trainer)
 
-        # Check if any existing callback is an instance of LRMonitorCallback
-        has_lr_monitor = any(
-            isinstance(cb, LRMonitorCallback) for cb in self.trainer.callback_handler.callbacks
+        # Add the prompt monitor
+        prompt_monitor = PromptMonitorCallback(
+            dataset=formatted_train_dataset, tokenizer=self.tokenizer, logging_steps=logging_steps
         )
-        if not has_lr_monitor:
-            self.trainer.add_callback(lr_monitor)
-            logger.info("Added learning rate monitoring callback")
+
+        # Add the model loading alert callback
+        model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
+
+        # Add callbacks to trainer
+        self.trainer.add_callback(lr_monitor)
+        self.trainer.add_callback(prompt_monitor)
+        self.trainer.add_callback(model_loading_alert)
+
+        logger.info("Added monitoring callbacks: learning rate, prompts, and model loading alerts")
 
         # Run training
         logger.info("Starting training process...")

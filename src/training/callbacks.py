@@ -1,13 +1,19 @@
+import logging
+import random
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
+from datasets import Dataset
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 
 import wandb
 from src.model.qwen_handler import QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 
 class ValidationCallback(TrainerCallback):
@@ -213,3 +219,146 @@ class EarlyStoppingCallback(TrainerCallback):
             # Stop training if no improvement for patience epochs
             if self.no_improvement_count >= self.patience:
                 control.should_training_stop = True
+
+
+class LRMonitorCallback(TrainerCallback):
+    """Custom callback to track learning rates during training."""
+
+    def __init__(self, trainer=None):
+        self.trainer = trainer
+
+    def on_step_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ) -> TrainerControl:
+        if state.global_step % args.logging_steps == 0:
+            try:
+                # Get learning rate scheduler
+                lr_scheduler = self.trainer.lr_scheduler
+                optimizer = self.trainer.optimizer
+
+                # Get current learning rate
+                if hasattr(lr_scheduler, "get_last_lr"):
+                    lrs = lr_scheduler.get_last_lr()
+                    current_lr = lrs[0] if lrs else None
+                else:
+                    # Fallback - try to get from optimizer
+                    current_lr = optimizer.param_groups[0]["lr"]
+
+                # Log to wandb
+                try:
+                    import wandb
+
+                    if wandb.run is not None:
+                        wandb.log(
+                            {
+                                "trainer/learning_rate": current_lr,
+                                "trainer/global_step": state.global_step,
+                                "trainer/epoch": state.epoch,
+                                "trainer/total_steps": state.max_steps,
+                                "trainer/percent_complete": state.global_step
+                                / state.max_steps
+                                * 100
+                                if state.max_steps
+                                else 0,
+                            }
+                        )
+
+                        # Also log optimizer parameters
+                        if optimizer and hasattr(optimizer, "param_groups"):
+                            for i, param_group in enumerate(optimizer.param_groups):
+                                # Log parameters like weight decay, momentum, etc.
+                                for key, value in param_group.items():
+                                    if key != "params" and not isinstance(value, (list, tuple)):
+                                        wandb.log({f"optimizer/group{i}_{key}": value})
+                except ImportError:
+                    logger.warning("wandb not installed, skipping logging")
+            except Exception as e:
+                logger.warning(f"Error logging learning rate: {e}")
+        return control
+
+
+class PromptMonitorCallback(TrainerCallback):
+    """Custom callback to show random prompts during training."""
+
+    def __init__(self, dataset: Dataset, tokenizer: Any, logging_steps: int = 10):
+        """
+        Initialize the prompt monitor callback.
+
+        Args:
+            dataset: The training dataset
+            tokenizer: The tokenizer used for the model
+            logging_steps: Number of steps between showing prompts
+        """
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.logging_steps = logging_steps
+        self.last_prompt = None
+        self.last_prompt_idx = None
+
+    def on_step_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ) -> TrainerControl:
+        """Show a random prompt at each logging step."""
+        if state.global_step % self.logging_steps == 0:
+            try:
+                # Sample a random example that's different from the last one
+                max_attempts = 5  # Limit attempts to avoid infinite loop
+                for _ in range(max_attempts):
+                    idx = random.randint(0, len(self.dataset) - 1)
+                    if idx != self.last_prompt_idx:
+                        break
+
+                example = self.dataset[idx]
+                self.last_prompt_idx = idx
+
+                # Get the prompt text
+                prompt = example["text"]
+
+                # Only show if it's different from the last one
+                if prompt != self.last_prompt:
+                    print("\n" + "=" * 80)
+                    print(f"Random Training Prompt (Step {state.global_step}):")
+                    print("-" * 80)
+                    print(prompt)
+                    print("=" * 80 + "\n")
+                    self.last_prompt = prompt
+
+            except Exception as e:
+                logger.warning(f"Error showing random prompt: {e}")
+        return control
+
+
+class ModelLoadingAlertCallback(TrainerCallback):
+    """Callback to alert when model loading method changes."""
+
+    def __init__(self, use_unsloth: bool = True):
+        """
+        Initialize the model loading alert callback.
+
+        Args:
+            use_unsloth: Whether Unsloth was attempted for model loading
+        """
+        self.use_unsloth = use_unsloth
+        self.alert_shown = False
+
+    def on_train_begin(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ) -> TrainerControl:
+        """Show alert at the beginning of training if Unsloth was attempted but not used."""
+        if self.use_unsloth and not self.alert_shown:
+            try:
+                # Check if the model is using Unsloth
+                model = self.trainer.model
+                if not hasattr(model, "is_unsloth_model") or not model.is_unsloth_model:
+                    print("\n" + "=" * 80)
+                    print(
+                        "\033[91mWARNING: Using standard Transformers loading instead of Unsloth optimization\033[0m"
+                    )
+                    print(
+                        "\033[91mThis may result in slower training and higher memory usage\033[0m"
+                    )
+                    print("=" * 80 + "\n")
+                    self.alert_shown = True
+            except Exception as e:
+                logger.warning(f"Error checking model loading method: {e}")
+        return control

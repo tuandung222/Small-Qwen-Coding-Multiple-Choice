@@ -4,9 +4,12 @@ This project provides a framework for fine-tuning Qwen2.5-Coder-1.5B-Instruct mo
 
 ## Features
 
-- **Parameter-efficient fine-tuning** with LoRA
-- **Optimized training** using Unsloth
-- **Structured reasoning** with YAML-format outputs for inference
+- **Parameter-Efficient Fine-Tuning**: Utilizes LoRA (Low-Rank Adaptation) for efficient model training
+- **Optimized Training**: Leverages Unsloth for faster training and reduced memory usage
+- **Structured Reasoning**: Implements YAML-format outputs for clear reasoning steps
+- **Comprehensive Evaluation**: Includes multiple evaluation metrics and validation strategies
+- **Advanced Monitoring**: Features real-time prompt display, learning rate tracking, and model loading alerts
+- **Flexible Prompt Templates**: Multiple prompt strategies for different training approaches
 - **Teacher-reasoned approach** for training
 - **Comprehensive evaluation** framework
 - **HuggingFace Hub integration** for model sharing
@@ -14,6 +17,16 @@ This project provides a framework for fine-tuning Qwen2.5-Coder-1.5B-Instruct mo
 - **Automatic repository creation**
 - **Test modes** for rapid iteration and debugging
 - **Callbacks** for validation, early stopping, and WandB logging
+
+## Callbacks
+
+The training process includes several specialized callbacks for monitoring and optimization:
+
+- **LRMonitorCallback**: Tracks learning rates and optimizer parameters during training
+- **PromptMonitorCallback**: Displays random training prompts after each logging step
+- **ModelLoadingAlertCallback**: Alerts when model loading method changes (e.g., from Unsloth to standard Transformers)
+- **EarlyStoppingCallback**: Implements early stopping to prevent overfitting
+- **ValidationCallback**: Manages validation metrics and best model checkpointing
 
 ## Setup
 
@@ -29,8 +42,8 @@ This project provides a framework for fine-tuning Qwen2.5-Coder-1.5B-Instruct mo
 1. Clone the repository:
 
 ```bash
-git clone <repository-url>
-cd <repository-directory>
+git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
+cd Small-Qwen-Coding-Multiple-Choice
 ```
 
 2. Install dependencies:
