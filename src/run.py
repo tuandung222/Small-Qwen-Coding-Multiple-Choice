@@ -175,7 +175,21 @@ def parse_args():
         "--prompt-template",
         type=str,
         default="yaml_reasoning",
-        choices=["yaml_reasoning", "basic", "teacher_reasoned", "options"],
+        choices=[
+            "yaml_reasoning",
+            "basic",
+            "teacher_reasoned",
+            "options",
+            "socratic",
+            "scientist",
+            "lawyer",
+            "debugger",
+            "philosopher",
+            "expert_novice",
+            "pros_cons",
+            "code_review",
+            "math_proof",
+        ],
         help="Prompt template to use for formatting",
     )
     parser.add_argument(
