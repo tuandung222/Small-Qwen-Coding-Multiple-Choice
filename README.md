@@ -4,8 +4,8 @@
   <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python Version">
   <img src="https://img.shields.io/badge/PyTorch-2.5+-red.svg" alt="PyTorch Version">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  <img src="https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/actions/workflows/code-quality.yml/badge.svg" alt="Code Quality">
-  <img src="https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/actions/workflows/tests.yml/badge.svg" alt="Tests">
+  <!-- <img src="https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/actions/workflows/code-quality.yml/badge.svg" alt="Code Quality">
+  <img src="https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/actions/workflows/tests.yml/badge.svg" alt="Tests"> -->
   <!-- <img src="https://codecov.io/gh/tuandung222/Small-Qwen-Coding-Multiple-Choice/branch/main/graph/badge.svg" alt="Coverage"> -->
 </div>
 
