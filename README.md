@@ -33,220 +33,6 @@ This project provides a framework for fine-tuning **Qwen2.5-Coder-1.5B-Instruct*
   - [Data Processing Pipeline](#data-processing-pipeline)
   - [Monitoring System](#monitoring-system)
 
-## 🏗️ Architecture
-
-### Overall System Architecture
-
-```mermaid
-graph TB
-    classDef pipeline fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    classDef component fill:#fff3e0,stroke:#ff6f00,stroke-width:2px
-    classDef output fill:#f1f8e9,stroke:#33691e,stroke-width:2px
-
-    subgraph Data["Data Pipeline"]
-        D1[("CodeMMLU<br/>Dataset")]:::component --> D2["Data Processing<br/>(YAML Format)"]:::component
-        D2 --> D3["Teacher Synthesis<br/>(GPT-4o/3.5)"]:::component
-        D3 --> D4[("Processed MCQ<br/>Dataset")]:::output
-    end
-
-    subgraph Training["Training Pipeline"]
-        T1[("Qwen2.5<br/>Base Model")]:::component --> T2["LoRA Fine-tuning<br/>(8-bit Quantization)"]:::component
-        D4 --> T2
-        T2 --> T3["Fine-tuned Model<br/>(LoRA Weights)"]:::output
-        T3 --> T4["Model Evaluation<br/>(Accuracy/Loss)"]:::component
-    end
-
-    subgraph Monitoring["Monitoring & Callbacks"]
-        M1["WandB Logger<br/>(Real-time)"]:::component --> M2["Metrics Tracking<br/>(Loss/Accuracy)"]:::component
-        M2 --> M3["Early Stopping<br/>(Patience: 3)"]:::component
-        M2 --> M4["Validation<br/>(10% Split)"]:::component
-        M2 --> M5["Prompt Monitor<br/>(Quality/Diversity)"]:::component
-    end
-
-    Data --> Training
-    Training --> Monitoring
-
-    class Data,Training,Monitoring pipeline
-```
-
-### Teacher Synthesis Pipeline
-
-```mermaid
-graph LR
-    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-    classDef data fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    classDef monitor fill:#fce4ec,stroke:#c2185b,stroke-width:2px
-
-    subgraph Input["Input Processing"]
-        I1[("Raw MCQ<br/>Data")]:::data --> I2["Task Queue<br/>(Batch Size: 5)"]:::process
-        I2 --> I3["Concurrent<br/>Processing"]:::process
-    end
-
-    subgraph Synthesis["Synthesis Process"]
-        S1["GPT-4o/3.5<br/>API Calls"]:::process --> S2["YAML<br/>Generation"]:::process
-        S2 --> S3["Answer<br/>Verification"]:::process
-        S3 --> S4["Quality<br/>Check"]:::process
-    end
-
-    subgraph Output["Output & Monitoring"]
-        O1["Save<br/>Explanations"]:::output --> O2["Calculate<br/>Metrics"]:::monitor
-        O2 --> O3["Track<br/>Progress"]:::monitor
-        O3 --> O4["WandB<br/>Logging"]:::monitor
-    end
-
-    Input --> Synthesis
-    Synthesis --> Output
-
-    style Input fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Synthesis fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Output fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-```
-
-### Data Processing Pipeline
-
-```mermaid
-graph TB
-    classDef input fill:#e8eaf6,stroke:#283593,stroke-width:2px
-    classDef process fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef validation fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    classDef output fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
-
-    subgraph Input["Input Data Processing"]
-        D1[("CodeMMLU<br/>Dataset")]:::input --> D2["Question<br/>Extraction"]:::process
-        D2 --> D3["Choice<br/>Formatting"]:::process
-        D3 --> D4["Token<br/>Encoding"]:::process
-    end
-
-    subgraph Processing["Data Enhancement"]
-        P1["YAML<br/>Formatting"]:::process --> P2["Token<br/>Analysis"]:::process
-        P2 --> P3["Quality<br/>Metrics"]:::process
-        P3 --> P4["Diversity<br/>Tracking"]:::process
-    end
-
-    subgraph Validation["Quality Control"]
-        V1["Answer<br/>Preservation"]:::validation --> V2["Format<br/>Verification"]:::validation
-        V2 --> V3["Metrics<br/>Logging"]:::validation
-        V3 --> V4["Error<br/>Handling"]:::validation
-    end
-
-    subgraph Output["Data Output"]
-        O1["Save<br/>Dataset"]:::output --> O2["Generate<br/>Statistics"]:::output
-        O2 --> O3["Create<br/>Visualizations"]:::output
-    end
-
-    Input --> Processing
-    Processing --> Validation
-    Validation --> Output
-
-    style Input fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Processing fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Validation fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Output fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-```
-
-### Training Architecture
-
-```mermaid
-classDiagram
-    class QwenTrainer {
-        +model: PreTrainedModel
-        +tokenizer: PreTrainedTokenizer
-        +prompt_creator: PromptCreator
-        +train(dataset, args)
-        +evaluate(dataset)
-        +save_checkpoint(path)
-        +push_to_hub(repo_id)
-        -setup_optimizer()
-        -setup_scheduler()
-    }
-
-    class PromptCreator {
-        +YAML_REASONING: str
-        +TEACHER_REASONED: str
-        +BASIC: str
-        +create_inference_prompt(question, choices)
-        +create_training_prompt(question, choices)
-        -format_choices(choices)
-        -validate_format(prompt)
-    }
-
-    class TeacherSynthesisFramework {
-        +model_config: ModelConfig
-        +output_dir: str
-        +concurrent_requests: int
-        +generate_synthetic_explanation()
-        +process_dataset(dataset)
-        +_calculate_metrics()
-        -_save_results()
-        -_handle_errors()
-    }
-
-    class Callbacks {
-        +ValidationCallback
-        +EarlyStoppingCallback
-        +PromptMonitorCallback
-        +LRMonitorCallback
-        +ModelLoadingCallback
-        -track_metrics()
-        -log_to_wandb()
-    }
-
-    class ModelConfig {
-        +name: str
-        +temperature: float
-        +max_tokens: int
-        +api_key: str
-        +validate()
-        +to_dict()
-    }
-
-    QwenTrainer --> PromptCreator: uses
-    QwenTrainer --> Callbacks: manages
-    TeacherSynthesisFramework --> PromptCreator: uses
-    TeacherSynthesisFramework --> ModelConfig: configures
-    Callbacks --> QwenTrainer: monitors
-
-    note for QwenTrainer "Main training orchestrator"
-    note for PromptCreator "Handles prompt generation"
-    note for TeacherSynthesisFramework "Manages synthetic data"
-    note for Callbacks "Monitors training process"
-```
-
-### Monitoring System
-
-```mermaid
-graph LR
-    classDef metrics fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
-    classDef callbacks fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    classDef viz fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-
-    subgraph Metrics["Metrics Collection"]
-        M1["Training Loss<br/>(Per Step)"]:::metrics --> M4["WandB<br/>Logger"]:::metrics
-        M2["Validation<br/>Metrics"]:::metrics --> M4
-        M3["Prompt<br/>Quality"]:::metrics --> M4
-    end
-
-    subgraph Callbacks["Training Control"]
-        C1["Early<br/>Stopping"]:::callbacks --> C4["Training<br/>Control"]:::callbacks
-        C2["Learning Rate<br/>Monitor"]:::callbacks --> C4
-        C3["Prompt<br/>Monitor"]:::callbacks --> C4
-    end
-
-    subgraph Visualization["Analytics Dashboard"]
-        V1["Loss<br/>Curves"]:::viz --> V4["WandB<br/>Dashboard"]:::viz
-        V2["Prompt<br/>Statistics"]:::viz --> V4
-        V3["Model<br/>Performance"]:::viz --> V4
-    end
-
-    Metrics --> Callbacks
-    Callbacks --> Visualization
-
-    style Metrics fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Callbacks fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Visualization fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-```
-
 ## 🚀 Quick Start
 
 ### Installation
@@ -758,4 +544,218 @@ Teacher Analysis:
 - D. This option is similar to B but is redundant because it doesn't add any new logic beyond incrementing by 1.
 Teacher Reasoning: The solution needs to increment the sequence count (ans) each time a complete set of k unique numbers is seen. Option B correctly increments the count by 1 when the set size equals k, which signifies that a complete sequence of k numbers has been formed and another sequence can start.
 Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
+```
+
+## 🏗️ Architecture
+
+### Overall System Architecture
+
+```mermaid
+graph TB
+    classDef pipeline fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef component fill:#fff3e0,stroke:#ff6f00,stroke-width:2px
+    classDef output fill:#f1f8e9,stroke:#33691e,stroke-width:2px
+
+    subgraph Data["Data Pipeline"]
+        D1[("CodeMMLU<br/>Dataset")]:::component --> D2["Data Processing<br/>(YAML Format)"]:::component
+        D2 --> D3["Teacher Synthesis<br/>(GPT-4o/3.5)"]:::component
+        D3 --> D4[("Processed MCQ<br/>Dataset")]:::output
+    end
+
+    subgraph Training["Training Pipeline"]
+        T1[("Qwen2.5<br/>Base Model")]:::component --> T2["LoRA Fine-tuning<br/>(8-bit Quantization)"]:::component
+        D4 --> T2
+        T2 --> T3["Fine-tuned Model<br/>(LoRA Weights)"]:::output
+        T3 --> T4["Model Evaluation<br/>(Accuracy/Loss)"]:::component
+    end
+
+    subgraph Monitoring["Monitoring & Callbacks"]
+        M1["WandB Logger<br/>(Real-time)"]:::component --> M2["Metrics Tracking<br/>(Loss/Accuracy)"]:::component
+        M2 --> M3["Early Stopping<br/>(Patience: 3)"]:::component
+        M2 --> M4["Validation<br/>(10% Split)"]:::component
+        M2 --> M5["Prompt Monitor<br/>(Quality/Diversity)"]:::component
+    end
+
+    Data --> Training
+    Training --> Monitoring
+
+    class Data,Training,Monitoring pipeline
+```
+
+### Teacher Synthesis Pipeline
+
+```mermaid
+graph LR
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef data fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef monitor fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+
+    subgraph Input["Input Processing"]
+        I1[("Raw MCQ<br/>Data")]:::data --> I2["Task Queue<br/>(Batch Size: 5)"]:::process
+        I2 --> I3["Concurrent<br/>Processing"]:::process
+    end
+
+    subgraph Synthesis["Synthesis Process"]
+        S1["GPT-4o/3.5<br/>API Calls"]:::process --> S2["YAML<br/>Generation"]:::process
+        S2 --> S3["Answer<br/>Verification"]:::process
+        S3 --> S4["Quality<br/>Check"]:::process
+    end
+
+    subgraph Output["Output & Monitoring"]
+        O1["Save<br/>Explanations"]:::output --> O2["Calculate<br/>Metrics"]:::monitor
+        O2 --> O3["Track<br/>Progress"]:::monitor
+        O3 --> O4["WandB<br/>Logging"]:::monitor
+    end
+
+    Input --> Synthesis
+    Synthesis --> Output
+
+    style Input fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Synthesis fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Output fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+```
+
+### Data Processing Pipeline
+
+```mermaid
+graph TB
+    classDef input fill:#e8eaf6,stroke:#283593,stroke-width:2px
+    classDef process fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef validation fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+    classDef output fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+
+    subgraph Input["Input Data Processing"]
+        D1[("CodeMMLU<br/>Dataset")]:::input --> D2["Question<br/>Extraction"]:::process
+        D2 --> D3["Choice<br/>Formatting"]:::process
+        D3 --> D4["Token<br/>Encoding"]:::process
+    end
+
+    subgraph Processing["Data Enhancement"]
+        P1["YAML<br/>Formatting"]:::process --> P2["Token<br/>Analysis"]:::process
+        P2 --> P3["Quality<br/>Metrics"]:::process
+        P3 --> P4["Diversity<br/>Tracking"]:::process
+    end
+
+    subgraph Validation["Quality Control"]
+        V1["Answer<br/>Preservation"]:::validation --> V2["Format<br/>Verification"]:::validation
+        V2 --> V3["Metrics<br/>Logging"]:::validation
+        V3 --> V4["Error<br/>Handling"]:::validation
+    end
+
+    subgraph Output["Data Output"]
+        O1["Save<br/>Dataset"]:::output --> O2["Generate<br/>Statistics"]:::output
+        O2 --> O3["Create<br/>Visualizations"]:::output
+    end
+
+    Input --> Processing
+    Processing --> Validation
+    Validation --> Output
+
+    style Input fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Processing fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Validation fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Output fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+```
+
+### Training Architecture
+
+```mermaid
+classDiagram
+    class QwenTrainer {
+        +model: PreTrainedModel
+        +tokenizer: PreTrainedTokenizer
+        +prompt_creator: PromptCreator
+        +train(dataset, args)
+        +evaluate(dataset)
+        +save_checkpoint(path)
+        +push_to_hub(repo_id)
+        -setup_optimizer()
+        -setup_scheduler()
+    }
+
+    class PromptCreator {
+        +YAML_REASONING: str
+        +TEACHER_REASONED: str
+        +BASIC: str
+        +create_inference_prompt(question, choices)
+        +create_training_prompt(question, choices)
+        -format_choices(choices)
+        -validate_format(prompt)
+    }
+
+    class TeacherSynthesisFramework {
+        +model_config: ModelConfig
+        +output_dir: str
+        +concurrent_requests: int
+        +generate_synthetic_explanation()
+        +process_dataset(dataset)
+        +_calculate_metrics()
+        -_save_results()
+        -_handle_errors()
+    }
+
+    class Callbacks {
+        +ValidationCallback
+        +EarlyStoppingCallback
+        +PromptMonitorCallback
+        +LRMonitorCallback
+        +ModelLoadingCallback
+        -track_metrics()
+        -log_to_wandb()
+    }
+
+    class ModelConfig {
+        +name: str
+        +temperature: float
+        +max_tokens: int
+        +api_key: str
+        +validate()
+        +to_dict()
+    }
+
+    QwenTrainer --> PromptCreator: uses
+    QwenTrainer --> Callbacks: manages
+    TeacherSynthesisFramework --> PromptCreator: uses
+    TeacherSynthesisFramework --> ModelConfig: configures
+    Callbacks --> QwenTrainer: monitors
+
+    note for QwenTrainer "Main training orchestrator"
+    note for PromptCreator "Handles prompt generation"
+    note for TeacherSynthesisFramework "Manages synthetic data"
+    note for Callbacks "Monitors training process"
+```
+
+### Monitoring System
+
+```mermaid
+graph LR
+    classDef metrics fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
+    classDef callbacks fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef viz fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+
+    subgraph Metrics["Metrics Collection"]
+        M1["Training Loss<br/>(Per Step)"]:::metrics --> M4["WandB<br/>Logger"]:::metrics
+        M2["Validation<br/>Metrics"]:::metrics --> M4
+        M3["Prompt<br/>Quality"]:::metrics --> M4
+    end
+
+    subgraph Callbacks["Training Control"]
+        C1["Early<br/>Stopping"]:::callbacks --> C4["Training<br/>Control"]:::callbacks
+        C2["Learning Rate<br/>Monitor"]:::callbacks --> C4
+        C3["Prompt<br/>Monitor"]:::callbacks --> C4
+    end
+
+    subgraph Visualization["Analytics Dashboard"]
+        V1["Loss<br/>Curves"]:::viz --> V4["WandB<br/>Dashboard"]:::viz
+        V2["Prompt<br/>Statistics"]:::viz --> V4
+        V3["Model<br/>Performance"]:::viz --> V4
+    end
+
+    Metrics --> Callbacks
+    Callbacks --> Visualization
+
+    style Metrics fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Callbacks fill:#f8f9fa,stroke:#343a40,stroke-width:2px
+    style Visualization fill:#f8f9fa,stroke:#343a40,stroke-width:2px
 ```
