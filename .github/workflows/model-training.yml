@@ -1,0 +1,79 @@
+name: Model Training and Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      experiment_name:
+        description: 'Name of the experiment'
+        required: true
+        default: 'training_run'
+      epochs:
+        description: 'Number of epochs'
+        required: true
+        default: '3'
+      batch_size:
+        description: 'Batch size'
+        required: true
+        default: '24'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup environment variables
+        run: |
+          echo "HF_TOKEN=${{ secrets.HF_TOKEN }}" >> $GITHUB_ENV
+          echo "WANDB_API_KEY=${{ secrets.WANDB_API_KEY }}" >> $GITHUB_ENV
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Cache models
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-models-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Train model
+        run: |
+          python src/run.py \
+            --experiment-name ${{ github.event.inputs.experiment_name }} \
+            --epochs ${{ github.event.inputs.epochs }} \
+            --batch-size ${{ github.event.inputs.batch_size }} \
+            --test-mode
+
+      - name: Upload training artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: training-outputs
+          path: |
+            outputs/
+            wandb/
+            *.log
+
+      - name: Evaluate model
+        run: |
+          python src/data_synthesis/gpt4o_generated.py \
+            --model gpt-4o \
+            --sample-size 10 \
+            --test-mode
+
+      - name: Notify on Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow,job,took
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always()
