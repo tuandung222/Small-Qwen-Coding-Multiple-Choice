@@ -15,8 +15,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from data.prompt_creator import PromptCreator
 from model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
+from training.callbacks import EarlyStoppingCallback, ValidationCallback
 from training.trainer import QwenTrainer
 from utils.auth import setup_authentication
+from utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
 
 # Setup logging
 logging.basicConfig(
@@ -150,6 +152,12 @@ def parse_args():
     parser.add_argument(
         "--output-dir", type=str, default="./model_output", help="Directory to save model outputs"
     )
+    parser.add_argument(
+        "--early-stopping-patience", type=int, default=3, help="Patience for early stopping"
+    )
+    parser.add_argument(
+        "--test-mode", action="store_true", help="Use only 2 dataset instances for quick testing"
+    )
 
     # Repository configuration
     parser.add_argument(
@@ -231,13 +239,14 @@ def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
         raise
 
 
-def load_datasets(hf_token, dataset_id):
+def load_datasets(hf_token, dataset_id, test_mode=False):
     """
     Load datasets from HuggingFace Hub
 
     Args:
         hf_token: HuggingFace token for authentication
         dataset_id: ID of the dataset on HuggingFace Hub
+        test_mode: If True, use only 2 dataset instances for quick testing
 
     Returns:
         Dataset: Training dataset
@@ -246,6 +255,12 @@ def load_datasets(hf_token, dataset_id):
         logger.info(f"Loading dataset {dataset_id} from HuggingFace Hub...")
         dataset = load_dataset(dataset_id, token=hf_token, split="train")
         logger.info(f"Loaded {len(dataset)} training examples")
+
+        # Apply test mode if enabled
+        if test_mode:
+            logger.info("TEST MODE ENABLED: Using only 2 dataset instances")
+            dataset = dataset.select(range(2))
+            logger.info(f"Dataset reduced to {len(dataset)} examples")
 
         # Log dataset statistics
         logger.info("Dataset statistics:")
@@ -278,19 +293,81 @@ def main():
 
         # Initialize model and trainer
         trainer = setup_model_and_trainer(
-            source_hub, destination_hub, max_seq_length=args.max_seq_length
+            source_hub,
+            destination_hub,
+            max_seq_length=args.max_seq_length,
         )
 
         # Load dataset from HuggingFace Hub
-        train_dataset = load_datasets(hf_token, args.dataset)
+        train_dataset = load_datasets(hf_token, args.dataset, test_mode=args.test_mode)
 
         # Training configuration
         output_dir = args.output_dir
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Training outputs will be saved to: {output_dir}")
 
+        # Setup callbacks
+        callbacks = []
+
+        # Early stopping callback
+        early_stopping = EarlyStoppingCallback(
+            patience=args.early_stopping_patience, min_delta=0.01
+        )
+        callbacks.append(early_stopping)
+        logger.info(f"Added early stopping callback with patience={args.early_stopping_patience}")
+
+        # Validation callback
+        validation_callback = ValidationCallback(trainer_instance=trainer)
+        callbacks.append(validation_callback)
+        logger.info("Added validation callback for model monitoring")
+
+        # Setup WandB logging if available
+        try:
+            # Create WandB configuration
+            model_name = args.source_model.split("/")[-1]
+            project_name = f"{model_name}-Coding-MCQ-Training"
+
+            # Add test mode indicator to run name if enabled
+            run_prefix = "TEST_" if args.test_mode else ""
+            run_name = f"{run_prefix}batch{args.batch_size}_lr{args.learning_rate}_e{args.epochs}_{int(time.time())}"
+
+            # Add test mode tag if enabled
+            tags = ["qwen", "coding", "lora", "multiple-choice", "callbacks"]
+            if args.test_mode:
+                tags.append("test_mode")
+
+            notes_prefix = "TEST MODE: " if args.test_mode else ""
+            notes = f"{notes_prefix}Training with all callbacks enabled: validation, early stopping (patience={args.early_stopping_patience})"
+
+            wandb_config = WandBConfig(
+                project_name=project_name,
+                run_name=run_name,
+                tags=tags,
+                notes=notes,
+                log_memory=True,
+                log_gradients=True,
+            )
+
+            # Initialize WandB logger
+            wandb_logger = WandBLogger(config=wandb_config)
+            wandb_logger.setup()
+
+            # Add WandB callback
+            wandb_callback = WandBCallback(logger=wandb_logger)
+            callbacks.append(wandb_callback)
+
+            logger.info(f"WandB logging enabled with project: {project_name}, run: {run_name}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize WandB logging: {e}")
+            logger.warning("Continuing without WandB callbacks")
+
+        # Set logging and save frequency based on test mode
+        logging_steps = 10 if args.test_mode else 100
+        save_steps = 20 if args.test_mode else 500
+        logger.info(f"Using logging_steps={logging_steps}, save_steps={save_steps}")
+
         # Start training
-        logger.info("Starting training...")
+        logger.info("Starting training with all callbacks enabled...")
         results = trainer.train(
             train_dataset=train_dataset,
             val_split=args.val_split,
@@ -303,8 +380,8 @@ def main():
             warmup_ratio=0.1,
             # Validation and checkpointing
             save_strategy="steps",
-            save_steps=500,
-            logging_steps=100,
+            save_steps=save_steps,
+            logging_steps=logging_steps,
             # Model selection
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
@@ -314,6 +391,8 @@ def main():
             # Other settings
             save_total_limit=3,
             random_seed=42,
+            # Pass the callbacks
+            callbacks=callbacks,
         )
 
         # Log results

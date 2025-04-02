@@ -52,17 +52,58 @@ The environment variables required are:
 
 ### Training
 
-The training script provides a flexible command-line interface with many configuration options. Basic usage:
+This project provides several scripts for easy model training:
+
+1. **Basic Training Script**: Run training with standard parameters
+   ```bash
+   ./scripts/train_experiment.sh my_experiment
+   ```
+
+2. **Batch-32 Training Script**: Train with batch size 32 for faster convergence
+   ```bash
+   ./scripts/train_batch32.sh
+   ```
+
+3. **Comprehensive Training with All Callbacks**: Train with validation, early stopping and WandB integration
+   ```bash
+   ./scripts/train_with_callbacks.sh full_experiment
+   ```
+
+4. **Quick Test Mode**: Train on just 2 dataset instances for rapid testing and debugging
+   ```bash
+   ./scripts/train_with_callbacks.sh quick_test --test-mode --epochs 2
+   ```
+
+All training scripts support various command-line arguments to customize the training process. Use the `--help` flag to see all available options:
 
 ```bash
-python src/run.py
+./scripts/train_with_callbacks.sh --help
 ```
 
-This will:
-1. Load the Qwen2.5-Coder-1.5B-Instruct model
-2. Apply LoRA fine-tuning on the coding-mcq-reasoning dataset
-3. Automatically create a repository on HuggingFace Hub
-4. Push the trained model to the repository
+### Training Output Structure
+
+All experiment outputs are organized in the `experiment_output` directory by default. Each run creates a timestamped subdirectory with:
+
+- Training logs
+- Model checkpoints
+- Experiment configuration
+- Training metrics
+- Status markers
+
+### Using Weights & Biases for Experiment Tracking
+
+The comprehensive training script automatically integrates with Weights & Biases (WandB). Ensure you have logged in with your WandB credentials:
+
+```bash
+wandb login
+```
+
+This enables real-time tracking of:
+- Training and validation loss
+- Learning rate schedule
+- GPU memory usage
+- Model gradients
+- Training samples with predictions
 
 ### Advanced Configuration
 

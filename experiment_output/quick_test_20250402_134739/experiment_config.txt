@@ -1,0 +1,14 @@
+Experiment: quick_test
+Timestamp: 20250402_134739
+Model: unsloth/Qwen2.5-Coder-1.5B-Instruct
+Repository: auto-generated
+Epochs: 2
+Batch size: 16
+Learning rate: 2e-4
+Gradient accumulation: 2
+Effective batch size: 32
+Dataset: tuandunghcmut/coding-mcq-reasoning
+Sequence length: 2048
+Early stopping patience: 3
+Validation split: 0.15
+Test mode: true

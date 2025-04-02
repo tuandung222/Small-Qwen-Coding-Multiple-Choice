@@ -10,6 +10,10 @@ repos:
     -   id: check-case-conflict  # Checks for files that would conflict in case-insensitive filesystems
     -   id: check-merge-conflict  # Checks for files that contain merge conflict strings
     -   id: debug-statements  # Checks for debugger imports and py37+ `breakpoint()` calls
+        exclude: |
+            (?x)^(
+                .*experiment_output/.*
+            )
     -   id: detect-private-key  # Detects the presence of private keys
 
 -   repo: https://github.com/psf/black
@@ -21,7 +25,8 @@ repos:
         exclude: |
             (?x)^(
                 .*unsloth_compiled_cache/.*|
-                .*full\.py$
+                .*full\.py$|
+                .*experiment_output/.*
             )
 
 -   repo: https://github.com/pycqa/isort
@@ -32,5 +37,6 @@ repos:
         exclude: |
             (?x)^(
                 .*unsloth_compiled_cache/.*|
-                .*full\.py$
+                .*full\.py$|
+                .*experiment_output/.*
             )
