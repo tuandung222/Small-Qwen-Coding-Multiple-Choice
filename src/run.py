@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch
 from datasets import load_dataset
+from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -46,15 +49,71 @@ def setup_environment():
     return hf_token
 
 
-def setup_hub_configs(hf_token):
-    """Setup source and destination hub configurations"""
-    source_hub = HubConfig(model_id="unsloth/Qwen2.5-Coder-1.5B-Instruct", token=hf_token)
+def setup_hub_configs(
+    hf_token, source_model_id=None, destination_repo_id=None, private=True, save_method="lora"
+):
+    """
+    Setup source and destination hub configurations
+
+    Args:
+        hf_token: Hugging Face token for authentication
+        source_model_id: ID of the source model (defaults to Qwen2.5-Coder-1.5B-Instruct)
+        destination_repo_id: ID for the destination repo (username/repo-name)
+        private: Whether the destination repo should be private
+        save_method: Method to use for saving the model
+
+    Returns:
+        Tuple of source and destination hub configurations
+    """
+    # Set default source model if not provided
+    if not source_model_id:
+        source_model_id = "unsloth/Qwen2.5-Coder-1.5B-Instruct"
+
+    source_hub = HubConfig(model_id=source_model_id, token=hf_token)
+
+    # Set default destination repo if not provided
+    if not destination_repo_id:
+        # Get username from HF API
+        api = HfApi(token=hf_token)
+        try:
+            user_info = api.whoami()
+            username = user_info.get("name", "user")
+            # Create a default repo name based on source model
+            model_name = source_model_id.split("/")[-1]
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            destination_repo_id = f"{username}/{model_name}_finetuned_{timestamp}"
+        except Exception as e:
+            logger.warning(f"Could not get username from HF API: {str(e)}")
+            destination_repo_id = f"user/qwen_finetuned_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    # Check if the repository exists
+    api = HfApi(token=hf_token)
+    try:
+        # Try to get the repo info to check if it exists
+        api.repo_info(repo_id=destination_repo_id, repo_type="model")
+        logger.info(f"Repository {destination_repo_id} already exists")
+    except Exception as e:
+        # If the repo doesn't exist, create it
+        logger.info(f"Repository {destination_repo_id} not found, creating it...")
+        try:
+            create_repo(
+                repo_id=destination_repo_id,
+                token=hf_token,
+                private=private,
+                repo_type="model",
+            )
+            logger.info(f"Repository {destination_repo_id} created successfully")
+            # Give HF a moment to register the new repo
+            time.sleep(2)
+        except Exception as create_error:
+            logger.error(f"Failed to create repository: {str(create_error)}")
+            raise
 
     destination_hub = HubConfig(
-        model_id="tuandunghcmut/Qwen25_Coder_MultipleChoice_v2",
+        model_id=destination_repo_id,
         token=hf_token,
-        private=True,
-        save_method="lora",
+        private=private,
+        save_method=save_method,
     )
 
     logger.info(f"Source model: {source_hub.model_id}")
@@ -63,14 +122,69 @@ def setup_hub_configs(hf_token):
     return source_hub, destination_hub
 
 
-def setup_model_and_trainer(source_hub, destination_hub):
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Train a Qwen model for multiple choice questions")
+
+    # Model configuration
+    parser.add_argument(
+        "--source-model",
+        type=str,
+        default="unsloth/Qwen2.5-Coder-1.5B-Instruct",
+        help="Source model ID on Hugging Face Hub",
+    )
+    parser.add_argument(
+        "--destination-repo", type=str, help="Destination repository ID on Hugging Face Hub"
+    )
+    parser.add_argument(
+        "--max-seq-length", type=int, default=2048, help="Maximum sequence length for the model"
+    )
+
+    # Training configuration
+    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument(
+        "--batch-size", type=int, default=4, help="Per device batch size for training"
+    )
+    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
+
+    # Repository configuration
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        default=True,
+        help="Make the destination repository private",
+    )
+    parser.add_argument(
+        "--save-method",
+        type=str,
+        default="lora",
+        choices=["lora", "merged_16bit", "merged_4bit", "gguf"],
+        help="Method to use for saving the model",
+    )
+
+    # Dataset configuration
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="tuandunghcmut/coding-mcq-reasoning",
+        help="Dataset ID on Hugging Face Hub",
+    )
+    parser.add_argument(
+        "--val-split", type=float, default=0.1, help="Fraction of data to use for validation"
+    )
+
+    return parser.parse_args()
+
+
+def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
     """Initialize model handler and trainer"""
     try:
         # Initialize model handler
         logger.info("Initializing model handler...")
         model_handler = QwenModelHandler(
             model_name=source_hub.model_id,
-            max_seq_length=2048,
+            max_seq_length=max_seq_length,
             quantization="4bit",
             model_source=ModelSource.UNSLOTH,
             device_map="auto",
@@ -114,19 +228,20 @@ def setup_model_and_trainer(source_hub, destination_hub):
         raise
 
 
-def load_datasets(hf_token: str):
+def load_datasets(hf_token, dataset_id):
     """
     Load datasets from HuggingFace Hub
 
     Args:
         hf_token: HuggingFace token for authentication
+        dataset_id: ID of the dataset on HuggingFace Hub
 
     Returns:
         Dataset: Training dataset
     """
     try:
-        logger.info("Loading dataset from HuggingFace Hub...")
-        dataset = load_dataset("tuandunghcmut/coding-mcq-reasoning", token=hf_token, split="train")
+        logger.info(f"Loading dataset {dataset_id} from HuggingFace Hub...")
+        dataset = load_dataset(dataset_id, token=hf_token, split="train")
         logger.info(f"Loaded {len(dataset)} training examples")
 
         # Log dataset statistics
@@ -143,17 +258,28 @@ def load_datasets(hf_token: str):
 
 def main():
     try:
+        # Parse command line arguments
+        args = parse_args()
+
         # Setup environment
         hf_token = setup_environment()
 
         # Setup hub configurations
-        source_hub, destination_hub = setup_hub_configs(hf_token)
+        source_hub, destination_hub = setup_hub_configs(
+            hf_token=hf_token,
+            source_model_id=args.source_model,
+            destination_repo_id=args.destination_repo,
+            private=args.private,
+            save_method=args.save_method,
+        )
 
         # Initialize model and trainer
-        trainer = setup_model_and_trainer(source_hub, destination_hub)
+        trainer = setup_model_and_trainer(
+            source_hub, destination_hub, max_seq_length=args.max_seq_length
+        )
 
         # Load dataset from HuggingFace Hub
-        train_dataset = load_datasets(hf_token)
+        train_dataset = load_datasets(hf_token, args.dataset)
 
         # Training configuration
         output_dir = "./model_output"
@@ -163,13 +289,13 @@ def main():
         logger.info("Starting training...")
         results = trainer.train(
             train_dataset=train_dataset,
-            val_split=0.1,  # 10% of data for validation
+            val_split=args.val_split,
             output_dir=output_dir,
             # Training parameters
-            num_train_epochs=3,
-            per_device_train_batch_size=4,
-            gradient_accumulation_steps=4,
-            learning_rate=2e-4,
+            num_train_epochs=args.epochs,
+            per_device_train_batch_size=args.batch_size,
+            gradient_accumulation_steps=args.grad_accum,
+            learning_rate=args.learning_rate,
             warmup_ratio=0.1,
             # Validation and checkpointing
             save_strategy="steps",
