@@ -185,6 +185,8 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
               [--train-on-responses-only] [--instruction-token INSTRUCTION_TOKEN]
               [--response-token RESPONSE_TOKEN] [--instruction-token-id INSTRUCTION_TOKEN_ID]
               [--response-token-id RESPONSE_TOKEN_ID]
+              [--attention-implementation {default,flash_attention_2,sdpa,eager,xformers}]
+              [--use-flash-attention] [--force-attn-implementation]
 ```
 
 ### Key Parameters
@@ -337,6 +339,38 @@ python -m src.run --train-on-responses-only --instruction-token-id 83769 --respo
 ```
 
 For the complete list of parameters, run `python -m src.run --help`.
+
+### Attention Implementation
+
+The training script provides options for configuring the attention mechanism implementation. Different attention implementations can significantly affect training speed and memory usage. The framework supports multiple attention implementations:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--attention-implementation` | Type of attention implementation to use | `default` |
+| `--use-flash-attention` | Use Flash Attention 2 if available (shortcut for setting attention-implementation=flash_attention_2) | False |
+| `--force-attn-implementation` | Force the attention implementation even if not optimal for the hardware | False |
+
+Available attention implementations:
+- `default`: The default implementation provided by the model
+- `flash_attention_2`: Flash Attention 2, which provides significant speedups but requires appropriate hardware/CUDA support
+- `sdpa`: PyTorch's Scaled Dot Product Attention, which offers good performance on modern GPUs
+- `eager`: Standard eager execution mode attention
+- `xformers`: xFormers library's memory-efficient attention (requires xformers to be installed)
+
+Example usage:
+
+```bash
+# Use Flash Attention 2 for faster training
+python -m src.run --use-flash-attention
+
+# Use SDPA implementation
+python -m src.run --attention-implementation sdpa
+
+# Force a specific implementation even if not optimal
+python -m src.run --attention-implementation flash_attention_2 --force-attn-implementation
+```
+
+The system will automatically check for hardware compatibility with your chosen attention implementation and fall back to the default if needed (unless `--force-attn-implementation` is specified).
 
 ### Inference
 

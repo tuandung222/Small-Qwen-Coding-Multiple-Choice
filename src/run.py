@@ -245,6 +245,7 @@ def parse_args():
 
     # Additional PEFT configuration
     parser.add_argument(
+        "--------------------------------------------- Additional LoRA and PEFT Configuration ---------------------------------------------",
         "--target-modules",
         type=str,
         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
@@ -287,6 +288,8 @@ def parse_args():
         default=8,
         help="Target rank for AdaLoRA",
     )
+
+    # AdaLoRA parameters
     parser.add_argument(
         "--adalora-init-r",
         type=int,
@@ -322,6 +325,27 @@ def parse_args():
         type=float,
         default=0.85,
         help="Hyperparameter for EMA calculation in AdaLoRA",
+    )
+
+    # Attention implementation configuration
+    parser.add_argument(
+        "--attention-implementation",
+        type=str,
+        default="default",
+        choices=["default", "flash_attention_2", "sdpa", "eager", "xformers"],
+        help="Type of attention implementation to use",
+    )
+    parser.add_argument(
+        "--use-flash-attention",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 2 if available (shortcut for setting attention-implementation=flash_attention_2)",
+    )
+    parser.add_argument(
+        "--force-attn-implementation",
+        action="store_true",
+        default=False,
+        help="Force the attention implementation even if not optimal for the hardware",
     )
 
     # Repository configuration
@@ -472,6 +496,13 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
     try:
         # Initialize model handler
         logger.info("Initializing model handler...")
+
+        # Determine attention implementation
+        attn_implementation = args.attention_implementation
+        if args.use_flash_attention:
+            attn_implementation = "flash_attention_2"
+            logger.info("Flash Attention 2 flag enabled, overriding attention implementation")
+
         model_handler = QwenModelHandler(
             model_name=source_hub.model_id,
             max_seq_length=args.max_seq_length,
@@ -479,6 +510,8 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
             model_source=ModelSource.UNSLOTH,
             device_map="auto",
             source_hub_config=source_hub,
+            attn_implementation=attn_implementation,
+            force_attn_implementation=args.force_attn_implementation,
         )
 
         # Configure LoRA
@@ -514,8 +547,6 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
                 task_type="CAUSAL_LM",
                 fan_in_fan_out=args.fan_in_fan_out,
                 modules_to_save=modules_to_save,
-                use_gradient_checkpointing=args.use_gradient_checkpointing,
-                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
             )
         elif args.peft_type == "adalora":
             from peft import AdaLoraConfig
@@ -536,8 +567,6 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
                 beta2=args.adalora_beta2,
                 fan_in_fan_out=args.fan_in_fan_out,
                 modules_to_save=modules_to_save,
-                use_gradient_checkpointing=args.use_gradient_checkpointing,
-                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
             )
         elif args.peft_type == "prefix":
             from peft import PrefixTuningConfig
