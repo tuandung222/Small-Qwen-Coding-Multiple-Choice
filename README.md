@@ -171,7 +171,17 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
               [--val-split VAL_SPLIT] [--random-seed RANDOM_SEED]
               [--optimizer OPTIMIZER] [--adam-beta1 ADAM_BETA1] [--adam-beta2 ADAM_BETA2]
               [--adam-epsilon ADAM_EPSILON] [--max-grad-norm MAX_GRAD_NORM]
-              [--optim-bits OPTIM_BITS]
+              [--optim-bits OPTIM_BITS] [--lr-scheduler LR_SCHEDULER]
+              [--lr-scheduler-num-cycles LR_SCHEDULER_NUM_CYCLES]
+              [--lr-scheduler-power LR_SCHEDULER_POWER]
+              [--lr-scheduler-last-epoch LR_SCHEDULER_LAST_EPOCH]
+              [--peft-type PEFT_TYPE] [--adalora-target-r ADALORA_TARGET_R]
+              [--adalora-init-r ADALORA_INIT_R] [--adalora-tinit ADALORA_TINIT]
+              [--adalora-tfinal ADALORA_TFINAL] [--adalora-delta-t ADALORA_DELTA_T]
+              [--adalora-beta1 ADALORA_BETA1] [--adalora-beta2 ADALORA_BETA2]
+              [--target-modules TARGET_MODULES] [--fan-in-fan-out FAN_IN_FAN_OUT]
+              [--use-gradient-checkpointing USE_GRADIENT_CHECKPOINTING]
+              [--modules-to-save MODULES_TO_SAVE]
 ```
 
 ### Key Parameters
@@ -181,7 +191,7 @@ usage: run.py [-h] [--source-model SOURCE_MODEL] [--destination-repo DESTINATION
 | `--experiment-name` | Name for this experiment | auto-generated timestamp |
 | `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
 | `--destination-repo` | HF Hub repo for the model | tuandunghcmut/Qwen25_Coder_MultipleChoice_v2 |
-| `--batch-size` | Per device batch size | 16 |
+| `--batch-size` | Per device batch size | 24 |
 | `--grad-accum` | Gradient accumulation steps | 4 |
 | `--learning-rate` | Learning rate | 2e-4 |
 | `--warmup-ratio` | Proportion of steps for warmup | 0.1 |
@@ -216,9 +226,77 @@ The `--optimizer` parameter supports several options:
 - `lion`: Lion optimizer (less memory, potentially better generalization)
 - `adafactor`: Adafactor optimizer (memory efficient alternative to Adam)
 
-Example usage with custom optimizer:
+### Learning Rate Scheduler Configuration
+
+You can customize the learning rate scheduler used during training with the following parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--lr-scheduler` | Learning rate scheduler type | cosine |
+| `--lr-scheduler-num-cycles` | Number of cycles for cosine_with_restarts | 1 |
+| `--lr-scheduler-power` | Power factor for polynomial scheduler | 1.0 |
+| `--lr-scheduler-last-epoch` | Index of last epoch when resuming training | -1 |
+
+The `--lr-scheduler` parameter supports several options:
+- `cosine`: Cosine decay scheduler (default) - gradually reduces LR following a cosine curve
+- `linear`: Linear decay scheduler - reduces LR linearly to zero
+- `cosine_with_restarts`: Cosine decay with restarts - follows cosine curve but restarts periodically
+- `polynomial`: Polynomial decay scheduler - reduces LR following a polynomial function
+- `constant`: Constant scheduler - maintains a constant LR after warmup
+- `constant_with_warmup`: Constant with warmup - increases during warmup then stays constant
+- `inverse_sqrt`: Inverse square root scheduler - decays proportionally to inverse square root of step
+
+Example usage with custom scheduler:
 ```python
-python -m src.run --experiment-name lion_test --optimizer lion --weight-decay 0.02 --adam-beta1 0.9 --adam-beta2 0.99
+python -m src.run --lr-scheduler polynomial --lr-scheduler-power 2.0 --warmup-ratio 0.2
+```
+
+### PEFT Configuration
+
+You can customize the Parameter-Efficient Fine-Tuning (PEFT) approach with the following parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--peft-type` | PEFT method to use | lora |
+| `--lora-r` | LoRA attention dimension | 8 |
+| `--lora-alpha` | LoRA alpha parameter | 32 |
+| `--lora-dropout` | LoRA dropout rate | 0.05 |
+| `--target-modules` | Comma-separated list of target modules | q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj |
+| `--fan-in-fan-out` | Set fan_in_fan_out for Conv1D | False |
+| `--use-gradient-checkpointing` | Use gradient checkpointing | False |
+| `--modules-to-save` | Modules to save in full precision | None |
+
+The `--peft-type` parameter supports several methods:
+- `lora`: Low-Rank Adaptation (default) - efficient parameter-saving technique
+- `adalora`: Adaptive LoRA - dynamically adjusts ranks during training
+- `prefix`: Prefix Tuning - adds trainable continuous prompts
+- `prompt`: Prompt Tuning - adds trainable prompt vectors
+- `ia3`: IA³ - scales activations with learned vectors
+- `lokr`: LoKr - combines LoRA with Kronecker product
+- `oft`: OFT - orthogonal fine-tuning approach
+
+**AdaLoRA-specific parameters:**
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--adalora-target-r` | Target rank for AdaLoRA | 8 |
+| `--adalora-init-r` | Initial rank for AdaLoRA | 12 |
+| `--adalora-tinit` | Initial step before sparsification begins | 200 |
+| `--adalora-tfinal` | Final step when sparsification ends | 1000 |
+| `--adalora-delta-t` | Steps between rank updates | 10 |
+| `--adalora-beta1` | EMA hyperparameter | 0.85 |
+| `--adalora-beta2` | EMA hyperparameter | 0.85 |
+
+Example usage with different PEFT configurations:
+
+```python
+# Using LoRA with custom settings
+python -m src.run --peft-type lora --lora-r 16 --lora-alpha 64 --target-modules "q_proj,k_proj,v_proj"
+
+# Using AdaLoRA
+python -m src.run --peft-type adalora --adalora-target-r 4 --adalora-init-r 8 --adalora-tfinal 2000
+
+# Using Prefix Tuning
+python -m src.run --peft-type prefix
 ```
 
 For the complete list of parameters, run `python -m src.run --help`.

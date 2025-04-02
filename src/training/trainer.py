@@ -7,6 +7,7 @@ import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers.trainer_callback import TrainerCallback
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
 
@@ -559,14 +560,15 @@ class QwenTrainer:
         push_to_hub_strategy: str = "end",
         wandb_config: Optional[Dict[str, Any]] = None,
         optimizer_config: Optional[Dict[str, Any]] = None,
+        lr_scheduler_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Train the model with comprehensive configuration and monitoring.
 
         Learning Rate Schedule:
-        - Uses cosine decay with linear warmup
+        - Configurable LR schedulers: linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt
         - Warmup phase: Linear increase from 0 to learning_rate for warmup_steps
-        - Decay phase: Cosine decay from learning_rate to near 0
+        - Decay phase: Follows the selected scheduler pattern
         - warmup_ratio determines warmup_steps as a fraction of total training steps
 
         Data Processing:
@@ -619,6 +621,7 @@ class QwenTrainer:
             push_to_hub_strategy: When to push to hub ("end", "best", "all", "no")
             wandb_config: Optional configuration for Weights & Biases logging
             optimizer_config: Optional configuration for optimizer selection and parameters
+            lr_scheduler_config: Optional configuration for learning rate scheduler selection and parameters
 
         Returns:
             Dict containing training metrics and results
@@ -699,17 +702,6 @@ class QwenTrainer:
                 "Valid values are: 'end', 'best', 'all', 'no'"
             )
 
-        # Calculate warmup steps
-        if max_steps is not None and max_steps > 0:
-            total_steps = max_steps
-        else:
-            total_steps = (
-                len(formatted_train_dataset)
-                // (per_device_train_batch_size * gradient_accumulation_steps)
-                * num_train_epochs
-            )
-        warmup_steps = int(total_steps * warmup_ratio)
-
         # Default optimizer config if not provided
         if optimizer_config is None:
             optimizer_config = {
@@ -722,7 +714,28 @@ class QwenTrainer:
                 "optim_bits": 8,
             }
 
+        # Default LR scheduler config if not provided
+        if lr_scheduler_config is None:
+            lr_scheduler_config = {
+                "lr_scheduler_type": "cosine",
+                "num_cycles": 1,
+                "power": 1.0,
+                "last_epoch": -1,
+            }
+
         logger.info(f"Using optimizer: {optimizer_config['optimizer_type']}")
+        logger.info(f"Using LR scheduler: {lr_scheduler_config['lr_scheduler_type']}")
+
+        # Calculate warmup steps
+        if max_steps is not None and max_steps > 0:
+            total_steps = max_steps
+        else:
+            total_steps = (
+                len(formatted_train_dataset)
+                // (per_device_train_batch_size * gradient_accumulation_steps)
+                * num_train_epochs
+            )
+        warmup_steps = int(total_steps * warmup_ratio)
 
         # Setup training arguments
         training_args_dict = {
@@ -734,7 +747,7 @@ class QwenTrainer:
             "num_train_epochs": num_train_epochs,
             "warmup_steps": warmup_steps,  # Use calculated warmup steps
             # Learning rate schedule
-            "lr_scheduler_type": "cosine",
+            "lr_scheduler_type": lr_scheduler_config["lr_scheduler_type"],
             # Logging and saving configuration
             "logging_steps": logging_steps,
             "save_steps": save_steps,
@@ -814,6 +827,68 @@ class QwenTrainer:
             callbacks=callbacks,
             tokenizer=self.tokenizer,
         )
+
+        # Add custom learning rate tracking callback
+        class LRMonitorCallback(TrainerCallback):
+            """Custom callback to track learning rates during training."""
+
+            def on_step_end(self, args, state, control, **kwargs):
+                if state.global_step % args.logging_steps == 0:
+                    try:
+                        # Get learning rate scheduler
+                        lr_scheduler = self.trainer.lr_scheduler
+                        optimizer = self.trainer.optimizer
+
+                        # Get current learning rate
+                        if hasattr(lr_scheduler, "get_last_lr"):
+                            lrs = lr_scheduler.get_last_lr()
+                            current_lr = lrs[0] if lrs else None
+                        else:
+                            # Fallback - try to get from optimizer
+                            current_lr = optimizer.param_groups[0]["lr"]
+
+                        # Log to wandb
+                        if wandb.run is not None:
+                            wandb.log(
+                                {
+                                    "trainer/learning_rate": current_lr,
+                                    "trainer/global_step": state.global_step,
+                                    "trainer/epoch": state.epoch,
+                                    "trainer/total_steps": state.max_steps,
+                                    "trainer/percent_complete": state.global_step
+                                    / state.max_steps
+                                    * 100
+                                    if state.max_steps
+                                    else 0,
+                                }
+                            )
+
+                        # Also log optimizer parameters
+                        if (
+                            wandb.run is not None
+                            and optimizer
+                            and hasattr(optimizer, "param_groups")
+                        ):
+                            for i, param_group in enumerate(optimizer.param_groups):
+                                # Log parameters like weight decay, momentum, etc.
+                                for key, value in param_group.items():
+                                    if key != "params" and not isinstance(value, (list, tuple)):
+                                        wandb.log({f"optimizer/group{i}_{key}": value})
+                    except Exception as e:
+                        logger.warning(f"Error logging learning rate: {e}")
+                return control
+
+        # Add the learning rate monitor if not already in callbacks
+        lr_monitor = LRMonitorCallback()
+        lr_monitor.trainer = self.trainer  # Give callback access to trainer
+
+        # Check if any existing callback is an instance of LRMonitorCallback
+        has_lr_monitor = any(
+            isinstance(cb, LRMonitorCallback) for cb in self.trainer.callback_handler.callbacks
+        )
+        if not has_lr_monitor:
+            self.trainer.add_callback(lr_monitor)
+            logger.info("Added learning rate monitoring callback")
 
         # Run training
         logger.info("Starting training process...")

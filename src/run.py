@@ -146,7 +146,7 @@ def parse_args():
     # Training configuration
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument(
-        "--batch-size", type=int, default=16, help="Per device batch size for training"
+        "--batch-size", type=int, default=24, help="Per device batch size for training"
     )
     parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
@@ -242,6 +242,87 @@ def parse_args():
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout rate")
 
+    # Additional PEFT configuration
+    parser.add_argument(
+        "--target-modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated list of target modules for LoRA",
+    )
+    parser.add_argument(
+        "--peft-type",
+        type=str,
+        default="lora",
+        choices=["lora", "prefix", "prompt", "ia3", "adalora", "lokr", "oft"],
+        help="Type of PEFT method to use",
+    )
+    parser.add_argument(
+        "--fan-in-fan-out",
+        action="store_true",
+        default=False,
+        help="Set fan_in_fan_out to True for Conv1D modules",
+    )
+    parser.add_argument(
+        "--use-gradient-checkpointing",
+        action="store_true",
+        default=False,
+        help="Use gradient checkpointing to save memory",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing-kwargs",
+        type=str,
+        default="{}",
+        help="JSON string of gradient checkpointing kwargs",
+    )
+    parser.add_argument(
+        "--modules-to-save",
+        type=str,
+        default=None,
+        help="Comma-separated list of modules to save in full precision",
+    )
+    parser.add_argument(
+        "--adalora-target-r",
+        type=int,
+        default=8,
+        help="Target rank for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-init-r",
+        type=int,
+        default=12,
+        help="Initial rank for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-tinit",
+        type=int,
+        default=200,
+        help="Initial step before sparsification begins for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-tfinal",
+        type=int,
+        default=1000,
+        help="Final step when sparsification ends for AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-delta-t",
+        type=int,
+        default=10,
+        help="Number of steps between rank updates in AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-beta1",
+        type=float,
+        default=0.85,
+        help="Hyperparameter for EMA calculation in AdaLoRA",
+    )
+    parser.add_argument(
+        "--adalora-beta2",
+        type=float,
+        default=0.85,
+        help="Hyperparameter for EMA calculation in AdaLoRA",
+    )
+
     # Repository configuration
     parser.add_argument(
         "--private",
@@ -315,6 +396,41 @@ def parse_args():
         help="Quantization bits for 8-bit optimizers",
     )
 
+    # Learning rate scheduler configuration
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="cosine",
+        choices=[
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+            "inverse_sqrt",
+        ],
+        help="Learning rate scheduler to use for training",
+    )
+    parser.add_argument(
+        "--lr-scheduler-num-cycles",
+        type=int,
+        default=1,
+        help="Number of cycles for cosine_with_restarts scheduler",
+    )
+    parser.add_argument(
+        "--lr-scheduler-power",
+        type=float,
+        default=1.0,
+        help="Power factor for polynomial scheduler",
+    )
+    parser.add_argument(
+        "--lr-scheduler-last-epoch",
+        type=int,
+        default=-1,
+        help="The index of the last epoch when resuming training",
+    )
+
     return parser.parse_args()
 
 
@@ -333,23 +449,116 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
         )
 
         # Configure LoRA
-        logger.info("Setting up LoRA configuration...")
-        lora_config = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",  # Attention modules
-                "gate_proj",
-                "up_proj",
-                "down_proj",  # FFN modules
-            ],
-            lora_dropout=args.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
+        logger.info("Setting up PEFT configuration...")
+
+        # Parse target modules
+        target_modules = args.target_modules.split(",") if args.target_modules else None
+
+        # Parse modules to save
+        modules_to_save = args.modules_to_save.split(",") if args.modules_to_save else None
+
+        # Parse gradient checkpointing kwargs
+        import json
+
+        gradient_checkpointing_kwargs = {}
+        if args.gradient_checkpointing_kwargs:
+            try:
+                gradient_checkpointing_kwargs = json.loads(args.gradient_checkpointing_kwargs)
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"Invalid JSON for gradient_checkpointing_kwargs: {args.gradient_checkpointing_kwargs}"
+                )
+                logger.warning("Using default gradient checkpointing kwargs")
+
+        # Base LoRA config
+        if args.peft_type == "lora":
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                fan_in_fan_out=args.fan_in_fan_out,
+                modules_to_save=modules_to_save,
+                use_gradient_checkpointing=args.use_gradient_checkpointing,
+                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+            )
+        elif args.peft_type == "adalora":
+            from peft import AdaLoraConfig
+
+            lora_config = AdaLoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_r=args.adalora_target_r,
+                init_r=args.adalora_init_r,
+                tinit=args.adalora_tinit,
+                tfinal=args.adalora_tfinal,
+                delta_t=args.adalora_delta_t,
+                beta1=args.adalora_beta1,
+                beta2=args.adalora_beta2,
+                fan_in_fan_out=args.fan_in_fan_out,
+                modules_to_save=modules_to_save,
+                use_gradient_checkpointing=args.use_gradient_checkpointing,
+                gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+            )
+        elif args.peft_type == "prefix":
+            from peft import PrefixTuningConfig
+
+            lora_config = PrefixTuningConfig(
+                num_virtual_tokens=20,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+        elif args.peft_type == "prompt":
+            from peft import PromptTuningConfig
+
+            lora_config = PromptTuningConfig(
+                num_virtual_tokens=20,
+                token_dim=768,  # Assuming embedding dimension
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+        elif args.peft_type == "ia3":
+            from peft import IA3Config
+
+            lora_config = IA3Config(
+                target_modules=target_modules,
+                bias="none",
+                task_type="CAUSAL_LM",
+                modules_to_save=modules_to_save,
+            )
+        elif args.peft_type == "lokr":
+            from peft import LoKrConfig
+
+            lora_config = LoKrConfig(
+                r=args.lora_r,
+                alpha=args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                modules_to_save=modules_to_save,
+            )
+        elif args.peft_type == "oft":
+            from peft import OFTConfig
+
+            lora_config = OFTConfig(
+                r=args.lora_r,
+                target_modules=target_modules,
+                bias="none",
+                task_type="CAUSAL_LM",
+                modules_to_save=modules_to_save,
+            )
+        else:
+            raise ValueError(f"Unsupported PEFT type: {args.peft_type}")
+
+        logger.info(f"Using PEFT type: {args.peft_type}")
+        logger.info(f"PEFT config: {lora_config}")
 
         # Get prompt template based on arg
         prompt_type = get_prompt_template(args.prompt_template)
@@ -578,7 +787,8 @@ def main():
             "all": "every_save",
             "no": "no",
         }
-        push_to_hub_strategy = push_strategy_map.get(args.push_strategy, "best")
+        # Use the push strategy key (not the mapped value) for trainer.train()
+        push_to_hub_strategy = args.push_strategy
 
         # Configure optimizer parameters
         optimizer_config = {
@@ -591,9 +801,18 @@ def main():
             "optim_bits": args.optim_bits,
         }
 
+        # Configure learning rate scheduler parameters
+        lr_scheduler_config = {
+            "lr_scheduler_type": args.lr_scheduler,
+            "num_cycles": args.lr_scheduler_num_cycles,
+            "power": args.lr_scheduler_power,
+            "last_epoch": args.lr_scheduler_last_epoch,
+        }
+
         # Start training
         logger.info("Starting training with all callbacks enabled...")
         logger.info(f"Using optimizer: {args.optimizer}")
+        logger.info(f"Using learning rate scheduler: {args.lr_scheduler}")
         results = trainer.train(
             train_dataset=train_dataset,
             val_split=args.val_split,
@@ -621,6 +840,8 @@ def main():
             callbacks=callbacks,
             # Optimizer configuration
             optimizer_config=optimizer_config,
+            # LR scheduler configuration
+            lr_scheduler_config=lr_scheduler_config,
         )
 
         # Log results
