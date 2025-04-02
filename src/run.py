@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 
 import torch
+import wandb
 from datasets import load_dataset
 from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import wandb
 from data.prompt_creator import PromptCreator
 from model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from training.trainer import QwenTrainer
@@ -147,6 +147,9 @@ def parse_args():
     )
     parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument(
+        "--output-dir", type=str, default="./model_output", help="Directory to save model outputs"
+    )
 
     # Repository configuration
     parser.add_argument(
@@ -282,8 +285,9 @@ def main():
         train_dataset = load_datasets(hf_token, args.dataset)
 
         # Training configuration
-        output_dir = "./model_output"
+        output_dir = args.output_dir
         os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"Training outputs will be saved to: {output_dir}")
 
         # Start training
         logger.info("Starting training...")

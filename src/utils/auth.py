@@ -2,10 +2,9 @@ import logging
 import os
 from pathlib import Path
 
+import wandb
 from dotenv import load_dotenv
 from huggingface_hub import login as hf_login
-
-import wandb
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
