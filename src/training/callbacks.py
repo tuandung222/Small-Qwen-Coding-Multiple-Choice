@@ -919,17 +919,44 @@ class LRMonitorCallback(TrainerCallback):
     ) -> TrainerControl:
         if state.global_step % args.logging_steps == 0:
             try:
-                # Get learning rate scheduler
-                lr_scheduler = self.trainer.lr_scheduler
-                optimizer = self.trainer.optimizer
+                # Check if trainer is set
+                if self.trainer is None:
+                    logger.debug("Trainer not set in LRMonitorCallback, skipping logging")
+                    return control
 
-                # Get current learning rate
-                if hasattr(lr_scheduler, "get_last_lr"):
-                    lrs = lr_scheduler.get_last_lr()
-                    current_lr = lrs[0] if lrs else None
+                # Check for lr_scheduler and optimizer
+                if not hasattr(self.trainer, "lr_scheduler") or self.trainer.lr_scheduler is None:
+                    logger.debug(
+                        "No lr_scheduler available in trainer, trying to get from optimizer"
+                    )
+                    if not hasattr(self.trainer, "optimizer") or self.trainer.optimizer is None:
+                        logger.debug(
+                            "No optimizer available in trainer, skipping learning rate logging"
+                        )
+                        return control
+
+                    # Try to get from optimizer directly
+                    optimizer = self.trainer.optimizer
+                    current_lr = optimizer.param_groups[0].get("lr", None)
                 else:
-                    # Fallback - try to get from optimizer
-                    current_lr = optimizer.param_groups[0]["lr"]
+                    # Get learning rate from scheduler
+                    lr_scheduler = self.trainer.lr_scheduler
+                    optimizer = (
+                        self.trainer.optimizer if hasattr(self.trainer, "optimizer") else None
+                    )
+
+                    # Get current learning rate
+                    if hasattr(lr_scheduler, "get_last_lr"):
+                        lrs = lr_scheduler.get_last_lr()
+                        current_lr = lrs[0] if lrs else None
+                    else:
+                        # Fall back to optimizer if available
+                        current_lr = optimizer.param_groups[0]["lr"] if optimizer else None
+
+                # Skip if we couldn't get the learning rate
+                if current_lr is None:
+                    logger.debug("Could not determine current learning rate, skipping logging")
+                    return control
 
                 # Log to wandb
                 try:
@@ -950,7 +977,7 @@ class LRMonitorCallback(TrainerCallback):
                             }
                         )
 
-                        # Also log optimizer parameters
+                        # Also log optimizer parameters if available
                         if optimizer and hasattr(optimizer, "param_groups"):
                             for i, param_group in enumerate(optimizer.param_groups):
                                 # Log parameters like weight decay, momentum, etc.
@@ -959,8 +986,14 @@ class LRMonitorCallback(TrainerCallback):
                                         wandb.log({f"optimizer/group{i}_{key}": value})
                 except ImportError:
                     logger.warning("wandb not installed, skipping logging")
+                except Exception as e:
+                    logger.warning(f"Error logging to wandb: {e}")
             except Exception as e:
-                logger.warning(f"Error logging learning rate: {e}")
+                # Only show a warning the first few times, then just debug to avoid log spam
+                if state.global_step <= 50:
+                    logger.warning(f"Error logging learning rate: {e}")
+                else:
+                    logger.debug(f"Error logging learning rate: {e}")
         return control
 
 
