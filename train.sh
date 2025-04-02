@@ -5,9 +5,24 @@ export PYTHONHASHSEED=42
 export CUDA_LAUNCH_BLOCKING=1
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
+# Reset training log file if it exists
+if [ -f "training.log" ]; then
+    echo "Resetting training.log file..."
+    > training.log
+    echo "$(date): Starting new training run" > training.log
+else
+    echo "Creating new training.log file..."
+    echo "$(date): Starting new training run" > training.log
+fi
+
+
+# Add timestamp to experiment name for uniqueness
+TIMESTAMP=$(date +"%m%d_%H%M")
+EXPERIMENT_NAME="Qwen25_Coder_MCQ_5Epochs_${TIMESTAMP}"
+
 # Run the training script with comprehensive features
 python src/run.py \
-    --experiment-name "Qwen25_Coder_MCQ_5Epochs" \
+    --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
     --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
     --epochs 5 \

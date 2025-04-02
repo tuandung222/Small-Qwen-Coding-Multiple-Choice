@@ -985,6 +985,11 @@ class ModelLoadingAlertCallback(TrainerCallback):
                     logger.warning("Trainer not available in ModelLoadingAlertCallback")
                     return control
 
+                # Check if model is available
+                if not hasattr(self.trainer, "model") or self.trainer.model is None:
+                    logger.warning("Model not available in ModelLoadingAlertCallback")
+                    return control
+
                 # Check if the model is using Unsloth
                 model = self.trainer.model
                 if not hasattr(model, "is_unsloth_model") or not model.is_unsloth_model:

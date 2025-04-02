@@ -1071,8 +1071,6 @@ def main():
             lr_scheduler_config=lr_scheduler_config,
             responses_only_config=response_only_config,
             attention_config=attention_config,
-            # Set run_name explicitly to avoid warning
-            run_name=run_name,
         )
 
         # Log results
