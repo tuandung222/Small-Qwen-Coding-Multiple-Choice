@@ -1,9 +1,15 @@
 import os
+import sys
+from pathlib import Path
 import pytest
 import torch
 from unittest.mock import Mock, patch
 from datasets import Dataset
 import numpy as np
+
+# Add the project root directory to Python path
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
 
 from src.model.qwen_handler import QwenModelHandler
 from src.data.prompt_creator import PromptCreator
