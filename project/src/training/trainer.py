@@ -9,6 +9,9 @@ from .callbacks import ValidationCallback, EarlyStoppingCallback
 from datetime import datetime
 from unsloth import FastLanguageModel
 from trl import SFTTrainer
+from peft import LoraConfig, get_peft_model
+from datasets import Dataset
+from ..utils.auth import setup_authentication
 
 class QwenTrainer:
     """Training handler for Qwen models with optional HuggingFace Hub integration"""
@@ -17,8 +20,8 @@ class QwenTrainer:
         self,
         model: Any,
         tokenizer: Any,
-        prompt_creator: Optional[PromptCreator] = None,
-        lora_config: Optional[Any] = None,
+        prompt_creator: PromptCreator,
+        lora_config: Optional[LoraConfig] = None,
         hub_token: Optional[str] = None,
         hub_model_id: Optional[str] = None,
     ):
@@ -28,18 +31,28 @@ class QwenTrainer:
         Args:
             model: The model to fine-tune
             tokenizer: The tokenizer for the model
-            prompt_creator: Optional PromptCreator for formatting prompts
+            prompt_creator: PromptCreator for formatting prompts
             lora_config: Optional LoRA configuration for parameter-efficient fine-tuning
             hub_token: Optional HuggingFace Hub token for pushing models
             hub_model_id: Optional model ID for pushing to HuggingFace Hub
         """
+        # Setup authentication
+        setup_authentication()
+        
         self.model = model
         self.tokenizer = tokenizer
-        self.prompt_creator = prompt_creator or PromptCreator(PromptCreator.BASIC)
+        self.prompt_creator = prompt_creator
         self.lora_config = lora_config
         self.hub_token = hub_token
         self.hub_model_id = hub_model_id
         self.peft_model = None
+        self.trainer = None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.best_val_metric = float('inf')
+        self.best_checkpoint_path = None
+        self.training_stats = {}
+        self.validation_stats = {}
         
         # Ensure we have a proper max sequence length
         if hasattr(self.model.config, 'max_position_embeddings'):
@@ -202,93 +215,89 @@ class QwenTrainer:
     
     def train(
         self,
-        dataset: Any,
-        prompt_type: Optional[str] = None,
+        train_dataset: Dataset,
+        val_dataset: Optional[Dataset] = None,
         output_dir: str = "./model_output",
-        per_device_train_batch_size: int = 4,
+        num_train_epochs: int = 2,
+        per_device_train_batch_size: int = 16,
         gradient_accumulation_steps: int = 4,
+        learning_rate: float = 1e-4,
         warmup_steps: int = 100,
-        num_train_epochs: int = 3,
         max_steps: Optional[int] = None,
-        learning_rate: float = 2e-4,
-        train_on_inputs: bool = True,
-        packing: bool = False,
         logging_steps: int = 10,
         save_steps: int = 100,
-        verbose: bool = True,
-        push_to_hub: bool = False,
+        save_strategy: str = "epoch",
+        save_total_limit: int = 1,
+        load_best_model_at_end: bool = True,
+        metric_for_best_model: str = "eval_loss",
+        greater_is_better: bool = False,
+        callbacks: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
-        """Train the model using Unsloth's optimized training"""
-        # Prepare dataset with on-the-fly transformation  
-        prepared_dataset = self.prepare_dataset(dataset, prompt_type, verbose)
+        """Train the model"""
+        # Store datasets
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
         
-        # Import Unsloth's optimized trainer and utilities
-        from unsloth import is_bfloat16_supported
-        
-        # Prepare the model with Unsloth's LoRA
-        model_to_train = self.prepare_model_for_training()
-        
-        # Setup training arguments with proper handling of max_steps
-        training_args_dict = {
-            "output_dir": output_dir,
-            "per_device_train_batch_size": per_device_train_batch_size,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "learning_rate": learning_rate,
-            "num_train_epochs": num_train_epochs,
-            "warmup_steps": warmup_steps,
-            "logging_steps": logging_steps,
-            "save_steps": save_steps,
-            "fp16": not is_bfloat16_supported(),
-            "bf16": is_bfloat16_supported(),
-            "optim": "paged_adamw_8bit",
-            "weight_decay": 0.01,
-            "lr_scheduler_type": "linear",
-            "report_to": "wandb" if os.environ.get("WANDB_PROJECT") else "none",
-            "push_to_hub": push_to_hub,
-            "hub_model_id": self.hub_model_id if push_to_hub else None,
-            "hub_token": self.hub_token if push_to_hub else None,
-        }
-        
-        # Only add max_steps if it's not None
-        if max_steps is not None and max_steps > 0:
-            training_args_dict["max_steps"] = max_steps
-        
-        # Create TrainingArguments with the prepared dictionary
-        training_args = TrainingArguments(**training_args_dict)
-        
-        # Use SFTTrainer with Unsloth-specific settings
-        trainer = SFTTrainer(
-            model=model_to_train,
-            tokenizer=self.tokenizer,
-            train_dataset=prepared_dataset,
-            dataset_text_field="text",
-            max_seq_length=self.max_seq_length,  # Use our tracked max sequence length
-            args=training_args,
-            packing=False,  # Set packing to False to avoid shape issues
+        # Setup training arguments
+        training_args = TrainingArguments(
+            output_dir=output_dir,
+            num_train_epochs=num_train_epochs,
+            per_device_train_batch_size=per_device_train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            learning_rate=learning_rate,
+            warmup_steps=warmup_steps,
+            max_steps=max_steps,
+            logging_steps=logging_steps,
+            save_steps=save_steps,
+            save_strategy=save_strategy,
+            save_total_limit=save_total_limit,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=greater_is_better,
+            evaluation_strategy="epoch" if val_dataset else "no",
+            push_to_hub=bool(self.hub_model_id),
+            hub_model_id=self.hub_model_id,
+            hub_token=self.hub_token,
         )
         
-        if verbose:
-            # Log dataset and training info
-            train_size = len(prepared_dataset)
-            steps_per_epoch = train_size // (per_device_train_batch_size * gradient_accumulation_steps)
-            total_steps = steps_per_epoch * num_train_epochs if max_steps is None else max_steps
+        # Initialize trainer
+        self.trainer = Trainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            callbacks=callbacks,
+        )
+        
+        # Train model
+        train_result = self.trainer.train()
+        self.training_stats = train_result.metrics
+        
+        # Evaluate if validation dataset is provided
+        if val_dataset:
+            eval_result = self.trainer.evaluate()
+            self.validation_stats = eval_result
+            self.best_val_metric = eval_result.get(metric_for_best_model, float('inf'))
+            self.best_checkpoint_path = self.trainer.state.best_model_checkpoint
+        
+        # Push to hub if configured
+        if self.hub_model_id:
+            self.push_to_hub()
             
-            print(f"Training with dataset size: {train_size}")
-            print(f"Steps per epoch: {steps_per_epoch}")
-            print(f"Total training steps: {total_steps}")
-            print(f"Max sequence length: {self.max_seq_length}")
-            print(f"Push to HuggingFace Hub: {push_to_hub}")
-            if push_to_hub:
-                print(f"Hub model ID: {self.hub_model_id}")
+        return {
+            "training_stats": self.training_stats,
+            "validation_stats": self.validation_stats,
+            "best_val_metric": self.best_val_metric,
+            "best_checkpoint_path": self.best_checkpoint_path,
+        }
         
-        # Start training
-        trainer_stats = trainer.train()
-        
-        # Update self.model to the fine-tuned version
-        self.model = model_to_train
-        
-        return trainer_stats
-        
+    def push_to_hub(self):
+        """Push model to HuggingFace Hub"""
+        if not self.hub_model_id or not self.hub_token:
+            raise ValueError("hub_model_id and hub_token must be provided to push to hub")
+            
+        self.trainer.push_to_hub()
+
     def save_results(self, results: Dict[str, Any], output_dir: str = "./results") -> str:
         """Save evaluation results to file"""
         os.makedirs(output_dir, exist_ok=True)
@@ -345,6 +354,11 @@ class QwenTrainer:
         self.model = self.model.from_pretrained(checkpoint_path)
         self.tokenizer = self.tokenizer.from_pretrained(checkpoint_path)
 
+    def setup(self):
+        """Setup trainer with LoRA if configured"""
+        if self.lora_config:
+            self.model = get_peft_model(self.model, self.lora_config)
+            
     def prepare_model_for_training(self):
         """Prepare model for training"""
         from peft import get_peft_model

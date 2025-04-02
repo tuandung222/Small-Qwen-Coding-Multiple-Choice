@@ -6,60 +6,103 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass
 from transformers import TrainerCallback
+from .auth import setup_authentication
 
-@dataclass
 class WandBConfig:
     """Configuration for W&B logging"""
-    project_name: str = "qwen-multiple-choice"
-    entity: Optional[str] = None
-    run_name: Optional[str] = None
-    tags: Optional[List[str]] = None
-    notes: Optional[str] = None
-    mode: str = "online"
-    resume: Optional[str] = None
-    config: Optional[Dict[str, Any]] = None
-    log_gradients: bool = True
-    log_memory: bool = True
-    log_examples: bool = True
-    num_examples_to_log: int = 3
-    log_validation: bool = True
-    log_training: bool = True
-    log_model: bool = True
+    
+    def __init__(
+        self,
+        project_name: str,
+        run_name: Optional[str] = None,
+        entity: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        notes: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        log_memory: bool = True,
+        log_gradients: bool = True,
+    ):
+        self.project_name = project_name
+        self.run_name = run_name
+        self.entity = entity
+        self.tags = tags
+        self.notes = notes
+        self.config = config
+        self.log_memory = log_memory
+        self.log_gradients = log_gradients
 
 class WandBLogger:
-    """Comprehensive W&B logging utility for training and evaluation"""
+    """Logger for W&B integration"""
     
     def __init__(self, config: WandBConfig):
-        """Initialize W&B logger with configuration"""
+        # Setup authentication
+        setup_authentication()
+        
         self.config = config
         self.run = None
         self.train_start_time = time.time()
         self.step_start_time = time.time()
         
-    def init_run(self, model_name: str) -> str:
-        """Initialize W&B run with proper configuration"""
-        if os.environ.get("WANDB_DISABLED", "false").lower() == "true":
-            return self.config.run_name or "disabled"
-
-        # Generate descriptive run name if not provided
-        if not self.config.run_name:
-            model_short_name = model_name.split("/")[-1]
-            timestamp = datetime.now().strftime("%m%d_%H%M")
-            self.config.run_name = f"{model_short_name}_{timestamp}"
-
-        # Initialize wandb
+    def setup(self):
+        """Setup W&B run"""
         self.run = wandb.init(
             project=self.config.project_name,
-            entity=self.config.entity,
             name=self.config.run_name,
+            entity=self.config.entity,
             tags=self.config.tags,
             notes=self.config.notes,
-            mode=self.config.mode,
-            resume=self.config.resume,
             config=self.config.config,
         )
+        
+    def init_run(self, model_name: str):
+        """Initialize a new W&B run"""
+        # Set run name if not provided
+        if not self.config.run_name:
+            self.config.run_name = f"{model_name}_{wandb.util.generate_id()}"
+            
+        # Initialize run
+        self.setup()
+        
+    def log_model_info(self, model):
+        """Log model information to W&B"""
+        if not self.run:
+            raise RuntimeError("W&B run not initialized. Call init_run first.")
+            
+        # Log model parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        self.run.summary.update({
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+            "frozen_parameters": total_params - trainable_params,
+        })
+        
+    def finish_run(self):
+        """Finish the W&B run"""
+        if self.run:
+            self.run.finish()
+            self.run = None
 
-        return self.config.run_name
+class WandBCallback(TrainerCallback):
+    """Callback for logging training metrics to W&B"""
+    
+    def __init__(self, logger: WandBLogger):
+        self.logger = logger
+        
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        """Log model info at start of training"""
+        if model:
+            self.logger.log_model_info(model)
+            
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Log metrics during training"""
+        if logs:
+            wandb.log(logs)
+            
+    def on_train_end(self, args, state, control, **kwargs):
+        """Finish logging when training ends"""
+        self.logger.finish_run()
 
     def log_training_metrics(self, logs: Dict[str, Any], state: Any, model: Optional[torch.nn.Module] = None):
         """Log training metrics including gradients and memory"""
@@ -147,41 +190,4 @@ class WandBLogger:
                 ex["is_correct"],
             )
 
-        wandb.log({f"examples/val_{step}": example_table})
-
-    def log_model_info(self, model: torch.nn.Module):
-        """Log model architecture and parameter information"""
-        if not self.config.log_model or not self.run:
-            return
-
-        # Log model parameters
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        
-        wandb.log({
-            "model/total_parameters": total_params,
-            "model/trainable_parameters": trainable_params,
-            "model/architecture": str(model),
-        })
-
-    def finish(self):
-        """Finish W&B run"""
-        if self.run:
-            wandb.finish()
-            self.run = None
-
-class WandBCallback(TrainerCallback):
-    """W&B callback for HuggingFace Trainer"""
-    
-    def __init__(self, logger: WandBLogger):
-        self.logger = logger
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        """Log training metrics"""
-        self.logger.log_training_metrics(logs, state, kwargs.get("model"))
-        return control
-
-    def on_train_end(self, args, state, control, **kwargs):
-        """Finish W&B run at end of training"""
-        self.logger.finish()
-        return control 
+        wandb.log({f"examples/val_{step}": example_table}) 
