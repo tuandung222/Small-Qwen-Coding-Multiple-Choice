@@ -10,37 +10,216 @@ This project provides a framework for fine-tuning **Qwen2.5-Coder-1.5B-Instruct*
 
 ## 📑 Table of Contents
 
-- [Features](#features)
-  - [Parameter-Efficient Fine-Tuning](#parameter-efficient-fine-tuning)
-  - [Optimized Training](#optimized-training)
-  - [Advanced Optimizers and Schedulers](#advanced-optimizers-and-schedulers)
-  - [Structured Reasoning](#structured-reasoning)
-  - [Comprehensive Evaluation](#comprehensive-evaluation)
-  - [Advanced Monitoring](#advanced-monitoring)
-  - [HuggingFace Hub Integration](#huggingface-hub-integration)
-  - [Development and Testing](#development-and-testing)
-- [Advanced Features](#advanced-features)
-  - [Parameter-Efficient Fine-Tuning (PEFT)](#parameter-efficient-fine-tuning-peft)
-  - [Attention Implementations](#attention-implementations)
-  - [Response-Only Training](#response-only-training)
-  - [Optimizer and Scheduler Options](#optimizer-and-scheduler-options)
-  - [Monitoring and Visualization](#monitoring-and-visualization)
-  - [Teacher Synthesis](#teacher-synthesis)
-- [Dataset](#dataset)
-  - [Dataset Structure](#dataset-structure)
-  - [Data Examples](#data-examples)
-- [Command-Line Arguments](#command-line-arguments)
-  - [Prompt Monitoring Arguments](#prompt-monitoring-arguments)
-  - [Training Arguments](#training-arguments)
-- [Callbacks](#callbacks)
-- [Setup](#setup)
-  - [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
   - [Installation](#installation)
-- [Usage](#usage)
-  - [Training](#training)
-  - [Teacher Synthesis](#teacher-synthesis-1)
+  - [Basic Usage](#basic-usage)
+  - [Environment Setup](#environment-setup)
+- [Prompt Formats](#prompt-formats)
+  - [Student Reasoning Format](#student-reasoning-format)
+  - [Teacher Synthesis Format](#teacher-synthesis-format)
+- [Command-Line Interface](#command-line-interface)
+  - [Training Arguments](#training-arguments)
+  - [Synthesis Arguments](#synthesis-arguments)
+  - [Monitoring Arguments](#monitoring-arguments)
+- [Features](#features)
+- [Dataset](#dataset)
+- [Advanced Features](#advanced-features)
+- [Examples and Showcase](#examples-and-showcase)
 
-## ✨ Features
+## 🚀 Quick Start
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
+cd Small-Qwen-Coding-Multiple-Choice
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+### Environment Setup
+
+Set up environment variables in either of two ways:
+
+1. Using a `.env` file (recommended):
+```bash
+# Copy the example .env file
+cp .env.example .env
+
+# Edit the .env file with your API keys
+nano .env
+```
+
+Required variables in `.env`:
+```
+HF_TOKEN=your_huggingface_token_here
+WANDB_API_KEY=your_wandb_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here  # Required for teacher synthesis
+```
+
+2. Using environment variables directly:
+```bash
+export HF_TOKEN=your_huggingface_token_here
+export WANDB_API_KEY=your_wandb_api_key_here
+export OPENAI_API_KEY=your_openai_api_key_here
+```
+
+### Basic Usage
+
+1. **Training the Model**:
+```bash
+# Basic training
+python src/run.py
+
+# Advanced training with custom parameters
+python src/run.py \
+  --experiment-name "my_experiment" \
+  --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
+  --epochs 5 \
+  --batch-size 16 \
+  --learning-rate 1e-4
+```
+
+2. **Generating Synthetic Explanations**:
+```bash
+# Basic synthesis
+python src/data_synthesis/gpt4o_generated.py \
+  --model gpt-4o \
+  --data-path /path/to/dataset
+
+# Advanced synthesis with options
+python src/data_synthesis/gpt4o_generated.py \
+  --model gpt-4o \
+  --data-path /path/to/dataset \
+  --sample-size 100 \
+  --temperature 0.2 \
+  --max-tokens 2048 \
+  --concurrent-requests 5
+```
+
+## 📝 Prompt Formats
+
+The project uses two distinct YAML-formatted prompts: one for student reasoning during inference and another for teacher synthesis during training data generation.
+
+### Student Reasoning Format
+
+Used during model inference to encourage structured thinking:
+
+```yaml
+Question: [question text]
+
+Choices:
+A. [choice 1]
+B. [choice 2]
+C. [choice 3]
+D. [choice 4]
+
+Think through this step-by-step:
+- Understand what the question is asking
+- Analyze each option carefully
+- Reason about why each option might be correct or incorrect
+- Select the most appropriate answer
+
+Your response MUST be in YAML format:
+understanding: |
+  <your understanding of the question>
+analysis: |
+  <your analysis of each option>
+reasoning: |
+  <your reasoning about the correct answer>
+conclusion: |
+  <your final conclusion>
+answer: <single letter A through D>
+```
+
+### Teacher Synthesis Format
+
+Used for generating high-quality training data:
+
+```yaml
+TASK: You are a teacher creating a concise, precise explanation for a multiple-choice question.
+
+QUESTION:
+[question text]
+
+CHOICES:
+A. [choice 1]
+B. [choice 2]
+C. [choice 3]
+D. [choice 4]
+
+CORRECT ANSWER: [correct_answer]
+
+INSTRUCTIONS:
+Create a focused explanation that demonstrates why [correct_answer] is correct
+and why other options are incorrect. Be thorough but concise.
+
+Your response MUST be in YAML format:
+understanding: |
+  <brief explanation of key concepts>
+analysis: |
+  <concise analysis of each option>
+reasoning: |
+  <focused reasoning for correct answer>
+conclusion: |
+  <brief summary>
+answer: [correct_answer]
+```
+
+Key differences between formats:
+1. **Knowledge of Answer**: Student format encourages exploration, teacher format explains known answer
+2. **Focus**: Student format emphasizes step-by-step thinking, teacher format prioritizes conciseness
+3. **Purpose**: Student format for inference, teacher format for generating training data
+4. **Style**: Student format is exploratory, teacher format is authoritative
+
+## ⚙️ Command-Line Interface
+
+### Training Arguments
+
+```bash
+python src/run.py [arguments]
+```
+
+Key training arguments:
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--experiment-name` | Name for this experiment | auto-generated |
+| `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
+| `--epochs` | Number of training epochs | 3 |
+| `--batch-size` | Per device batch size | 24 |
+| `--learning-rate` | Learning rate | 2e-4 |
+| `--lora-r` | LoRA attention dimension | 8 |
+| `--lora-alpha` | LoRA alpha parameter | 32 |
+
+### Synthesis Arguments
+
+```bash
+python src/data_synthesis/gpt4o_generated.py [arguments]
+```
+
+Key synthesis arguments:
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--model` | OpenAI model to use | gpt-4o |
+| `--data-path` | Path to dataset | ./data/train |
+| `--sample-size` | Number of examples | None (all) |
+| `--temperature` | Generation temperature | 0.2 |
+| `--concurrent-requests` | Parallel requests | 5 |
+
+### Monitoring Arguments
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--prompt-track-diversity` | Track prompt diversity | True |
+| `--prompt-track-quality` | Track quality metrics | True |
+| `--prompt-interactive` | Interactive selection | False |
+| `--max-prompts-to-save` | Max prompts to save | 100 |
+
+## 🎯 Features
 
 ### Parameter-Efficient Fine-Tuning
 
@@ -109,87 +288,9 @@ This project provides a framework for fine-tuning **Qwen2.5-Coder-1.5B-Instruct*
 - **Comprehensive logging**
 - **Flexible configuration** via CLI
 
-## 🚀 Advanced Features
-
-### Parameter-Efficient Fine-Tuning (PEFT)
-
-The framework supports multiple PEFT methods for efficient model adaptation:
-
-| Method | Description |
-|--------|-------------|
-| **LoRA** | Low-Rank Adaptation with configurable rank, alpha, and dropout |
-| **AdaLoRA** | Adaptive LoRA that dynamically adjusts ranks during training |
-| **Prefix Tuning** | Adds trainable continuous prompts |
-| **Prompt Tuning** | Adds trainable prompt vectors |
-| **IA³** | Scales activations with learned vectors |
-| **LoKr** | Combines LoRA with Kronecker product |
-| **OFT** | Orthogonal fine-tuning approach |
-
-### Attention Implementations
-
-Multiple attention implementations are supported for optimal performance:
-
-| Implementation | Description |
-|----------------|-------------|
-| **Flash Attention 2** | Significantly faster training with appropriate hardware |
-| **SDPA** | PyTorch's Scaled Dot Product Attention |
-| **xFormers** | Memory-efficient attention implementation |
-| **Eager** | Standard eager execution mode |
-| **Default** | Model's default implementation |
-
-### Response-Only Training
-
-Unsloth's response-only training feature allows focusing on assistant responses:
-
-- Identifies instruction and response segments
-- Applies special masking for focused learning
-- Configurable instruction and response tokens
-- Optional token ID specification
-
-### Optimizer and Scheduler Options
-
-Comprehensive training optimization options:
-
-| Category | Options |
-|----------|---------|
-| **Optimizers** | adamw_torch, adamw_hf, adam8bit, pagedadam, lion, adafactor |
-| **Schedulers** | cosine, linear, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt |
-| **Warmup** | Configurable warmup ratio and steps |
-| **Regularization** | Weight decay and gradient clipping |
-
-### Monitoring and Visualization
-
-Advanced monitoring capabilities:
-
-#### Prompt Monitoring
-- **Real-time display** of random training prompts
-- **Token distribution analysis** and visualization
-- **Prompt diversity tracking** with similarity metrics
-- **Quality metrics** (length, complexity, readability)
-- **Automatic prompt categorization**
-- **Interactive prompt selection** and comparison
-- **WandB integration** for prompt analytics
-- **Configurable logging** frequency
-
-#### Training Metrics
-- **Learning rate tracking**
-- **Model loading alerts**
-- **GPU memory and gradient monitoring**
-- **WandB integration** for experiment tracking
-
-### Teacher Synthesis
-
-The project includes a teacher synthesis framework for generating high-quality explanations for multiple-choice questions. See [Teacher Synthesis Documentation](src/data_synthesis/README.md) for detailed information about:
-
-- **Supported OpenAI models** (GPT-4o, GPT-4, GPT-3.5-turbo)
-- **Generation parameters** and configuration
-- **Concurrent processing** capabilities
-- **Metrics tracking** and analysis
-- **Output formats** and structure
-
 ## 📊 Dataset
 
-The project uses a curated dataset of multiple-choice coding questions with structured reasoning. The dataset is published on HuggingFace at [tuandunghcmut/coding-mcq-reasoning](https://huggingface.co/datasets/tuandunghcmut/coding-mcq-reasoning).
+The project uses a curated dataset of multiple-choice coding questions with structured reasoning, published at [tuandunghcmut/coding-mcq-reasoning](https://huggingface.co/datasets/tuandunghcmut/coding-mcq-reasoning).
 
 ### Dataset Structure
 
@@ -292,7 +393,7 @@ Here are some examples from the dataset:
 
 #### Example 1: SQL Function Question
 
-```
+```yaml
 Task ID: k08183
 Question: What does the SQL function "ROUND()" do?
 Choices: ['Rounds a number to the nearest integer', 'Concatenates two or more strings', 'Converts a string to lowercase', 'Returns the length of a string']
@@ -309,7 +410,7 @@ Teacher Conclusion: Answer A is correct because the "ROUND()" function's primary
 
 #### Example 2: Algorithm Problem
 
-```
+```yaml
 Task ID: k08183
 Question: Given a sequence of rolls of a k-sided dice, what is the length of the shortest sequence that cannot be formed?
 Choices: ['ans += k - len(seen) + 1', 'ans += 1', 'ans = min(ans + 1, k)', 'ans = ans + 1']
@@ -324,154 +425,116 @@ Teacher Reasoning: The solution needs to increment the sequence count (ans) each
 Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
 ```
 
-## 🛠️ Command-Line Arguments
+## 🚀 Advanced Features
 
-The framework supports extensive configuration via command-line arguments:
+### Parameter-Efficient Fine-Tuning (PEFT)
 
-### Prompt Monitoring Arguments
+The framework supports multiple PEFT methods for efficient model adaptation:
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--prompt-track-diversity` | Enable/disable prompt diversity tracking | True |
-| `--prompt-track-quality` | Enable/disable prompt quality metrics | True |
-| `--prompt-interactive` | Enable/disable interactive prompt selection mode | False |
-| `--prompt-categorize` | Enable/disable automatic prompt categorization | True |
-| `--prompt-comparison` | Enable/disable prompt comparison features | True |
-| `--max-prompts-to-save` | Maximum number of prompts to save for analysis | 100 |
+| Method | Description |
+|--------|-------------|
+| **LoRA** | Low-Rank Adaptation with configurable rank, alpha, and dropout |
+| **AdaLoRA** | Adaptive LoRA that dynamically adjusts ranks during training |
+| **Prefix Tuning** | Adds trainable continuous prompts |
+| **Prompt Tuning** | Adds trainable prompt vectors |
+| **IA³** | Scales activations with learned vectors |
+| **LoKr** | Combines LoRA with Kronecker product |
+| **OFT** | Orthogonal fine-tuning approach |
 
-### Training Arguments
+### Attention Implementations
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--experiment-name` | Name for this experiment | auto-generated timestamp |
-| `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
-| `--destination-repo` | HF Hub repo for the model | tuandunghcmut/Qwen25_Coder_MultipleChoice_v3 |
-| `--max-seq-length` | Maximum sequence length for input | 2048 |
-| `--quantization` | Model quantization level | 4bit |
-| `--epochs` | Number of training epochs | 3 |
-| `--batch-size` | Per device batch size | 24 |
-| `--grad-accum` | Gradient accumulation steps | 4 |
-| `--learning-rate` | Learning rate | 2e-4 |
-| `--warmup-ratio` | Proportion of steps for warmup | 0.1 |
-| `--weight-decay` | Weight decay for optimizer | 0.01 |
-| `--lora-r` | LoRA attention dimension | 8 |
-| `--lora-alpha` | LoRA alpha parameter | 32 |
-| `--push-strategy` | When to push to HF Hub | best |
-| `--private` | Make the repository private | False |
-| `--test-mode` | Use only 2 examples | False |
-| `--test-training-mode` | Use only one batch of data | False |
-| `--train-on-responses-only` | Enable response-only training | False |
-| `--instruction-token` | Token/prefix indicating start of instruction | `<|im_start|>user\n` |
-| `--response-token` | Token/prefix indicating start of response | `<|im_start|>assistant\n` |
-| `--instruction-token-id` | Token ID for instruction start (optional) | None |
-| `--response-token-id` | Token ID for response start (optional) | None |
-| `--attention-implementation` | Type of attention implementation to use | default |
-| `--use-flash-attention` | Use Flash Attention 2 if available | False |
-| `--force-attn-implementation` | Force the attention implementation | False |
+Multiple attention implementations are supported for optimal performance:
 
-## 🔄 Callbacks
+| Implementation | Description |
+|----------------|-------------|
+| **Flash Attention 2** | Significantly faster training with appropriate hardware |
+| **SDPA** | PyTorch's Scaled Dot Product Attention |
+| **xFormers** | Memory-efficient attention implementation |
+| **Eager** | Standard eager execution mode |
+| **Default** | Model's default implementation |
 
-The training process includes several specialized callbacks for monitoring and optimization:
+### Response-Only Training
 
-| Callback | Description |
-|----------|-------------|
-| **LRMonitorCallback** | Tracks learning rates and optimizer parameters during training |
-| **PromptMonitorCallback** | Displays random training prompts after each logging step |
-| **ModelLoadingAlertCallback** | Alerts when model loading method changes |
-| **EarlyStoppingCallback** | Implements early stopping to prevent overfitting |
-| **ValidationCallback** | Manages validation metrics and best model checkpointing |
+Unsloth's response-only training feature allows focusing on assistant responses:
 
-## 🚀 Setup
+- Identifies instruction and response segments
+- Applies special masking for focused learning
+- Configurable instruction and response tokens
+- Optional token ID specification
 
-### Prerequisites
+### Optimizer and Scheduler Options
 
-- Python 3.10+
-- CUDA-capable GPU (recommended)
-- HuggingFace account with access token
-- Weights & Biases account (optional, for experiment tracking)
-- OpenAI API key (required for teacher synthesis)
+Comprehensive training optimization options:
 
-### Installation
+| Category | Options |
+|----------|---------|
+| **Optimizers** | adamw_torch, adamw_hf, adam8bit, pagedadam, lion, adafactor |
+| **Schedulers** | cosine, linear, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt |
+| **Warmup** | Configurable warmup ratio and steps |
+| **Regularization** | Weight decay and gradient clipping |
 
-1. Clone the repository:
+### Monitoring and Visualization
 
-```bash
-git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
-cd Small-Qwen-Coding-Multiple-Choice
-```
+Advanced monitoring capabilities:
 
-2. Install dependencies:
+#### Prompt Monitoring
+- **Real-time display** of random training prompts
+- **Token distribution analysis** and visualization
+- **Prompt diversity tracking** with similarity metrics
+- **Quality metrics** (length, complexity, readability)
+- **Automatic prompt categorization**
+- **Interactive prompt selection** and comparison
+- **WandB integration** for prompt analytics
+- **Configurable logging** frequency
 
-```bash
-pip install -r requirements.txt
-```
-
-3. Set up environment variables:
-
-You can set up environment variables in two ways:
-
-#### a. Using a `.env` file (recommended):
-```bash
-# Copy the example .env file
-cp .env.example .env
-
-# Edit the .env file with your API keys
-nano .env  # or use your preferred text editor
-```
-
-Required environment variables in `.env`:
-```
-HF_TOKEN=your_huggingface_token_here
-WANDB_API_KEY=your_wandb_api_key_here
-OPENAI_API_KEY=your_openai_api_key_here  # Required for teacher synthesis
-```
-
-#### b. Using environment variables directly:
-```bash
-export HF_TOKEN=your_huggingface_token_here
-export WANDB_API_KEY=your_wandb_api_key_here
-export OPENAI_API_KEY=your_openai_api_key_here  # Required for teacher synthesis
-```
-
-> **Note**: The OpenAI API key is only required if you plan to use the teacher synthesis framework. For regular training without teacher synthesis, this key is optional.
-
-## 📚 Usage
-
-### Training
-
-The project provides a Python module with a command-line interface for training. You can import the module in your code or run it directly from the command line.
-
-#### Python Module Import
-
-```python
-# Import the main module
-from src.run import main
-
-# Run the training with default parameters
-if __name__ == "__main__":
-    main()
-```
-
-#### Direct Script Execution
-
-```bash
-# Basic usage
-python src/run.py
-
-# Advanced usage with custom parameters
-python src/run.py --experiment-name "my_experiment" --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" --epochs 5 --batch-size 16 --learning-rate 1e-4
-```
+#### Training Metrics
+- **Learning rate tracking**
+- **Model loading alerts**
+- **GPU memory and gradient monitoring**
+- **WandB integration** for experiment tracking
 
 ### Teacher Synthesis
 
-To generate synthetic explanations for multiple-choice questions using OpenAI models:
+The project includes a teacher synthesis framework for generating high-quality explanations for multiple-choice questions. See [Teacher Synthesis Documentation](src/data_synthesis/README.md) for detailed information about:
 
-```bash
-# Basic usage
-python src/data_synthesis/gpt4o_generated.py --model gpt-4o --data-path /path/to/dataset --api-key YOUR_API_KEY
+- **Supported OpenAI models** (GPT-4o, GPT-4, GPT-3.5-turbo)
+- **Generation parameters** and configuration
+- **Concurrent processing** capabilities
+- **Metrics tracking** and analysis
+- **Output formats** and structure
 
-# Advanced usage
-python src/data_synthesis/gpt4o_generated.py --model gpt-4o --data-path /path/to/dataset --sample-size 100 --temperature 0.2 --max-tokens 2048 --concurrent-requests 5 --output-dir ./my_results
+## 🎯 Examples and Showcase
+
+### Example 1: SQL Function Question
+
+```yaml
+Task ID: k08183
+Question: What does the SQL function "ROUND()" do?
+Choices: ['Rounds a number to the nearest integer', 'Concatenates two or more strings', 'Converts a string to lowercase', 'Returns the length of a string']
+Answer: A
+Teacher Understanding: The question is asking about the purpose of the SQL function "ROUND()". This function is used in SQL to manipulate numerical data, specifically to adjust the precision of numbers.
+Teacher Analysis:
+- A. Rounds a number to the nearest integer: This is correct. The "ROUND()" function is used to round a numeric value to the nearest integer or to a specified number of decimal places.
+- B. Concatenates two or more strings: This is incorrect. Concatenation of strings is typically done using the "CONCAT()" function in SQL.
+- C. Converts a string to lowercase: This is incorrect. Converting a string to lowercase is done using the "LOWER()" function in SQL.
+- D. Returns the length of a string: This is incorrect. The length of a string is determined using the "LENGTH()" function in SQL.
+Teacher Reasoning: The "ROUND()" function is specifically designed to handle numerical values by rounding them to the nearest integer or specified decimal places, which aligns with option A. The other options describe functions that manipulate strings, not numbers.
+Teacher Conclusion: Answer A is correct because the "ROUND()" function's primary purpose is to round numbers, which is distinct from the string operations described in the other options.
 ```
 
-See [Teacher Synthesis Documentation](src/data_synthesis/README.md) for more details.
+### Example 2: Algorithm Problem
+
+```yaml
+Task ID: k08183
+Question: Given a sequence of rolls of a k-sided dice, what is the length of the shortest sequence that cannot be formed?
+Choices: ['ans += k - len(seen) + 1', 'ans += 1', 'ans = min(ans + 1, k)', 'ans = ans + 1']
+Answer: B
+Teacher Understanding: The problem asks for the length of the shortest sequence that cannot be formed from the given rolls of a k-sided dice. The solution involves tracking unique rolls and incrementing a counter when all k numbers have been seen.
+Teacher Analysis:
+- A. This option incorrectly adjusts the answer based on the difference between k and the size of the set, which is unnecessary since the goal is to increment when all k numbers are seen.
+- B. This option correctly increments the answer by 1 when all k numbers have been seen, indicating a complete sequence.
+- C. This option uses the min function, which is unnecessary and incorrect because the answer should simply increment by 1 when all k numbers are seen.
+- D. This option is similar to B but is redundant because it doesn't add any new logic beyond incrementing by 1.
+Teacher Reasoning: The solution needs to increment the sequence count (ans) each time a complete set of k unique numbers is seen. Option B correctly increments the count by 1 when the set size equals k, which signifies that a complete sequence of k numbers has been formed and another sequence can start.
+Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
+```
