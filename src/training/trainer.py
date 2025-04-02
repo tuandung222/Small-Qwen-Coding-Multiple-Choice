@@ -561,7 +561,7 @@ class QwenTrainer:
         self,
         train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
-        val_split: float = 0.1,
+        val_split: float = 0.04,
         output_dir: str = "./model_output",
         num_train_epochs: int = 3,
         per_device_train_batch_size: int = 4,
@@ -905,15 +905,7 @@ class QwenTrainer:
 
         # Add the prompt monitor
         prompt_monitor = PromptMonitorCallback(
-            dataset=formatted_train_dataset,
-            tokenizer=self.tokenizer,
-            logging_steps=logging_steps,
-            save_to_file=True,
-            log_to_wandb=True,
-            max_prompts_to_save=100,
-            analyze_tokens=True,
-            show_token_stats=True,
-            output_dir=output_dir,
+            dataset=formatted_train_dataset, tokenizer=self.tokenizer, logging_steps=logging_steps
         )
 
         # Add the model loading alert callback

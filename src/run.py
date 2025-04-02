@@ -35,6 +35,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Set reproducibility
+def set_seed(seed):
+    """Set random seed for reproducibility"""
+    import random
+
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    logger.info(f"Set random seed to {seed} for reproducibility")
+
+
 def setup_environment():
     """Setup training environment and configurations"""
     # Check CUDA availability
@@ -241,6 +259,48 @@ def parse_args():
         type=int,
         default=20,
         help="Number of steps between model checkpoints (test modes)",
+    )
+    parser.add_argument(
+        "--validation-steps",
+        type=int,
+        default=50,
+        help="Number of steps between validations",
+    )
+    parser.add_argument(
+        "--metric-for-best",
+        type=str,
+        default="eval_loss",
+        help="Metric to use for determining the best model",
+    )
+    parser.add_argument(
+        "--greater-is-better",
+        action="store_true",
+        default=False,
+        help="Whether greater values of the metric are better",
+    )
+    parser.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        default=True,
+        help="Push the best model to the Hugging Face Hub",
+    )
+    parser.add_argument(
+        "--no-push-to-hub",
+        action="store_false",
+        dest="push_to_hub",
+        help="Disable pushing the best model to the Hugging Face Hub",
+    )
+    parser.add_argument(
+        "--validate-at-start",
+        action="store_true",
+        default=True,
+        help="Run validation before training starts",
+    )
+    parser.add_argument(
+        "--no-validate-at-start",
+        action="store_false",
+        dest="validate_at_start",
+        help="Disable validation before training starts",
     )
 
     # Prompt monitoring configuration
@@ -787,7 +847,20 @@ def main():
         )
 
         # Validation callback
-        validation_callback = ValidationCallback(trainer_instance=trainer)
+        validation_callback = ValidationCallback(
+            trainer_instance=trainer,
+            validation_steps=args.validation_steps if hasattr(args, "validation_steps") else 50,
+            push_to_hub=args.push_to_hub if hasattr(args, "push_to_hub") else True,
+            metric_for_best=args.metric_for_best
+            if hasattr(args, "metric_for_best")
+            else "eval_loss",
+            greater_is_better=args.greater_is_better
+            if hasattr(args, "greater_is_better")
+            else False,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_min_delta=args.early_stopping_delta,
+            validate_at_start=args.validate_at_start,
+        )
         callbacks.append(validation_callback)
         logger.info("Added validation callback for model monitoring")
 

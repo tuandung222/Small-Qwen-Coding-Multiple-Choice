@@ -20,96 +20,263 @@ logger = logging.getLogger(__name__)
 
 class ValidationCallback(TrainerCallback):
     """
-    Callback for monitoring and managing model validation during training.
+    Enhanced callback for validation, metric tracking, and model pushing.
 
-    This callback provides functionality to:
-    1. Track validation metrics throughout training
-    2. Identify and save the best performing model checkpoint
-    3. Log validation results for monitoring
-
-    The callback works in conjunction with TrainingArguments to:
-    - Monitor specific metrics (configured via metric_for_best_model)
-    - Support both minimization and maximization objectives (via greater_is_better)
-    - Save best performing checkpoints automatically
-
-    Key Features:
-    - Automatic best model tracking
-    - Flexible metric monitoring
-    - Integration with model checkpointing
-    - Support for custom validation schedules
-
-    Args:
-        trainer_instance: Instance of QwenTrainer managing the training process
-
-    Attributes:
-        trainer: Reference to the trainer instance
-        best_metric (float): Best validation metric achieved so far
-        best_checkpoint (str): Path to the best performing checkpoint
-
-    Example:
-        ```python
-        # Create and configure the callback
-        validation_callback = ValidationCallback(trainer_instance=trainer)
-
-        # Add to trainer's callback list
-        trainer.train(
-            callbacks=[validation_callback],
-            metric_for_best_model="eval_loss",
-            greater_is_better=False
-        )
-
-        # Access best results after training
-        print(f"Best metric: {validation_callback.best_metric}")
-        print(f"Best checkpoint: {validation_callback.best_checkpoint}")
-        ```
+    Features:
+    1. Regular validation every N steps
+    2. Comprehensive metric calculation
+    3. Automatic model pushing on improvement
+    4. Detailed logging to WandB
+    5. Early stopping support
+    6. Initial validation before training starts
     """
 
-    def __init__(self, trainer_instance):
+    def __init__(
+        self,
+        trainer_instance,
+        validation_steps: int = 50,
+        push_to_hub: bool = True,
+        metric_for_best: str = "eval_loss",
+        greater_is_better: bool = False,
+        early_stopping_patience: int = 3,
+        early_stopping_min_delta: float = 0.0,
+        validate_at_start: bool = True,
+    ):
         self.trainer = trainer_instance
-        self.best_metric = float("inf")
-        self.best_checkpoint = None
+        self.validation_steps = validation_steps
+        self.push_to_hub = push_to_hub
+        self.metric_for_best = metric_for_best
+        self.greater_is_better = greater_is_better
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_min_delta = early_stopping_min_delta
+        self.validate_at_start = validate_at_start
 
-    def on_evaluate(
+        # Initialize tracking
+        self.best_metric = float("inf") if not greater_is_better else float("-inf")
+        self.best_checkpoint = None
+        self.validation_history = []
+        self.no_improvement_count = 0
+
+    def on_train_begin(
         self,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        metrics: Dict[str, float],
         **kwargs,
     ):
-        """
-        Called after each validation step during training.
+        """Run initial validation before training starts if validate_at_start is True."""
+        if self.validate_at_start:
+            logger.info("Running initial validation before training starts...")
+            metrics = self._run_validation()
 
-        This method:
-        1. Retrieves the current validation metric
-        2. Compares it with the best metric so far
-        3. Updates the best checkpoint if improvement is found
-        4. Logs the results for tracking
+            # Log metrics
+            self._log_metrics(metrics, 0)  # Use step 0 for initial validation
 
-        Args:
-            args: Training arguments containing configuration
-            state: Current training state
-            control: Training control object
-            metrics: Dictionary of current metrics
-            **kwargs: Additional arguments
-        """
-        # Get validation metric
-        metric_to_check = args.metric_for_best_model
-        metric_value = metrics.get(metric_to_check)
+            # Check for improvement (this will be the first validation)
+            current_metric = metrics.get(self.metric_for_best)
+            if current_metric is not None:
+                improved = self._check_improvement(current_metric)
+                if improved:
+                    self._handle_improvement(metrics, 0)
+                else:
+                    # If no improvement, still update best metric
+                    self.best_metric = current_metric
+                    logger.info(f"Initial {self.metric_for_best}: {self.best_metric:.4f}")
 
-        if metric_value is not None:
-            # Check if this is the best model
-            if args.greater_is_better:
-                is_best = metric_value > self.best_metric
+            logger.info("Initial validation completed.")
+
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        """Run validation every validation_steps."""
+        if state.global_step % self.validation_steps == 0:
+            # Run validation
+            metrics = self._run_validation()
+
+            # Log metrics
+            self._log_metrics(metrics, state.global_step)
+
+            # Check for improvement
+            current_metric = metrics.get(self.metric_for_best)
+            if current_metric is not None:
+                improved = self._check_improvement(current_metric)
+                if improved:
+                    self._handle_improvement(metrics, state.global_step)
+                else:
+                    self.no_improvement_count += 1
+                    # Check for early stopping
+                    if self.no_improvement_count >= self.early_stopping_patience:
+                        logger.info(
+                            f"Early stopping triggered after {self.no_improvement_count} validations without improvement"
+                        )
+                        control.should_training_stop = True
+                if improved:
+                    self.no_improvement_count = 0
+
+    def _run_validation(self) -> Dict[str, float]:
+        """Run comprehensive validation."""
+        try:
+            # Get validation dataset
+            val_dataset = self.trainer.val_dataset
+            if val_dataset is None:
+                return {}
+
+            # Run evaluation with response-only loss calculation
+            metrics = self.trainer.evaluate(
+                val_dataset,
+                metric_key_prefix="eval",
+                compute_loss_on_response_only=True,  # New parameter to indicate response-only loss
+            )
+
+            # Calculate perplexity from response-only loss
+            if "eval_loss" in metrics:
+                metrics["eval_perplexity"] = torch.exp(torch.tensor(metrics["eval_loss"]))
+
+            # Add validation step information
+            metrics["validation_step"] = self.trainer.state.global_step
+            metrics["validation_epoch"] = self.trainer.state.epoch
+
+        except Exception as e:
+            logger.error(f"Validation failed: {str(e)}")
+            return {}
+
+    def _calculate_additional_metrics(self, val_dataset) -> Dict[str, float]:
+        """Calculate additional validation metrics."""
+        metrics = {}
+        try:
+            # Get validation dataset
+            val_dataset = self.trainer.val_dataset
+            if val_dataset is None:
+                return {}
+
+            # Run evaluation with response-only loss calculation
+            metrics = self.trainer.evaluate(
+                val_dataset,
+                metric_key_prefix="eval",
+                compute_loss_on_response_only=True,  # New parameter to indicate response-only loss
+            )
+
+            # Calculate perplexity from response-only loss
+            if "eval_loss" in metrics:
+                metrics["eval_perplexity"] = torch.exp(torch.tensor(metrics["eval_loss"]))
+
+            # Add validation step information
+            metrics["validation_step"] = self.trainer.state.global_step
+            metrics["validation_epoch"] = self.trainer.state.epoch
+
+        except Exception as e:
+            logger.warning(f"Error calculating additional metrics: {e}")
+
+        return metrics
+
+    def _log_metrics(self, metrics: Dict[str, float], step: int):
+        """Log metrics to various destinations."""
+        # Log to WandB
+        try:
+            if wandb.run is not None:
+                # Log basic metrics
+                wandb.log(metrics, step=step)
+
+                # Create validation trend plot
+                if self.validation_history:
+                    trend_data = [
+                        [h["step"], h["metrics"][self.metric_for_best]]
+                        for h in self.validation_history
+                    ]
+                    trend_data.append([step, metrics[self.metric_for_best]])
+
+                    wandb.log(
+                        {
+                            "validation_trend": wandb.plot.line(
+                                table_data=trend_data,
+                                columns=["step", self.metric_for_best],
+                                title=f"{self.metric_for_best} Trend",
+                            )
+                        }
+                    )
+        except ImportError:
+            pass
+
+        # Log to console
+        logger.info(f"\nValidation metrics at step {step}:")
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                logger.info(f"{key}: {value:.4f}")
             else:
-                is_best = metric_value < self.best_metric
+                logger.info(f"{key}: {value}")
 
-            if is_best:
-                self.best_metric = metric_value
-                self.best_checkpoint = state.best_model_checkpoint
+        # Store in history
+        self.validation_history.append({"step": step, "metrics": metrics})
 
-                # Log best metric
-                metrics["best_" + metric_to_check] = self.best_metric
+    def _check_improvement(self, current_metric: float) -> bool:
+        """Check if current metric is better than best so far."""
+        if self.greater_is_better:
+            return current_metric > (self.best_metric + self.early_stopping_min_delta)
+        return current_metric < (self.best_metric - self.early_stopping_min_delta)
+
+    def _handle_improvement(self, metrics: Dict[str, float], step: int):
+        """Handle model improvement."""
+        # Update best metric
+        self.best_metric = metrics[self.metric_for_best]
+
+        # Save checkpoint
+        checkpoint_dir = os.path.join(self.trainer.args.output_dir, f"checkpoint-{step}")
+        self.trainer.save_checkpoint(checkpoint_dir)
+        self.best_checkpoint = checkpoint_dir
+
+        # Push to hub if configured
+        if self.push_to_hub and hasattr(self.trainer, "push_to_hub"):
+            try:
+                logger.info("Pushing best model to hub...")
+                self.trainer.push_to_hub(
+                    commit_message=f"Best model at step {step} with {self.metric_for_best}={self.best_metric:.4f}"
+                )
+                logger.info("Successfully pushed to hub")
+            except Exception as e:
+                logger.error(f"Failed to push to hub: {e}")
+
+        # Log improvement
+        logger.info(
+            f"New best model at step {step} with {self.metric_for_best}={self.best_metric:.4f}"
+        )
+
+    def on_train_end(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+    ):
+        """Summarize validation history at end of training."""
+        # Create validation summary
+        summary = {
+            "best_metric": self.best_metric,
+            "best_step": next(
+                (
+                    h["step"]
+                    for h in self.validation_history
+                    if h["metrics"][self.metric_for_best] == self.best_metric
+                ),
+                None,
+            ),
+            "total_validations": len(self.validation_history),
+            "validation_trend": [
+                h["metrics"][self.metric_for_best] for h in self.validation_history
+            ],
+        }
+
+        # Log summary
+        logger.info("\nValidation Summary:")
+        logger.info(f"Best {self.metric_for_best}: {summary['best_metric']:.4f}")
+        logger.info(f"Best step: {summary['best_step']}")
+        logger.info(f"Total validations: {summary['total_validations']}")
+
+        # Log to WandB
+        try:
+            if wandb.run is not None:
+                wandb.run.summary.update(summary)
+        except ImportError:
+            pass
 
 
 class EarlyStoppingCallback(TrainerCallback):
