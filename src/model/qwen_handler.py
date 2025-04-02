@@ -97,9 +97,16 @@ class QwenModelHandler:
             import flash_attn
 
             has_flash_attn = True
-            logger.info("Flash Attention 2 is available")
+            logger.info("Flash Attention 2 is available (package flash-attn detected)")
+            # Check flash_attn version
+            try:
+                logger.info(f"Flash Attention 2 version: {flash_attn.__version__}")
+            except AttributeError:
+                logger.info("Flash Attention 2 version information not available")
         except ImportError:
-            logger.info("Flash Attention 2 is not available")
+            logger.info("Flash Attention 2 is not available (package flash-attn not found)")
+            if self.attn_implementation == "flash_attention_2":
+                logger.info("To install: pip install flash-attn --no-build-isolation")
 
         # Check for xFormers support
         has_xformers = False
@@ -107,12 +114,42 @@ class QwenModelHandler:
             import xformers
 
             has_xformers = True
-            logger.info("xFormers is available")
+            try:
+                logger.info(f"xFormers is available (version: {xformers.__version__})")
+            except AttributeError:
+                logger.info("xFormers is available (version information not available)")
         except ImportError:
-            logger.info("xFormers is not available")
+            logger.info("xFormers is not available (package not found)")
+            if self.attn_implementation == "xformers":
+                logger.info("To install: pip install xformers")
 
         # Check for CUDA availability for SDPA
         has_cuda = torch.cuda.is_available()
+        if has_cuda:
+            try:
+                cuda_version = torch.version.cuda
+                logger.info(f"CUDA is available (version: {cuda_version})")
+                # Check if CUDA version is sufficient for SDPA
+                if self.attn_implementation == "sdpa" and cuda_version:
+                    major, minor = map(int, cuda_version.split(".")[:2])
+                    if major < 11 or (major == 11 and minor < 6):
+                        logger.warning(f"SDPA works best with CUDA 11.6+, current: {cuda_version}")
+            except:
+                logger.info("CUDA is available (version information not available)")
+        else:
+            logger.info("CUDA is not available")
+
+        # Check PyTorch version for SDPA
+        if self.attn_implementation == "sdpa":
+            import torch
+            from packaging import version
+
+            torch_version = torch.__version__
+            if version.parse(torch_version) < version.parse("2.0.0"):
+                logger.warning(f"SDPA requires PyTorch 2.0+, current: {torch_version}")
+                if not self.force_attn_implementation:
+                    logger.warning("Falling back to default attention implementation")
+                    return "default"
 
         # Return available implementations
         if self.attn_implementation == "flash_attention_2" and not has_flash_attn:
@@ -148,6 +185,7 @@ class QwenModelHandler:
                 )
                 return "default"
 
+        logger.info(f"Using attention implementation: {self.attn_implementation}")
         return self.attn_implementation
 
     def _load_model(self):

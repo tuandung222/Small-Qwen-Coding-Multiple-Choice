@@ -350,27 +350,62 @@ The training script provides options for configuring the attention mechanism imp
 | `--use-flash-attention` | Use Flash Attention 2 if available (shortcut for setting attention-implementation=flash_attention_2) | False |
 | `--force-attn-implementation` | Force the attention implementation even if not optimal for the hardware | False |
 
-Available attention implementations:
+Available attention implementations and their package dependencies:
+
 - `default`: The default implementation provided by the model
+  - No additional dependencies required
+
 - `flash_attention_2`: Flash Attention 2, which provides significant speedups but requires appropriate hardware/CUDA support
+  - Dependencies: `pip install flash-attn --no-build-isolation`
+  - Requires: CUDA 11.6+ and appropriate GPU architecture (Ampere/Turing+)
+
 - `sdpa`: PyTorch's Scaled Dot Product Attention, which offers good performance on modern GPUs
+  - Built into PyTorch 2.0+ (`torch.nn.functional.scaled_dot_product_attention`)
+  - Requires: CUDA 11.6+ for best performance
+
 - `eager`: Standard eager execution mode attention
-- `xformers`: xFormers library's memory-efficient attention (requires xformers to be installed)
+  - Built into PyTorch
+  - Works on all hardware, but slower than optimized methods
+
+- `xformers`: xFormers library's memory-efficient attention
+  - Dependencies: `pip install xformers`
+  - Requires: Compatible CUDA version (check xformers documentation for specifics)
+
+The system automatically checks for hardware compatibility with your chosen attention implementation and will fall back to the default if needed (unless `--force-attn-implementation` is specified).
 
 Example usage:
 
 ```bash
-# Use Flash Attention 2 for faster training
+# Use Flash Attention 2 for faster training (if available)
 python -m src.run --use-flash-attention
 
-# Use SDPA implementation
+# Install Flash Attention 2 first if needed
+# pip install flash-attn --no-build-isolation
+
+# Use SDPA implementation (built into PyTorch 2.0+)
 python -m src.run --attention-implementation sdpa
+
+# Use xFormers memory-efficient attention
+# pip install xformers
+python -m src.run --attention-implementation xformers
 
 # Force a specific implementation even if not optimal
 python -m src.run --attention-implementation flash_attention_2 --force-attn-implementation
 ```
 
-The system will automatically check for hardware compatibility with your chosen attention implementation and fall back to the default if needed (unless `--force-attn-implementation` is specified).
+#### Performance Comparison
+
+Different attention implementations offer trade-offs between speed, memory usage, and hardware compatibility:
+
+| Implementation | Speed | Memory Efficiency | Hardware Requirements |
+|----------------|-------|-------------------|------------------------|
+| default        | ⭐⭐   | ⭐⭐               | Works on all hardware  |
+| flash_attention_2 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐            | CUDA 11.6+, modern GPU |
+| sdpa           | ⭐⭐⭐⭐ | ⭐⭐⭐              | CUDA 11.6+            |
+| eager          | ⭐     | ⭐                 | Works on all hardware  |
+| xformers       | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐           | CUDA compatibility varies |
+
+For more information about this project, visit the [GitHub repository](https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/tree/main).
 
 ### Inference
 
