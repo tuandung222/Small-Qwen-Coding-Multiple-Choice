@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, Union
 
 import torch
-import unsloth
+import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
 from huggingface_hub import HfApi
 from huggingface_hub.utils import HfHubHTTPError
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer

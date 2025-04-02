@@ -1,12 +1,40 @@
+import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from huggingface_hub import login as hf_login
 
 import wandb
 
-# This file is project/src/utils/auth.py
-# The env file is in project or in src
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def find_env_file(start_path: str = None) -> str:
+    """
+    Find the .env file by searching up the directory tree.
+
+    Args:
+        start_path: Starting directory to search from. If None, uses current directory.
+
+    Returns:
+        str: Path to the .env file if found, None otherwise.
+    """
+    if start_path is None:
+        start_path = os.getcwd()
+
+    current_path = Path(start_path).resolve()
+
+    # Search up to 5 levels in the directory tree
+    for _ in range(5):
+        env_path = current_path / ".env"
+        if env_path.exists():
+            return str(env_path)
+        current_path = current_path.parent
+
+    return None
 
 
 def setup_authentication():
@@ -16,22 +44,18 @@ def setup_authentication():
 
     Raises:
         ValueError: If required environment variables are not set
+        FileNotFoundError: If .env file cannot be found
     """
-    # Load environment variables from possible locations
-    # Try to find .env file in parent directories
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    max_levels = 5
+    # Find and load .env file
+    env_path = find_env_file()
+    if not env_path:
+        raise FileNotFoundError(
+            "Could not find .env file in current directory or parent directories"
+        )
 
-    # Start from current directory and move up to find .env
-    for i in range(max_levels):
-        search_dir = os.path.abspath(os.path.join(current_dir, "../" * i))
-        env_path = os.path.join(search_dir, ".env")
-        if os.path.exists(env_path):
-            load_dotenv(env_path)
-            break
-    else:
-        # If no .env file found, try default behavior
-        load_dotenv()
+    logger.info(f"Loading environment variables from {env_path}")
+    load_dotenv(env_path)
+
     # Get API keys
     hf_token = os.getenv("HF_TOKEN")
     wandb_key = os.getenv("WANDB_API_KEY")
@@ -45,15 +69,24 @@ def setup_authentication():
     # Login to Hugging Face Hub
     try:
         hf_login(token=hf_token)
-        print("Successfully logged in to Hugging Face Hub")
+        logger.info("Successfully logged in to Hugging Face Hub")
     except Exception as e:
-        print(f"Failed to login to Hugging Face Hub: {e}")
+        logger.error(f"Failed to login to Hugging Face Hub: {e}")
         raise
 
     # Login to Weights & Biases
     try:
         wandb.login(key=wandb_key)
-        print("Successfully logged in to Weights & Biases")
+        logger.info("Successfully logged in to Weights & Biases")
     except Exception as e:
-        print(f"Failed to login to Weights & Biases: {e}")
+        logger.error(f"Failed to login to Weights & Biases: {e}")
         raise
+
+
+if __name__ == "__main__":
+    # Test the authentication setup
+    try:
+        setup_authentication()
+        print("Authentication setup successful!")
+    except Exception as e:
+        print(f"Authentication setup failed: {e}")

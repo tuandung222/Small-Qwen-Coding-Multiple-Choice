@@ -13,6 +13,7 @@ import wandb
 from data.prompt_creator import PromptCreator
 from model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from training.trainer import QwenTrainer
+from utils.auth import setup_authentication
 
 # Setup logging
 logging.basicConfig(
@@ -32,10 +33,15 @@ def setup_environment():
         logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
         logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
 
-    # Get HuggingFace token
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise ValueError("HF_TOKEN environment variable not set!")
+    # Setup authentication and get HuggingFace token
+    try:
+        setup_authentication()
+        hf_token = os.environ.get("HF_TOKEN")
+        if not hf_token:
+            raise ValueError("HF_TOKEN environment variable not set!")
+    except Exception as e:
+        logger.error(f"Authentication setup failed: {str(e)}")
+        raise
 
     return hf_token
 
