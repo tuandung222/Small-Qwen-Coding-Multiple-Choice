@@ -77,6 +77,13 @@ class ValidationCallback(TrainerCallback):
         self.validation_history = []
         self.no_improvement_count = 0
 
+        # Ensure we have a directory for storing metrics
+        self.metrics_dir = None
+        if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "output_dir"):
+            self.metrics_dir = os.path.join(self.trainer.args.output_dir, "validation_metrics")
+            os.makedirs(self.metrics_dir, exist_ok=True)
+            logger.info(f"Validation metrics will be saved to {self.metrics_dir}")
+
     def on_train_begin(
         self,
         args: TrainingArguments,
@@ -272,6 +279,9 @@ class ValidationCallback(TrainerCallback):
             # Run validation
             metrics = self._run_validation()
 
+            # Always save metrics history, even if it's not the best
+            self._save_metrics_history(metrics, state.global_step)
+
             # Log metrics
             self._log_metrics(metrics, state.global_step)
 
@@ -282,6 +292,9 @@ class ValidationCallback(TrainerCallback):
                 if improved:
                     self._handle_improvement(metrics, state.global_step)
                 else:
+                    logger.info(
+                        f"No improvement in {self.metric_for_best}: current={current_metric:.4f}, best={self.best_metric:.4f}"
+                    )
                     self.no_improvement_count += 1
                     # Check for early stopping
                     if self.no_improvement_count >= self.early_stopping_patience:
@@ -588,187 +601,115 @@ class ValidationCallback(TrainerCallback):
 
         return metrics
 
-    def _save_metrics_to_table(
-        self, metrics: Dict[str, float], step: int, output_dir: Optional[str] = None
-    ) -> None:
-        """Save metrics to pretty table and CSV/JSON formats."""
-        if output_dir is None:
-            logger.warning("No output directory specified for saving metrics table")
+    def _save_metrics_history(self, metrics: Dict[str, Any], step: int):
+        """Save metrics to history files regardless of improvement status."""
+        if not self.metrics_dir:
             return
 
-        # Ensure output directory exists
         try:
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Create metrics directory if it doesn't exist
-            metrics_dir = os.path.join(output_dir, "validation_metrics")
-            os.makedirs(metrics_dir, exist_ok=True)
-
-            # Save as JSON
-            json_path = os.path.join(metrics_dir, f"metrics_step_{step}.json")
-            with open(json_path, "w") as f:
+            # Save current metrics as JSON
+            metrics_file = os.path.join(self.metrics_dir, f"metrics_step_{step}.json")
+            with open(metrics_file, "w") as f:
                 import json
 
                 json.dump(metrics, f, indent=2)
 
-            # Save as CSV (append to existing file or create new)
-            csv_path = os.path.join(metrics_dir, "metrics_history.csv")
-            try:
-                import csv
+            # Update history file
+            history_file = os.path.join(self.metrics_dir, "metrics_history.json")
+            history_data = []
 
-                # Check if file exists
-                file_exists = os.path.isfile(csv_path)
+            # Read existing history if available
+            if os.path.exists(history_file):
+                try:
+                    with open(history_file, "r") as f:
+                        history_data = json.load(f)
+                except:
+                    history_data = []
 
-                with open(csv_path, "a") as f:
-                    writer = csv.writer(f)
+            # Add current metrics with step info
+            metrics_entry = metrics.copy()
+            metrics_entry["step"] = step
+            history_data.append(metrics_entry)
 
-                    # Write header if file doesn't exist
-                    if not file_exists:
-                        header = ["step"] + list(metrics.keys())
-                        writer.writerow(header)
+            # Write updated history
+            with open(history_file, "w") as f:
+                json.dump(history_data, f, indent=2)
 
-                    # Write values
-                    values = [step] + [metrics.get(key, "") for key in list(metrics.keys())]
-                    writer.writerow(values)
-            except Exception as e:
-                logger.warning(f"Failed to save CSV metrics: {e}")
+            logger.info(f"Saved metrics history to {history_file}")
 
-            # Generate pretty table output
-            try:
-                if PRETTYTABLE_AVAILABLE:
-                    table = PrettyTable()
-                    table.field_names = ["Metric", "Value"]
-                    table.align["Metric"] = "l"
-                    table.align["Value"] = "r"
+            # Create a readable summary table
+            if PRETTYTABLE_AVAILABLE:
+                summary_file = os.path.join(self.metrics_dir, "metrics_summary.txt")
+                table = PrettyTable()
+                table.field_names = ["Step", self.metric_for_best, "Improved"]
 
-                    # Add rows sorted by metric name for consistency
-                    for metric in sorted(metrics.keys()):
-                        value = metrics[metric]
-                        if isinstance(value, float):
-                            table.add_row([metric, f"{value:.6f}"])
-                        else:
-                            table.add_row([metric, str(value)])
-
-                    # Save pretty table to text file
-                    table_path = os.path.join(metrics_dir, f"metrics_table_step_{step}.txt")
-                    with open(table_path, "w") as f:
-                        f.write(str(table))
-
-                    # Also generate a combined report
-                    self._save_validation_report(metrics_dir, step)
-            except Exception as e:
-                logger.warning(f"Failed to generate pretty table: {e}")
-
-            # Save as pandas DataFrame if available
-            try:
-                if PANDAS_AVAILABLE:
-                    import pandas as pd
-
-                    # Convert to DataFrame
-                    df = pd.DataFrame([metrics])
-                    df.insert(0, "step", step)
-
-                    # Save as parquet (efficient storage)
-                    parquet_path = os.path.join(metrics_dir, f"metrics_step_{step}.parquet")
-                    df.to_parquet(parquet_path, index=False)
-
-                    # Append to historical parquet if it exists
-                    historical_parquet = os.path.join(metrics_dir, "metrics_history.parquet")
-                    if os.path.exists(historical_parquet):
-                        try:
-                            historical_df = pd.read_parquet(historical_parquet)
-                            combined_df = pd.concat([historical_df, df], ignore_index=True)
-                            combined_df.to_parquet(historical_parquet, index=False)
-                        except Exception as e:
-                            logger.warning(f"Failed to update historical parquet: {e}")
+                for entry in history_data:
+                    entry_step = entry.get("step", 0)
+                    entry_metric = entry.get(self.metric_for_best, "N/A")
+                    # Determine if this was an improvement
+                    if entry_step == 0:
+                        is_improved = "Initial"
                     else:
-                        df.to_parquet(historical_parquet, index=False)
-            except Exception as e:
-                logger.warning(f"Failed to save pandas metrics: {e}")
+                        prev_best = (
+                            min(
+                                [
+                                    e.get(self.metric_for_best, float("inf"))
+                                    for e in history_data
+                                    if e.get("step", 0) < entry_step
+                                ]
+                            )
+                            if not self.greater_is_better
+                            else max(
+                                [
+                                    e.get(self.metric_for_best, float("-inf"))
+                                    for e in history_data
+                                    if e.get("step", 0) < entry_step
+                                ]
+                            )
+                        )
+                        if self.greater_is_better:
+                            is_improved = "Yes" if entry_metric > prev_best else "No"
+                        else:
+                            is_improved = "Yes" if entry_metric < prev_best else "No"
 
-            logger.info(f"Saved validation metrics to {metrics_dir}")
+                    table.add_row(
+                        [
+                            entry_step,
+                            f"{entry_metric:.4f}"
+                            if isinstance(entry_metric, float)
+                            else entry_metric,
+                            is_improved,
+                        ]
+                    )
+
+                with open(summary_file, "w") as f:
+                    f.write(str(table))
+                logger.info(f"Updated metrics summary table in {summary_file}")
 
         except Exception as e:
-            logger.warning(f"Failed to save metrics: {e}")
+            logger.warning(f"Error saving metrics history: {e}")
             import traceback
 
-            logger.warning(f"Save metrics error details: {traceback.format_exc()}")
-
-    def _save_validation_report(self, metrics_dir: str, current_step: int) -> None:
-        """Save a comprehensive validation report with history and analysis."""
-        if not self.validation_history:
-            return
-
-        report_path = os.path.join(metrics_dir, "validation_report.txt")
-
-        with open(report_path, "w") as f:
-            f.write("=== VALIDATION REPORT ===\n\n")
-
-            # Write summary information
-            f.write("SUMMARY:\n")
-            f.write(f"Current Step: {current_step}\n")
-            f.write(f"Best Metric ({self.metric_for_best}): {self.best_metric:.6f}\n")
-            f.write(f"Early Stopping Patience: {self.early_stopping_patience}\n")
-            f.write(f"No Improvement Count: {self.no_improvement_count}\n\n")
-
-            # Write history of the primary metric
-            f.write(f"HISTORY OF {self.metric_for_best.upper()}:\n")
-            for item in self.validation_history:
-                step = item["step"]
-                metric_value = item["metrics"].get(self.metric_for_best, "N/A")
-                if isinstance(metric_value, float):
-                    is_best = metric_value == self.best_metric
-                    marker = " (BEST)" if is_best else ""
-                    f.write(f"Step {step}: {metric_value:.6f}{marker}\n")
-                else:
-                    f.write(f"Step {step}: {metric_value}\n")
-
-            f.write("\n=== END OF REPORT ===\n")
-
-        logger.info(f"Saved comprehensive validation report to {report_path}")
-
-    def _log_metrics(self, metrics: Dict[str, float], step: int):
-        """Log metrics to various destinations."""
-        # Log to console
-        logger.info(f"\nValidation metrics at step {step}:")
-        for key, value in metrics.items():
-            logger.info(f"{key}: {value:.4f}")
-
-        # Log to wandb
-        try:
-            import wandb
-
-            if wandb.run is not None:
-                wandb.log(metrics, step=step)
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.warning(f"Error logging to wandb: {e}")
-
-        # Try to save metrics to table
-        try:
-            # Check if trainer has args or args.output_dir
-            output_dir = None
-            if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "output_dir"):
-                output_dir = self.trainer.args.output_dir
-            elif hasattr(self.trainer, "output_dir"):
-                output_dir = self.trainer.output_dir
-
-            self._save_metrics_to_table(metrics, step, output_dir=output_dir)
-        except Exception as e:
-            logger.warning(f"Failed to save metrics to table: {e}")
-            import traceback
-
-            logger.warning(f"Metrics table error details: {traceback.format_exc()}")
-
-        # Store in history
-        self.validation_history.append({"step": step, "metrics": metrics})
+            logger.debug(f"Error details: {traceback.format_exc()}")
 
     def _check_improvement(self, current_metric: float) -> bool:
         """Check if current metric is better than best so far."""
+        # Special case for first validation
+        if len(self.validation_history) == 0:
+            logger.info(f"First validation with {self.metric_for_best}={current_metric:.4f}")
+            return True
+
         if self.greater_is_better:
-            return current_metric > (self.best_metric + self.early_stopping_min_delta)
-        return current_metric < (self.best_metric - self.early_stopping_min_delta)
+            is_better = current_metric > (self.best_metric + self.early_stopping_min_delta)
+        else:
+            is_better = current_metric < (self.best_metric - self.early_stopping_min_delta)
+
+        if is_better:
+            logger.info(
+                f"Improved {self.metric_for_best}: {self.best_metric:.4f} -> {current_metric:.4f}"
+            )
+
+        return is_better
 
     def _handle_improvement(self, metrics: Dict[str, float], step: int):
         """Handle model improvement."""
@@ -777,7 +718,8 @@ class ValidationCallback(TrainerCallback):
 
         # Save checkpoint
         checkpoint_dir = os.path.join(self.trainer.args.output_dir, f"checkpoint-{step}")
-        self.trainer.save_checkpoint(checkpoint_dir)
+        self.trainer.save_model(checkpoint_dir)
+        logger.info(f"Saved checkpoint to {checkpoint_dir}")
         self.best_checkpoint = checkpoint_dir
 
         # Push to hub if configured
@@ -829,6 +771,30 @@ class ValidationCallback(TrainerCallback):
                 wandb.run.summary.update(summary)
         except ImportError:
             pass
+
+    def _log_metrics(self, metrics: Dict[str, Any], step: int):
+        """Log metrics to various destinations."""
+        # Log to console
+        logger.info(f"\nValidation metrics at step {step}:")
+        for key, value in metrics.items():
+            # Format differently based on value type
+            if isinstance(value, (int, float)):
+                logger.info(f"{key}: {value:.4f}")
+            else:
+                # Just convert to string for non-numeric values
+                logger.info(f"{key}: {str(value)}")
+
+        # Log to wandb
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.log(metrics, step=step)
+        except ImportError:
+            pass
+
+        # Store in history
+        self.validation_history.append({"step": step, "metrics": metrics})
 
 
 class EarlyStoppingCallback(TrainerCallback):

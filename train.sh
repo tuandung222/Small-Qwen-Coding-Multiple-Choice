@@ -4,6 +4,7 @@
 export PYTHONHASHSEED=42
 export CUDA_LAUNCH_BLOCKING=1
 export PYTHONPATH=$PYTHONPATH:$(pwd)
+export TOKENIZERS_PARALLELISM=false
 
 # Install additional dependencies if needed
 pip install -q wandb tqdm numpy pandas prettytable scikit-learn
@@ -28,12 +29,12 @@ python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
     --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
-    --epochs 3 \
+    --epochs 5 \
     --batch-size 32 \
-    --learning-rate 2e-4 \
-    --grad-accum 2 \
-    --warmup-ratio 0.1 \
-    --weight-decay 0.01 \
+    --learning-rate 1e-4 \
+    --grad-accum 1 \
+    --warmup-ratio 0.15 \
+    --weight-decay 0.02 \
     --max-seq-length 2048 \
     --quantization "4bit" \
     \
@@ -54,11 +55,10 @@ python src/run.py \
     --lr-scheduler-num-cycles 1 \
     --lr-scheduler-power 1.0 \
     \
-    --early-stopping-patience 5 \
+    --early-stopping-patience 7 \
     --early-stopping-delta 0.01 \
     --validation-steps 50 \
     --metric-for-best "eval_loss" \
-    --greater-is-better \
     --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
