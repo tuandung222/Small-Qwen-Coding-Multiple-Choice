@@ -88,6 +88,53 @@ class ValidationCallback(TrainerCallback):
         # Verify that we have access to the necessary components
         self._verify_components()
 
+        # Try to create validation dataset if needed
+        if hasattr(self.trainer, "val_dataset") and self.trainer.val_dataset is None:
+            logger.info(
+                "ValidationCallback: attempting to create validation dataset from train dataset"
+            )
+            try:
+                # Check if trainer has train_dataset
+                if (
+                    hasattr(self.trainer, "train_dataset")
+                    and self.trainer.train_dataset is not None
+                ):
+                    # Get val_split from trainer if available
+                    val_split = 0.1  # Default
+                    if hasattr(self.trainer, "val_split"):
+                        val_split = self.trainer.val_split
+                    elif hasattr(self.trainer, "args") and hasattr(self.trainer.args, "val_split"):
+                        val_split = self.trainer.args.val_split
+
+                    # Set seed for reproducibility
+                    random_seed = 42
+                    if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "seed"):
+                        random_seed = self.trainer.args.seed
+
+                    logger.info(
+                        f"Splitting train dataset with val_split={val_split}, seed={random_seed}"
+                    )
+
+                    # Split the dataset
+                    from datasets import Dataset
+
+                    if isinstance(self.trainer.train_dataset, Dataset):
+                        split_datasets = self.trainer.train_dataset.train_test_split(
+                            test_size=val_split, seed=random_seed
+                        )
+                        # Use only the test split for validation
+                        self.trainer.val_dataset = split_datasets["test"]
+                        logger.info(
+                            f"Created validation dataset with {len(self.trainer.val_dataset)} examples"
+                        )
+                    else:
+                        logger.warning("Cannot split non-Dataset train_dataset")
+            except Exception as e:
+                logger.error(f"Failed to create validation dataset: {e}")
+                import traceback
+
+                logger.error(f"Dataset creation error details: {traceback.format_exc()}")
+
         if self.validate_at_start:
             logger.info("Running initial validation before training starts...")
             try:
@@ -544,87 +591,108 @@ class ValidationCallback(TrainerCallback):
     def _save_metrics_to_table(
         self, metrics: Dict[str, float], step: int, output_dir: Optional[str] = None
     ) -> None:
-        """Save validation metrics to a table format in the output directory."""
+        """Save metrics to pretty table and CSV/JSON formats."""
         if output_dir is None:
-            output_dir = self.trainer.args.output_dir
+            logger.warning("No output directory specified for saving metrics table")
+            return
 
-        os.makedirs(output_dir, exist_ok=True)
+        # Ensure output directory exists
+        try:
+            os.makedirs(output_dir, exist_ok=True)
 
-        # Get timestamp for filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        metrics_dir = os.path.join(output_dir, "validation_metrics")
-        os.makedirs(metrics_dir, exist_ok=True)
+            # Create metrics directory if it doesn't exist
+            metrics_dir = os.path.join(output_dir, "validation_metrics")
+            os.makedirs(metrics_dir, exist_ok=True)
 
-        # Add step information to the metrics
-        metrics_with_info = metrics.copy()
-        metrics_with_info["step"] = step
-        metrics_with_info["timestamp"] = timestamp
+            # Save as JSON
+            json_path = os.path.join(metrics_dir, f"metrics_step_{step}.json")
+            with open(json_path, "w") as f:
+                import json
 
-        # Save as JSON for completeness
-        json_path = os.path.join(metrics_dir, f"metrics_step_{step}.json")
-        with open(json_path, "w") as f:
-            import json
+                json.dump(metrics, f, indent=2)
 
-            json.dump(metrics_with_info, f, indent=2)
+            # Save as CSV (append to existing file or create new)
+            csv_path = os.path.join(metrics_dir, "metrics_history.csv")
+            try:
+                import csv
 
-        # Create a pretty table representation
-        if PRETTYTABLE_AVAILABLE:
-            table = PrettyTable()
-            table.field_names = ["Metric", "Value"]
-            table.align["Metric"] = "l"
-            table.align["Value"] = "r"
+                # Check if file exists
+                file_exists = os.path.isfile(csv_path)
 
-            for key, value in sorted(metrics_with_info.items()):
-                if isinstance(value, float):
-                    table.add_row([key, f"{value:.6f}"])
-                else:
-                    table.add_row([key, str(value)])
+                with open(csv_path, "a") as f:
+                    writer = csv.writer(f)
 
-            # Save to text file
-            table_path = os.path.join(metrics_dir, f"metrics_table_step_{step}.txt")
-            with open(table_path, "w") as f:
-                f.write(f"Validation Metrics (Step {step})\n")
-                f.write(f"Timestamp: {timestamp}\n")
-                f.write(str(table))
+                    # Write header if file doesn't exist
+                    if not file_exists:
+                        header = ["step"] + list(metrics.keys())
+                        writer.writerow(header)
 
-            logger.info(f"Saved metrics table to {table_path}")
+                    # Write values
+                    values = [step] + [metrics.get(key, "") for key in list(metrics.keys())]
+                    writer.writerow(values)
+            except Exception as e:
+                logger.warning(f"Failed to save CSV metrics: {e}")
 
-        # Create a pandas DataFrame for additional analysis
-        if PANDAS_AVAILABLE:
-            # Convert to DataFrame
-            df = pd.DataFrame([metrics_with_info])
+            # Generate pretty table output
+            try:
+                if PRETTYTABLE_AVAILABLE:
+                    table = PrettyTable()
+                    table.field_names = ["Metric", "Value"]
+                    table.align["Metric"] = "l"
+                    table.align["Value"] = "r"
 
-            # Save to CSV for easy analysis
-            csv_path = os.path.join(metrics_dir, f"metrics_step_{step}.csv")
-            df.to_csv(csv_path, index=False)
+                    # Add rows sorted by metric name for consistency
+                    for metric in sorted(metrics.keys()):
+                        value = metrics[metric]
+                        if isinstance(value, float):
+                            table.add_row([metric, f"{value:.6f}"])
+                        else:
+                            table.add_row([metric, str(value)])
 
-            # If we have validation history, create a trend DataFrame
-            if len(self.validation_history) > 0:
-                # Create a DataFrame with all validation history
-                history_data = []
-                for history_item in self.validation_history:
-                    history_metrics = history_item["metrics"].copy()
-                    history_metrics["step"] = history_item["step"]
-                    history_data.append(history_metrics)
+                    # Save pretty table to text file
+                    table_path = os.path.join(metrics_dir, f"metrics_table_step_{step}.txt")
+                    with open(table_path, "w") as f:
+                        f.write(str(table))
 
-                # Add current metrics if not in history yet
-                if step != self.validation_history[-1]["step"]:
-                    step_metrics = metrics.copy()
-                    step_metrics["step"] = step
-                    history_data.append(step_metrics)
+                    # Also generate a combined report
+                    self._save_validation_report(metrics_dir, step)
+            except Exception as e:
+                logger.warning(f"Failed to generate pretty table: {e}")
 
-                history_df = pd.DataFrame(history_data)
+            # Save as pandas DataFrame if available
+            try:
+                if PANDAS_AVAILABLE:
+                    import pandas as pd
 
-                # Save trends to CSV
-                trends_path = os.path.join(metrics_dir, "validation_trends.csv")
-                history_df.to_csv(trends_path, index=False)
+                    # Convert to DataFrame
+                    df = pd.DataFrame([metrics])
+                    df.insert(0, "step", step)
 
-                logger.info(f"Saved validation trends to {trends_path}")
+                    # Save as parquet (efficient storage)
+                    parquet_path = os.path.join(metrics_dir, f"metrics_step_{step}.parquet")
+                    df.to_parquet(parquet_path, index=False)
 
-            logger.info(f"Saved metrics CSV to {csv_path}")
+                    # Append to historical parquet if it exists
+                    historical_parquet = os.path.join(metrics_dir, "metrics_history.parquet")
+                    if os.path.exists(historical_parquet):
+                        try:
+                            historical_df = pd.read_parquet(historical_parquet)
+                            combined_df = pd.concat([historical_df, df], ignore_index=True)
+                            combined_df.to_parquet(historical_parquet, index=False)
+                        except Exception as e:
+                            logger.warning(f"Failed to update historical parquet: {e}")
+                    else:
+                        df.to_parquet(historical_parquet, index=False)
+            except Exception as e:
+                logger.warning(f"Failed to save pandas metrics: {e}")
 
-        # Also save a comprehensive full report with all history and analysis
-        self._save_validation_report(metrics_dir, step)
+            logger.info(f"Saved validation metrics to {metrics_dir}")
+
+        except Exception as e:
+            logger.warning(f"Failed to save metrics: {e}")
+            import traceback
+
+            logger.warning(f"Save metrics error details: {traceback.format_exc()}")
 
     def _save_validation_report(self, metrics_dir: str, current_step: int) -> None:
         """Save a comprehensive validation report with history and analysis."""
@@ -661,65 +729,37 @@ class ValidationCallback(TrainerCallback):
 
     def _log_metrics(self, metrics: Dict[str, float], step: int):
         """Log metrics to various destinations."""
-        # Handle empty metrics
-        if not metrics:
-            logger.warning(f"No metrics available at step {step}. Using dummy metrics.")
-            # Add dummy metrics for initial validation
-            if step == 0:
-                metrics = {
-                    "eval_loss": 0.0,
-                    "eval_perplexity": 1.0,
-                    "validation_step": 0,
-                    "validation_epoch": 0,
-                    "note": "Initial validation - dummy metrics",
-                }
-                self.best_metric = metrics.get(self.metric_for_best, 0.0)
-                logger.info(f"Setting initial {self.metric_for_best} to {self.best_metric}")
-            else:
-                return  # Skip logging if no metrics and not initial step
+        # Log to console
+        logger.info(f"\nValidation metrics at step {step}:")
+        for key, value in metrics.items():
+            logger.info(f"{key}: {value:.4f}")
 
-        # Save metrics to table file
+        # Log to wandb
         try:
-            self._save_metrics_to_table(metrics, step, output_dir=self.trainer.args.output_dir)
+            import wandb
+
+            if wandb.run is not None:
+                wandb.log(metrics, step=step)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Error logging to wandb: {e}")
+
+        # Try to save metrics to table
+        try:
+            # Check if trainer has args or args.output_dir
+            output_dir = None
+            if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "output_dir"):
+                output_dir = self.trainer.args.output_dir
+            elif hasattr(self.trainer, "output_dir"):
+                output_dir = self.trainer.output_dir
+
+            self._save_metrics_to_table(metrics, step, output_dir=output_dir)
         except Exception as e:
             logger.warning(f"Failed to save metrics to table: {e}")
             import traceback
 
             logger.warning(f"Metrics table error details: {traceback.format_exc()}")
-
-        # Log to WandB
-        try:
-            if wandb.run is not None:
-                # Log basic metrics
-                wandb.log(metrics, step=step)
-
-                # Create validation trend plot
-                if self.validation_history:
-                    trend_data = [
-                        [h["step"], h["metrics"][self.metric_for_best]]
-                        for h in self.validation_history
-                    ]
-                    trend_data.append([step, metrics[self.metric_for_best]])
-
-                    wandb.log(
-                        {
-                            "validation_trend": wandb.plot.line(
-                                table_data=trend_data,
-                                columns=["step", self.metric_for_best],
-                                title=f"{self.metric_for_best} Trend",
-                            )
-                        }
-                    )
-        except Exception as e:
-            logger.warning(f"Error logging to wandb: {e}")
-
-        # Log to console
-        logger.info(f"\nValidation metrics at step {step}:")
-        for key, value in metrics.items():
-            if isinstance(value, float):
-                logger.info(f"{key}: {value:.4f}")
-            else:
-                logger.info(f"{key}: {value}")
 
         # Store in history
         self.validation_history.append({"step": step, "metrics": metrics})
@@ -1187,57 +1227,50 @@ class PromptMonitorCallback(TrainerCallback):
 
                 # Only show if it's different from the last one
                 if prompt != self.last_prompt:
+                    # Get current training loss from state if available
+                    training_loss = None
+                    if hasattr(state, "log_history") and state.log_history:
+                        try:
+                            for entry in reversed(state.log_history):
+                                if "loss" in entry:
+                                    training_loss = entry["loss"]
+                                    break
+                        except:
+                            pass
+
                     # Process the prompt
                     prompt_data = self._process_prompt(prompt, idx, state.global_step, state.epoch)
+
+                    # Add training loss to prompt data if available
+                    if training_loss is not None:
+                        prompt_data["training_loss"] = training_loss
+
+                        # Also log to wandb
+                        try:
+                            import wandb
+
+                            if wandb.run is not None:
+                                wandb.log(
+                                    {
+                                        "prompts/with_loss/step": state.global_step,
+                                        "prompts/with_loss/loss": training_loss,
+                                        "prompts/with_loss/token_count": prompt_data[
+                                            "token_analysis"
+                                        ]["token_count"],
+                                    }
+                                )
+                        except:
+                            pass
 
                     # Handle interactive mode if enabled
                     if self.enable_interactive and self.interactive_mode:
                         self._handle_interactive_mode(prompt_data)
 
-                    # Print to terminal
-                    print("\n" + "=" * 80)
-                    print(f"Random Training Prompt (Step {state.global_step}):")
-                    print("-" * 80)
-                    print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
-
-                    # Show token statistics if enabled
-                    token_analysis = prompt_data.get("token_analysis", {})
-                    if self.show_token_stats and token_analysis:
-                        print("-" * 80)
-                        print(f"Token Count: {token_analysis.get('token_count', 0)}")
-                        print(f"Unique Tokens: {token_analysis.get('unique_tokens', 0)}")
-                        print("Top Tokens:")
-                        for token, count in token_analysis.get("top_tokens", [])[:5]:
-                            print(f"  {token}: {count}")
-
-                    # Show quality metrics if enabled
-                    quality_metrics = prompt_data.get("quality_metrics", {})
-                    if self.track_quality and quality_metrics:
-                        print("-" * 80)
-                        print("Quality Metrics:")
-                        for metric, value in list(quality_metrics.items())[:5]:  # Show only first 5
-                            print(f"  {metric}: {value:.2f}")
-
-                    # Show diversity score if enabled
-                    if self.track_diversity:
-                        diversity_score = prompt_data.get("diversity_score", 0.0)
-                        print("-" * 80)
-                        print(f"Diversity Score: {diversity_score:.4f}")
-
-                    # Show category if enabled
-                    if self.categorize_prompts:
-                        category = prompt_data.get("category", "unknown")
-                        print("-" * 80)
-                        print(f"Category: {category}")
-
-                    print("=" * 80 + "\n")
+                    # Update last prompt
                     self.last_prompt = prompt
-
             except Exception as e:
-                logger.warning(f"Error showing random prompt: {e}")
-                import traceback
+                logger.warning(f"Error showing prompt: {e}")
 
-                logger.warning(f"Error details: {traceback.format_exc()}")
         return control
 
     def _analyze_tokens(self, text: str) -> Dict[str, Any]:

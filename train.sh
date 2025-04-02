@@ -28,9 +28,9 @@ python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
     --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
-    --epochs 5 \
+    --epochs 3 \
     --batch-size 32 \
-    --learning-rate 1e-4 \
+    --learning-rate 2e-4 \
     --grad-accum 2 \
     --warmup-ratio 0.1 \
     --weight-decay 0.01 \
@@ -62,7 +62,7 @@ python src/run.py \
     --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
-    --logging-steps 1 \
+    --logging-steps 2 \
     --save-steps 500 \
     --save-total-limit 3 \
     --push-strategy "best" \
