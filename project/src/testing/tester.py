@@ -1,14 +1,17 @@
-import torch
-import time
 import json
-from datetime import datetime
 import os
-from typing import Optional, Dict, Any, List
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import torch
+
 import wandb
 
-from ..model.qwen_handler import QwenModelHandler
 from ..data.prompt_creator import PromptCreator
 from ..data.response_parser import ResponseParser
+from ..model.qwen_handler import QwenModelHandler
+
 
 class MultipleChoiceTester:
     """Framework for testing Qwen models on multiple choice questions"""
@@ -24,9 +27,7 @@ class MultipleChoiceTester:
         """
         self.model_handler = model_handler
         self.prompt_creator = prompt_creator or PromptCreator()
-        self.response_parser = ResponseParser.from_prompt_type(
-            self.prompt_creator.prompt_type
-        )
+        self.response_parser = ResponseParser.from_prompt_type(self.prompt_creator.prompt_type)
 
         if checkpoint_path:
             self.load_from_checkpoint(checkpoint_path)
@@ -46,7 +47,9 @@ class MultipleChoiceTester:
             )
         else:
             self.model_handler.model = self.model_handler.model.from_pretrained(checkpoint_path)
-            self.model_handler.tokenizer = self.model_handler.tokenizer.from_pretrained(checkpoint_path)
+            self.model_handler.tokenizer = self.model_handler.tokenizer.from_pretrained(
+                checkpoint_path
+            )
 
         print(f"Model loaded from checkpoint: {checkpoint_path}")
         return self.model_handler
@@ -88,15 +91,18 @@ class MultipleChoiceTester:
                     if isinstance(choices, str):
                         try:
                             import json
+
                             choices = json.loads(choices)
                         except:
                             choices = [c.strip() for c in choices.split("\n") if c.strip()]
 
-                    batch_examples.append({
-                        "question": example.get("question", ""),
-                        "choices": choices,
-                        "answer": example.get("answer", ""),
-                    })
+                    batch_examples.append(
+                        {
+                            "question": example.get("question", ""),
+                            "choices": choices,
+                            "answer": example.get("answer", ""),
+                        }
+                    )
 
                 batch_results, batch_metrics = self.infer_batch(
                     batch_examples, temperature=temperature, batch_size=batch_size
@@ -208,4 +214,3 @@ class MultipleChoiceTester:
 
         print(f"Results saved to {filepath}")
         return filepath
-

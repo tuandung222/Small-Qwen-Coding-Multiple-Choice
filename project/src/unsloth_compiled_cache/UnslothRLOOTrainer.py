@@ -5,44 +5,101 @@
 0.15.2
 __UNSLOTH_VERSIONING__
 """
-from torch import Tensor
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import *
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from trl.trainer.rloo_trainer import (Accelerator, BaseImageProcessor, Callable, CallbackHandler, DEFAULT_CALLBACKS, DEFAULT_PROGRESS_CALLBACK, DataCollatorWithPadding, DataLoader, Dataset, ExportableState, FeatureExtractionMixin, GenerationConfig, INVALID_LOGPROB, OnlineTrainerState, Optional, PreTrainedTokenizerBase, PrinterCallback, ProcessorMixin, RLOOConfig, RLOOTrainer, Trainer, TrainerCallback, TrainerControl, Union, batch_generation, broadcast, defaultdict, disable_dropout_in_model, exact_div, first_true_indices, forward, gather_object, gc, generate_model_card, get_comet_experiment_url, get_reporting_integration_callbacks, get_reward, is_wandb_available, log_table_to_comet_experiment, math, nn, np, os, pd, prepare_deepspeed, print_rich_table, textwrap, time, torch, truncate_response, unwrap_model_for_generation, wandb)
-
-
-import os
-from typing import *
-from dataclasses import dataclass, field
 from packaging.version import Version
-import torch
-import numpy as np
-from contextlib import nullcontext
+from torch import Tensor
 from torch.nn import functional as F
-from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+from transformers import DataCollatorForLanguageModeling, DataCollatorForSeq2Seq
+from trl.trainer.rloo_trainer import (
+    DEFAULT_CALLBACKS,
+    DEFAULT_PROGRESS_CALLBACK,
+    INVALID_LOGPROB,
+    Accelerator,
+    BaseImageProcessor,
+    Callable,
+    CallbackHandler,
+    DataCollatorWithPadding,
+    DataLoader,
+    Dataset,
+    ExportableState,
+    FeatureExtractionMixin,
+    GenerationConfig,
+    OnlineTrainerState,
+    Optional,
+    PreTrainedTokenizerBase,
+    PrinterCallback,
+    ProcessorMixin,
+    RLOOConfig,
+    RLOOTrainer,
+    Trainer,
+    TrainerCallback,
+    TrainerControl,
+    Union,
+    batch_generation,
+    broadcast,
+    defaultdict,
+    disable_dropout_in_model,
+    exact_div,
+    first_true_indices,
+    forward,
+    gather_object,
+    gc,
+    generate_model_card,
+    get_comet_experiment_url,
+    get_reporting_integration_callbacks,
+    get_reward,
+    is_wandb_available,
+    log_table_to_comet_experiment,
+    math,
+    nn,
+    np,
+    os,
+    pd,
+    prepare_deepspeed,
+    print_rich_table,
+    textwrap,
+    time,
+    torch,
+    truncate_response,
+    unwrap_model_for_generation,
+    wandb,
+)
 
 torch_compile_options = {
-    "epilogue_fusion"   : True,
-    "max_autotune"      : False,
-    "shape_padding"     : True,
-    "trace.enabled"     : False,
-    "triton.cudagraphs" : False,
+    "epilogue_fusion": True,
+    "max_autotune": False,
+    "shape_padding": True,
+    "trace.enabled": False,
+    "triton.cudagraphs": False,
 }
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    options=torch_compile_options,
+)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
-    selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     # loop to reduce peak mem consumption
     # logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-    logsumexp_values = torch.logsumexp(logits, dim = -1)
+    logsumexp_values = torch.logsumexp(logits, dim=-1)
     per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     return per_token_logps
+
+
 @dataclass
 class UnslothRLOOConfig(RLOOConfig):
     """
-    
+
     Configuration class for the [`RLOOTrainer`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
@@ -76,355 +133,369 @@ class UnslothRLOOConfig(RLOOConfig):
             This setting applies to DeepSpeed ZeRO-3. If enabled, the policy model weights are gathered for generation,
             improving generation speed. However, disabling this option allows training models that exceed the VRAM
             capacity of a single GPU, albeit at the cost of slower generation.
-    
+
     """
+
     vllm_sampling_params: Optional[Any] = field(
-        default = None,
-        metadata = {'help': 'vLLM SamplingParams'},
+        default=None,
+        metadata={"help": "vLLM SamplingParams"},
     )
-    unsloth_num_chunks : Optional[int] = field(
-        default = -1,
-        metadata = {'help': 'Chunk size to reduce memory usage. -1 is most efficient.'},
+    unsloth_num_chunks: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk size to reduce memory usage. -1 is most efficient."},
     )
+
     def __init__(
         self,
-        output_dir = None,
-        overwrite_output_dir = None,
-        do_train = False,
-        do_eval = False,
-        do_predict = False,
-        eval_strategy = 'no',
-        prediction_loss_only = False,
-        per_device_train_batch_size = 4,
-        per_device_eval_batch_size = 4,
-        per_gpu_train_batch_size = None,
-        per_gpu_eval_batch_size = None,
-        gradient_accumulation_steps = 2,
-        eval_accumulation_steps = 2,
-        eval_delay = 0,
-        torch_empty_cache_steps = 250,
-        learning_rate = 5e-05,
-        weight_decay = 0.01,
-        adam_beta1 = 0.9,
-        adam_beta2 = 0.999,
-        adam_epsilon = 1e-08,
-        max_grad_norm = 1.0,
-        num_train_epochs = 3.0,
-        max_steps = -1,
-        lr_scheduler_type = 'linear',
-        warmup_ratio = 0.1,
-        warmup_steps = 0,
-        log_level = 'passive',
-        log_level_replica = 'warning',
-        log_on_each_node = True,
-        logging_dir = None,
-        logging_strategy = 'steps',
-        logging_first_step = False,
-        logging_steps = 1,
-        logging_nan_inf_filter = False,
-        save_strategy = 'steps',
-        save_steps = 500,
-        save_total_limit = None,
-        save_safetensors = True,
-        save_on_each_node = False,
-        save_only_model = False,
-        restore_callback_states_from_checkpoint = False,
-        no_cuda = False,
-        use_cpu = False,
-        use_mps_device = False,
-        seed = 3407,
-        data_seed = 3407,
-        jit_mode_eval = False,
-        use_ipex = False,
-        bf16 = False,
-        fp16 = False,
-        fp16_opt_level = 'O1',
-        half_precision_backend = 'auto',
-        bf16_full_eval = False,
-        fp16_full_eval = False,
-        tf32 = None,
-        local_rank = -1,
-        ddp_backend = None,
-        tpu_num_cores = None,
-        tpu_metrics_debug = False,
-        debug = '',
-        dataloader_drop_last = False,
-        eval_steps = None,
-        dataloader_num_workers = 0,
-        dataloader_prefetch_factor = None,
-        past_index = -1,
-        run_name = None,
-        disable_tqdm = None,
-        remove_unused_columns = True,
-        label_names = None,
-        load_best_model_at_end = False,
-        metric_for_best_model = None,
-        greater_is_better = None,
-        ignore_data_skip = False,
-        fsdp = '',
-        fsdp_min_num_params = 0,
-        fsdp_config = None,
-        tp_size = 0,
-        fsdp_transformer_layer_cls_to_wrap = None,
-        accelerator_config = None,
-        deepspeed = None,
-        label_smoothing_factor = 0.0,
-        optim = 'adamw_8bit',
-        optim_args = None,
-        adafactor = False,
-        group_by_length = False,
-        length_column_name = 'length',
-        report_to = None,
-        ddp_find_unused_parameters = None,
-        ddp_bucket_cap_mb = None,
-        ddp_broadcast_buffers = None,
-        dataloader_pin_memory = True,
-        dataloader_persistent_workers = False,
-        skip_memory_metrics = True,
-        use_legacy_prediction_loop = False,
-        push_to_hub = False,
-        resume_from_checkpoint = None,
-        hub_model_id = None,
-        hub_strategy = 'every_save',
-        hub_token = None,
-        hub_private_repo = None,
-        hub_always_push = False,
-        gradient_checkpointing = False,
-        gradient_checkpointing_kwargs = None,
-        include_inputs_for_metrics = False,
-        eval_do_concat_batches = True,
-        fp16_backend = 'auto',
-        evaluation_strategy = None,
-        push_to_hub_model_id = None,
-        push_to_hub_organization = None,
-        push_to_hub_token = None,
-        mp_parameters = '',
-        auto_find_batch_size = False,
-        full_determinism = False,
-        torchdynamo = None,
-        ray_scope = 'last',
-        ddp_timeout = 1800,
-        torch_compile = False,
-        torch_compile_backend = None,
-        torch_compile_mode = None,
-        dispatch_batches = None,
-        split_batches = None,
-        include_tokens_per_second = False,
-        include_num_input_tokens_seen = False,
-        neftune_noise_alpha = None,
-        optim_target_modules = None,
-        batch_eval_metrics = False,
-        eval_on_start = False,
-        use_liger_kernel = False,
-        eval_use_gather_object = False,
-        average_tokens_across_devices = False,
-        dataset_num_proc = None,
-        num_mini_batches = 1,
-        total_episodes = None,
-        local_rollout_forward_batch_size = 64,
-        num_sample_generations = 10,
-        response_length = 53,
-        stop_token = None,
-        stop_token_id = None,
-        temperature = 0.7,
-        missing_eos_penalty = None,
-        sft_model_path = 'EleutherAI/pythia-160m',
-        world_size = None,
-        num_total_batches = None,
-        micro_batch_size = None,
-        local_batch_size = None,
-        batch_size = None,
-        local_mini_batch_size = None,
-        mini_batch_size = None,
-        exp_name = 'rloo_config',
-        reward_model_path = 'EleutherAI/pythia-160m',
-        num_ppo_epochs = 4,
-        whiten_rewards = False,
-        kl_coef = 0.05,
-        cliprange = 0.2,
-        rloo_k = 2,
-        normalize_reward = False,
-        reward_clip_range = 10.0,
-        normalize_advantage = False,
-        token_level_kl = False,
-        ds3_gather_for_generation = True,
-        vllm_sampling_params = None,
-        unsloth_num_chunks = -1,
+        output_dir=None,
+        overwrite_output_dir=None,
+        do_train=False,
+        do_eval=False,
+        do_predict=False,
+        eval_strategy="no",
+        prediction_loss_only=False,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        per_gpu_train_batch_size=None,
+        per_gpu_eval_batch_size=None,
+        gradient_accumulation_steps=2,
+        eval_accumulation_steps=2,
+        eval_delay=0,
+        torch_empty_cache_steps=250,
+        learning_rate=5e-05,
+        weight_decay=0.01,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_epsilon=1e-08,
+        max_grad_norm=1.0,
+        num_train_epochs=3.0,
+        max_steps=-1,
+        lr_scheduler_type="linear",
+        warmup_ratio=0.1,
+        warmup_steps=0,
+        log_level="passive",
+        log_level_replica="warning",
+        log_on_each_node=True,
+        logging_dir=None,
+        logging_strategy="steps",
+        logging_first_step=False,
+        logging_steps=1,
+        logging_nan_inf_filter=False,
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=None,
+        save_safetensors=True,
+        save_on_each_node=False,
+        save_only_model=False,
+        restore_callback_states_from_checkpoint=False,
+        no_cuda=False,
+        use_cpu=False,
+        use_mps_device=False,
+        seed=3407,
+        data_seed=3407,
+        jit_mode_eval=False,
+        use_ipex=False,
+        bf16=False,
+        fp16=False,
+        fp16_opt_level="O1",
+        half_precision_backend="auto",
+        bf16_full_eval=False,
+        fp16_full_eval=False,
+        tf32=None,
+        local_rank=-1,
+        ddp_backend=None,
+        tpu_num_cores=None,
+        tpu_metrics_debug=False,
+        debug="",
+        dataloader_drop_last=False,
+        eval_steps=None,
+        dataloader_num_workers=0,
+        dataloader_prefetch_factor=None,
+        past_index=-1,
+        run_name=None,
+        disable_tqdm=None,
+        remove_unused_columns=True,
+        label_names=None,
+        load_best_model_at_end=False,
+        metric_for_best_model=None,
+        greater_is_better=None,
+        ignore_data_skip=False,
+        fsdp="",
+        fsdp_min_num_params=0,
+        fsdp_config=None,
+        tp_size=0,
+        fsdp_transformer_layer_cls_to_wrap=None,
+        accelerator_config=None,
+        deepspeed=None,
+        label_smoothing_factor=0.0,
+        optim="adamw_8bit",
+        optim_args=None,
+        adafactor=False,
+        group_by_length=False,
+        length_column_name="length",
+        report_to=None,
+        ddp_find_unused_parameters=None,
+        ddp_bucket_cap_mb=None,
+        ddp_broadcast_buffers=None,
+        dataloader_pin_memory=True,
+        dataloader_persistent_workers=False,
+        skip_memory_metrics=True,
+        use_legacy_prediction_loop=False,
+        push_to_hub=False,
+        resume_from_checkpoint=None,
+        hub_model_id=None,
+        hub_strategy="every_save",
+        hub_token=None,
+        hub_private_repo=None,
+        hub_always_push=False,
+        gradient_checkpointing=False,
+        gradient_checkpointing_kwargs=None,
+        include_inputs_for_metrics=False,
+        eval_do_concat_batches=True,
+        fp16_backend="auto",
+        evaluation_strategy=None,
+        push_to_hub_model_id=None,
+        push_to_hub_organization=None,
+        push_to_hub_token=None,
+        mp_parameters="",
+        auto_find_batch_size=False,
+        full_determinism=False,
+        torchdynamo=None,
+        ray_scope="last",
+        ddp_timeout=1800,
+        torch_compile=False,
+        torch_compile_backend=None,
+        torch_compile_mode=None,
+        dispatch_batches=None,
+        split_batches=None,
+        include_tokens_per_second=False,
+        include_num_input_tokens_seen=False,
+        neftune_noise_alpha=None,
+        optim_target_modules=None,
+        batch_eval_metrics=False,
+        eval_on_start=False,
+        use_liger_kernel=False,
+        eval_use_gather_object=False,
+        average_tokens_across_devices=False,
+        dataset_num_proc=None,
+        num_mini_batches=1,
+        total_episodes=None,
+        local_rollout_forward_batch_size=64,
+        num_sample_generations=10,
+        response_length=53,
+        stop_token=None,
+        stop_token_id=None,
+        temperature=0.7,
+        missing_eos_penalty=None,
+        sft_model_path="EleutherAI/pythia-160m",
+        world_size=None,
+        num_total_batches=None,
+        micro_batch_size=None,
+        local_batch_size=None,
+        batch_size=None,
+        local_mini_batch_size=None,
+        mini_batch_size=None,
+        exp_name="rloo_config",
+        reward_model_path="EleutherAI/pythia-160m",
+        num_ppo_epochs=4,
+        whiten_rewards=False,
+        kl_coef=0.05,
+        cliprange=0.2,
+        rloo_k=2,
+        normalize_reward=False,
+        reward_clip_range=10.0,
+        normalize_advantage=False,
+        token_level_kl=False,
+        ds3_gather_for_generation=True,
+        vllm_sampling_params=None,
+        unsloth_num_chunks=-1,
         **kwargs,
     ):
-        if learning_rate < 1e-7: raise FloatingPointError(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
-        if learning_rate > 1: raise OverflowError(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
-        if output_dir is None and save_strategy == 'steps' and save_steps == 500:
-            output_dir = 'unsloth_training_checkpoints'
-            save_strategy = 'no'
+        if learning_rate < 1e-7:
+            raise FloatingPointError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!"
+            )
+        if learning_rate > 1:
+            raise OverflowError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!"
+            )
+        if output_dir is None and save_strategy == "steps" and save_steps == 500:
+            output_dir = "unsloth_training_checkpoints"
+            save_strategy = "no"
         if dataset_num_proc is None:
             from multiprocessing import cpu_count
+
             dataset_num_proc = cpu_count()
-        
+
         super().__init__(
-            output_dir = output_dir,
-            overwrite_output_dir = overwrite_output_dir,
-            do_train = do_train,
-            do_eval = do_eval,
-            do_predict = do_predict,
-            eval_strategy = eval_strategy,
-            prediction_loss_only = prediction_loss_only,
-            per_device_train_batch_size = per_device_train_batch_size,
-            per_device_eval_batch_size = per_device_eval_batch_size,
-            per_gpu_train_batch_size = per_gpu_train_batch_size,
-            per_gpu_eval_batch_size = per_gpu_eval_batch_size,
-            gradient_accumulation_steps = gradient_accumulation_steps,
-            eval_accumulation_steps = eval_accumulation_steps,
-            eval_delay = eval_delay,
-            torch_empty_cache_steps = torch_empty_cache_steps,
-            learning_rate = learning_rate,
-            weight_decay = weight_decay,
-            adam_beta1 = adam_beta1,
-            adam_beta2 = adam_beta2,
-            adam_epsilon = adam_epsilon,
-            max_grad_norm = max_grad_norm,
-            num_train_epochs = num_train_epochs,
-            max_steps = max_steps,
-            lr_scheduler_type = lr_scheduler_type,
-            warmup_ratio = warmup_ratio,
-            warmup_steps = warmup_steps,
-            log_level = log_level,
-            log_level_replica = log_level_replica,
-            log_on_each_node = log_on_each_node,
-            logging_dir = logging_dir,
-            logging_strategy = logging_strategy,
-            logging_first_step = logging_first_step,
-            logging_steps = logging_steps,
-            logging_nan_inf_filter = logging_nan_inf_filter,
-            save_strategy = save_strategy,
-            save_steps = save_steps,
-            save_total_limit = save_total_limit,
-            save_safetensors = save_safetensors,
-            save_on_each_node = save_on_each_node,
-            save_only_model = save_only_model,
-            restore_callback_states_from_checkpoint = restore_callback_states_from_checkpoint,
-            no_cuda = no_cuda,
-            use_cpu = use_cpu,
-            use_mps_device = use_mps_device,
-            seed = seed,
-            data_seed = data_seed,
-            jit_mode_eval = jit_mode_eval,
-            use_ipex = use_ipex,
-            bf16 = bf16,
-            fp16 = fp16,
-            fp16_opt_level = fp16_opt_level,
-            half_precision_backend = half_precision_backend,
-            bf16_full_eval = bf16_full_eval,
-            fp16_full_eval = fp16_full_eval,
-            tf32 = tf32,
-            local_rank = local_rank,
-            ddp_backend = ddp_backend,
-            tpu_num_cores = tpu_num_cores,
-            tpu_metrics_debug = tpu_metrics_debug,
-            debug = debug,
-            dataloader_drop_last = dataloader_drop_last,
-            eval_steps = eval_steps,
-            dataloader_num_workers = dataloader_num_workers,
-            dataloader_prefetch_factor = dataloader_prefetch_factor,
-            past_index = past_index,
-            run_name = run_name,
-            disable_tqdm = disable_tqdm,
-            remove_unused_columns = remove_unused_columns,
-            label_names = label_names,
-            load_best_model_at_end = load_best_model_at_end,
-            metric_for_best_model = metric_for_best_model,
-            greater_is_better = greater_is_better,
-            ignore_data_skip = ignore_data_skip,
-            fsdp = fsdp,
-            fsdp_min_num_params = fsdp_min_num_params,
-            fsdp_config = fsdp_config,
-            tp_size = tp_size,
-            fsdp_transformer_layer_cls_to_wrap = fsdp_transformer_layer_cls_to_wrap,
-            accelerator_config = accelerator_config,
-            deepspeed = deepspeed,
-            label_smoothing_factor = label_smoothing_factor,
-            optim = optim,
-            optim_args = optim_args,
-            adafactor = adafactor,
-            group_by_length = group_by_length,
-            length_column_name = length_column_name,
-            report_to = report_to,
-            ddp_find_unused_parameters = ddp_find_unused_parameters,
-            ddp_bucket_cap_mb = ddp_bucket_cap_mb,
-            ddp_broadcast_buffers = ddp_broadcast_buffers,
-            dataloader_pin_memory = dataloader_pin_memory,
-            dataloader_persistent_workers = dataloader_persistent_workers,
-            skip_memory_metrics = skip_memory_metrics,
-            use_legacy_prediction_loop = use_legacy_prediction_loop,
-            push_to_hub = push_to_hub,
-            resume_from_checkpoint = resume_from_checkpoint,
-            hub_model_id = hub_model_id,
-            hub_strategy = hub_strategy,
-            hub_token = hub_token,
-            hub_private_repo = hub_private_repo,
-            hub_always_push = hub_always_push,
-            gradient_checkpointing = gradient_checkpointing,
-            gradient_checkpointing_kwargs = gradient_checkpointing_kwargs,
-            include_inputs_for_metrics = include_inputs_for_metrics,
-            eval_do_concat_batches = eval_do_concat_batches,
-            fp16_backend = fp16_backend,
-            evaluation_strategy = evaluation_strategy,
-            push_to_hub_model_id = push_to_hub_model_id,
-            push_to_hub_organization = push_to_hub_organization,
-            push_to_hub_token = push_to_hub_token,
-            mp_parameters = mp_parameters,
-            auto_find_batch_size = auto_find_batch_size,
-            full_determinism = full_determinism,
-            torchdynamo = torchdynamo,
-            ray_scope = ray_scope,
-            ddp_timeout = ddp_timeout,
-            torch_compile = torch_compile,
-            torch_compile_backend = torch_compile_backend,
-            torch_compile_mode = torch_compile_mode,
-            dispatch_batches = dispatch_batches,
-            split_batches = split_batches,
-            include_tokens_per_second = include_tokens_per_second,
-            include_num_input_tokens_seen = include_num_input_tokens_seen,
-            neftune_noise_alpha = neftune_noise_alpha,
-            optim_target_modules = optim_target_modules,
-            batch_eval_metrics = batch_eval_metrics,
-            eval_on_start = eval_on_start,
-            use_liger_kernel = use_liger_kernel,
-            eval_use_gather_object = eval_use_gather_object,
-            average_tokens_across_devices = average_tokens_across_devices,
-            dataset_num_proc = dataset_num_proc,
-            num_mini_batches = num_mini_batches,
-            total_episodes = total_episodes,
-            local_rollout_forward_batch_size = local_rollout_forward_batch_size,
-            num_sample_generations = num_sample_generations,
-            response_length = response_length,
-            stop_token = stop_token,
-            stop_token_id = stop_token_id,
-            temperature = temperature,
-            missing_eos_penalty = missing_eos_penalty,
-            sft_model_path = sft_model_path,
-            world_size = world_size,
-            num_total_batches = num_total_batches,
-            micro_batch_size = micro_batch_size,
-            local_batch_size = local_batch_size,
-            batch_size = batch_size,
-            local_mini_batch_size = local_mini_batch_size,
-            mini_batch_size = mini_batch_size,
-            exp_name = exp_name,
-            reward_model_path = reward_model_path,
-            num_ppo_epochs = num_ppo_epochs,
-            whiten_rewards = whiten_rewards,
-            kl_coef = kl_coef,
-            cliprange = cliprange,
-            rloo_k = rloo_k,
-            normalize_reward = normalize_reward,
-            reward_clip_range = reward_clip_range,
-            normalize_advantage = normalize_advantage,
-            token_level_kl = token_level_kl,
-            ds3_gather_for_generation = ds3_gather_for_generation,**kwargs)
+            output_dir=output_dir,
+            overwrite_output_dir=overwrite_output_dir,
+            do_train=do_train,
+            do_eval=do_eval,
+            do_predict=do_predict,
+            eval_strategy=eval_strategy,
+            prediction_loss_only=prediction_loss_only,
+            per_device_train_batch_size=per_device_train_batch_size,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            per_gpu_train_batch_size=per_gpu_train_batch_size,
+            per_gpu_eval_batch_size=per_gpu_eval_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            eval_accumulation_steps=eval_accumulation_steps,
+            eval_delay=eval_delay,
+            torch_empty_cache_steps=torch_empty_cache_steps,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            adam_beta1=adam_beta1,
+            adam_beta2=adam_beta2,
+            adam_epsilon=adam_epsilon,
+            max_grad_norm=max_grad_norm,
+            num_train_epochs=num_train_epochs,
+            max_steps=max_steps,
+            lr_scheduler_type=lr_scheduler_type,
+            warmup_ratio=warmup_ratio,
+            warmup_steps=warmup_steps,
+            log_level=log_level,
+            log_level_replica=log_level_replica,
+            log_on_each_node=log_on_each_node,
+            logging_dir=logging_dir,
+            logging_strategy=logging_strategy,
+            logging_first_step=logging_first_step,
+            logging_steps=logging_steps,
+            logging_nan_inf_filter=logging_nan_inf_filter,
+            save_strategy=save_strategy,
+            save_steps=save_steps,
+            save_total_limit=save_total_limit,
+            save_safetensors=save_safetensors,
+            save_on_each_node=save_on_each_node,
+            save_only_model=save_only_model,
+            restore_callback_states_from_checkpoint=restore_callback_states_from_checkpoint,
+            no_cuda=no_cuda,
+            use_cpu=use_cpu,
+            use_mps_device=use_mps_device,
+            seed=seed,
+            data_seed=data_seed,
+            jit_mode_eval=jit_mode_eval,
+            use_ipex=use_ipex,
+            bf16=bf16,
+            fp16=fp16,
+            fp16_opt_level=fp16_opt_level,
+            half_precision_backend=half_precision_backend,
+            bf16_full_eval=bf16_full_eval,
+            fp16_full_eval=fp16_full_eval,
+            tf32=tf32,
+            local_rank=local_rank,
+            ddp_backend=ddp_backend,
+            tpu_num_cores=tpu_num_cores,
+            tpu_metrics_debug=tpu_metrics_debug,
+            debug=debug,
+            dataloader_drop_last=dataloader_drop_last,
+            eval_steps=eval_steps,
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_prefetch_factor=dataloader_prefetch_factor,
+            past_index=past_index,
+            run_name=run_name,
+            disable_tqdm=disable_tqdm,
+            remove_unused_columns=remove_unused_columns,
+            label_names=label_names,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=greater_is_better,
+            ignore_data_skip=ignore_data_skip,
+            fsdp=fsdp,
+            fsdp_min_num_params=fsdp_min_num_params,
+            fsdp_config=fsdp_config,
+            tp_size=tp_size,
+            fsdp_transformer_layer_cls_to_wrap=fsdp_transformer_layer_cls_to_wrap,
+            accelerator_config=accelerator_config,
+            deepspeed=deepspeed,
+            label_smoothing_factor=label_smoothing_factor,
+            optim=optim,
+            optim_args=optim_args,
+            adafactor=adafactor,
+            group_by_length=group_by_length,
+            length_column_name=length_column_name,
+            report_to=report_to,
+            ddp_find_unused_parameters=ddp_find_unused_parameters,
+            ddp_bucket_cap_mb=ddp_bucket_cap_mb,
+            ddp_broadcast_buffers=ddp_broadcast_buffers,
+            dataloader_pin_memory=dataloader_pin_memory,
+            dataloader_persistent_workers=dataloader_persistent_workers,
+            skip_memory_metrics=skip_memory_metrics,
+            use_legacy_prediction_loop=use_legacy_prediction_loop,
+            push_to_hub=push_to_hub,
+            resume_from_checkpoint=resume_from_checkpoint,
+            hub_model_id=hub_model_id,
+            hub_strategy=hub_strategy,
+            hub_token=hub_token,
+            hub_private_repo=hub_private_repo,
+            hub_always_push=hub_always_push,
+            gradient_checkpointing=gradient_checkpointing,
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+            include_inputs_for_metrics=include_inputs_for_metrics,
+            eval_do_concat_batches=eval_do_concat_batches,
+            fp16_backend=fp16_backend,
+            evaluation_strategy=evaluation_strategy,
+            push_to_hub_model_id=push_to_hub_model_id,
+            push_to_hub_organization=push_to_hub_organization,
+            push_to_hub_token=push_to_hub_token,
+            mp_parameters=mp_parameters,
+            auto_find_batch_size=auto_find_batch_size,
+            full_determinism=full_determinism,
+            torchdynamo=torchdynamo,
+            ray_scope=ray_scope,
+            ddp_timeout=ddp_timeout,
+            torch_compile=torch_compile,
+            torch_compile_backend=torch_compile_backend,
+            torch_compile_mode=torch_compile_mode,
+            dispatch_batches=dispatch_batches,
+            split_batches=split_batches,
+            include_tokens_per_second=include_tokens_per_second,
+            include_num_input_tokens_seen=include_num_input_tokens_seen,
+            neftune_noise_alpha=neftune_noise_alpha,
+            optim_target_modules=optim_target_modules,
+            batch_eval_metrics=batch_eval_metrics,
+            eval_on_start=eval_on_start,
+            use_liger_kernel=use_liger_kernel,
+            eval_use_gather_object=eval_use_gather_object,
+            average_tokens_across_devices=average_tokens_across_devices,
+            dataset_num_proc=dataset_num_proc,
+            num_mini_batches=num_mini_batches,
+            total_episodes=total_episodes,
+            local_rollout_forward_batch_size=local_rollout_forward_batch_size,
+            num_sample_generations=num_sample_generations,
+            response_length=response_length,
+            stop_token=stop_token,
+            stop_token_id=stop_token_id,
+            temperature=temperature,
+            missing_eos_penalty=missing_eos_penalty,
+            sft_model_path=sft_model_path,
+            world_size=world_size,
+            num_total_batches=num_total_batches,
+            micro_batch_size=micro_batch_size,
+            local_batch_size=local_batch_size,
+            batch_size=batch_size,
+            local_mini_batch_size=local_mini_batch_size,
+            mini_batch_size=mini_batch_size,
+            exp_name=exp_name,
+            reward_model_path=reward_model_path,
+            num_ppo_epochs=num_ppo_epochs,
+            whiten_rewards=whiten_rewards,
+            kl_coef=kl_coef,
+            cliprange=cliprange,
+            rloo_k=rloo_k,
+            normalize_reward=normalize_reward,
+            reward_clip_range=reward_clip_range,
+            normalize_advantage=normalize_advantage,
+            token_level_kl=token_level_kl,
+            ds3_gather_for_generation=ds3_gather_for_generation,
+            **kwargs,
+        )
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+
+
 pass
+
 
 class _UnslothRLOOTrainer(Trainer):
     _tag_names = ["trl", "rloo"]
@@ -433,7 +504,9 @@ class _UnslothRLOOTrainer(Trainer):
         self,
         config: RLOOConfig,
         processing_class: Optional[
-            Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
+            Union[
+                PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin
+            ]
         ],
         policy: nn.Module,
         ref_policy: nn.Module,
@@ -463,7 +536,9 @@ class _UnslothRLOOTrainer(Trainer):
         self.policy.generation_config.eos_token_id = (
             None  # disable `pad_token_id` and `eos_token_id` because we just want to
         )
-        self.policy.generation_config.pad_token_id = None  # generate tokens without truncation / padding
+        self.policy.generation_config.pad_token_id = (
+            None  # generate tokens without truncation / padding
+        )
 
         self.ref_policy = ref_policy
         self.reward_model = reward_model
@@ -483,15 +558,21 @@ class _UnslothRLOOTrainer(Trainer):
         self.accelerator = accelerator
         args.world_size = accelerator.num_processes
         args.local_batch_size = (
-            args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
+            args.per_device_train_batch_size
+            * args.gradient_accumulation_steps
+            * args.num_mini_batches
         )
         args.micro_batch_size = int(args.per_device_train_batch_size * args.world_size)
         args.batch_size = int(args.local_batch_size * args.world_size)
         args.mini_batch_size = exact_div(
-            args.batch_size, args.num_mini_batches, "`batch_size` must be a multiple of `num_mini_batches`"
+            args.batch_size,
+            args.num_mini_batches,
+            "`batch_size` must be a multiple of `num_mini_batches`",
         )
         args.local_mini_batch_size = exact_div(
-            args.local_batch_size, args.num_mini_batches, "`local_batch_size` must be a multiple of `num_mini_batches`"
+            args.local_batch_size,
+            args.num_mini_batches,
+            "`local_batch_size` must be a multiple of `num_mini_batches`",
         )
         args.num_total_batches = math.ceil(
             args.total_episodes / args.batch_size
@@ -501,7 +582,9 @@ class _UnslothRLOOTrainer(Trainer):
         args.run_name = f"{args.exp_name}__{args.seed}__{time_int}"
         self.local_seed = args.seed + accelerator.process_index * 100003  # Prime
         if args.num_sample_generations > 0:
-            self.sample_generations_freq = max(1, args.num_total_batches // args.num_sample_generations)
+            self.sample_generations_freq = max(
+                1, args.num_total_batches // args.num_sample_generations
+            )
         self.local_dataloader_batch_size = exact_div(
             args.local_batch_size, args.rloo_k, "`local_batch_size` must be a multiple of rloo_k"
         )  # RLOO logic: needed because RLOO repeats the same prompt args.rloo_k times
@@ -522,7 +605,9 @@ class _UnslothRLOOTrainer(Trainer):
         #########
         ### trainer specifics
         #########
-        default_callbacks = DEFAULT_CALLBACKS + get_reporting_integration_callbacks(self.args.report_to)
+        default_callbacks = DEFAULT_CALLBACKS + get_reporting_integration_callbacks(
+            self.args.report_to
+        )
         self.callbacks = default_callbacks if callbacks is None else default_callbacks + callbacks
         self.callback_handler = CallbackHandler(
             self.callbacks, self.model, self.processing_class, self.optimizer, self.lr_scheduler
@@ -533,13 +618,17 @@ class _UnslothRLOOTrainer(Trainer):
             is_local_process_zero=self.is_local_process_zero(),
             is_world_process_zero=self.is_world_process_zero(),
             stateful_callbacks=[
-                cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
+                cb
+                for cb in self.callback_handler.callbacks + [self.control]
+                if isinstance(cb, ExportableState)
             ],
         )
 
         self.current_flos = 0
         self.hp_search_backend = None
-        self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        self.is_deepspeed_enabled = (
+            getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        )
         self.is_fsdp_enabled = getattr(self.accelerator.state, "fsdp_plugin", None) is not None
         # Create distant repo and output directory if needed
         self.hub_model_id = None
@@ -566,7 +655,9 @@ class _UnslothRLOOTrainer(Trainer):
         # sync random states for DataLoader(shuffle=True) before `accelerator.prepare`
         # see https://gist.github.com/vwxyzjn/2581bff1e48e185e0b85b6dfe1def79c
         torch.manual_seed(args.seed)
-        self.model, self.optimizer, self.dataloader = accelerator.prepare(self.model, self.optimizer, self.dataloader)
+        self.model, self.optimizer, self.dataloader = accelerator.prepare(
+            self.model, self.optimizer, self.dataloader
+        )
         torch.manual_seed(self.local_seed)  # reset the local seed again
 
         self.eval_dataloader = DataLoader(
@@ -672,7 +763,9 @@ class _UnslothRLOOTrainer(Trainer):
 
                 # Generate responses and compute logprobs
                 with unwrap_model_for_generation(
-                    self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
+                    self.model,
+                    self.accelerator,
+                    gather_deepspeed3_params=self.args.ds3_gather_for_generation,
                 ) as unwrapped_model:
                     query_responses, logitss = batch_generation(
                         unwrapped_model,
@@ -701,23 +794,33 @@ class _UnslothRLOOTrainer(Trainer):
 
                     # Response Processing 1. truncate response after the first occurrence of `stop_token_id`
                     postprocessed_response = response
-                    if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
+                    if (
+                        args.stop_token_id is not None
+                    ):  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
                             args.stop_token_id, processing_class.pad_token_id, response
                         )
 
                     # Response Processing 2. run reward model on the truncated responses
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
-                    sequence_length = first_true_indices(postprocessed_response == processing_class.pad_token_id) - 1
+                    sequence_length = (
+                        first_true_indices(postprocessed_response == processing_class.pad_token_id)
+                        - 1
+                    )
 
                     if isinstance(reward_model, nn.Module):
                         _, score, _ = get_reward(
-                            reward_model, postprocessed_query_response, processing_class.pad_token_id, context_length
+                            reward_model,
+                            postprocessed_query_response,
+                            processing_class.pad_token_id,
+                            context_length,
                         )
                     else:
                         score = torch.tensor(
                             reward_model(
-                                processing_class.batch_decode(postprocessed_query_response, skip_special_tokens=True)
+                                processing_class.batch_decode(
+                                    postprocessed_query_response, skip_special_tokens=True
+                                )
                             ),
                             dtype=torch.float,
                         ).to(device)
@@ -744,13 +847,17 @@ class _UnslothRLOOTrainer(Trainer):
                 # Response Processing 3. filter response. Ensure that the sample contains stop_token_id
                 # responses not passing that filter will receive a low (fixed) score
                 # only query humans on responses that pass that filter
-                contain_eos_token = torch.any(postprocessed_responses == processing_class.eos_token_id, dim=-1)
+                contain_eos_token = torch.any(
+                    postprocessed_responses == processing_class.eos_token_id, dim=-1
+                )
                 if args.missing_eos_penalty is not None:
                     scores[~contain_eos_token] -= self.args.missing_eos_penalty
                 # accelerator.print(f"{scores=}, {(contain_eos_token.sum() / len(contain_eos_token))=}")
 
                 # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
-                response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1)
+                response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(
+                    responses.shape[0], 1
+                )
                 padding_mask = response_idxs > sequence_lengths.unsqueeze(1)
                 logprobs = torch.masked_fill(logprobs, padding_mask, INVALID_LOGPROB)
                 ref_logprobs = torch.masked_fill(ref_logprobs, padding_mask, INVALID_LOGPROB)
@@ -770,7 +877,11 @@ class _UnslothRLOOTrainer(Trainer):
                     kl_reward = -args.kl_coef * kl
 
                     # Get the index of the last non-padded token for each sequence
-                    eos_indices = padding_mask.size(1) - 1 - padding_mask.long().fliplr().argmax(dim=1, keepdim=True)
+                    eos_indices = (
+                        padding_mask.size(1)
+                        - 1
+                        - padding_mask.long().fliplr().argmax(dim=1, keepdim=True)
+                    )
                     last_reward = torch.zeros_like(kl)
                     # Ensure scores has correct shape and type
                     scores_shaped = scores.reshape(-1, 1).to(kl.dtype)
@@ -806,7 +917,9 @@ class _UnslothRLOOTrainer(Trainer):
                     mini_batch_end = mini_batch_start + args.local_mini_batch_size
                     mini_batch_inds = b_inds[mini_batch_start:mini_batch_end]
                     gradient_accumulation_idx = 0
-                    for micro_batch_start in range(0, args.local_mini_batch_size, args.per_device_train_batch_size):
+                    for micro_batch_start in range(
+                        0, args.local_mini_batch_size, args.per_device_train_batch_size
+                    ):
                         with accelerator.accumulate(model):
                             micro_batch_end = micro_batch_start + args.per_device_train_batch_size
                             micro_batch_inds = mini_batch_inds[micro_batch_start:micro_batch_end]
@@ -818,7 +931,9 @@ class _UnslothRLOOTrainer(Trainer):
                             mb_logprobs = logprobs[micro_batch_inds]
 
                             # Forward pass
-                            output = forward(model, mb_query_responses, processing_class.pad_token_id)
+                            output = forward(
+                                model, mb_query_responses, processing_class.pad_token_id
+                            )
                             logits = output.logits[:, context_length - 1 : -1]
                             logits /= args.temperature + 1e-7
 
@@ -837,7 +952,9 @@ class _UnslothRLOOTrainer(Trainer):
 
                             # PPO clipped loss
                             pg_losses = -mb_advantage * ratio
-                            pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
+                            pg_losses2 = -mb_advantage * torch.clamp(
+                                ratio, 1.0 - args.cliprange, 1.0 + args.cliprange
+                            )
                             pg_loss_max = torch.max(pg_losses, pg_losses2)
                             pg_loss = pg_loss_max.mean()
 
@@ -852,15 +969,25 @@ class _UnslothRLOOTrainer(Trainer):
                             with torch.no_grad():
                                 pg_clipfrac = (pg_losses2 > pg_losses).float().mean()
                                 prob_dist = torch.nn.functional.softmax(logits, dim=-1)
-                                entropy = torch.logsumexp(logits, dim=-1) - torch.sum(prob_dist * logits, dim=-1)
-                                approxkl = 0.5 * (logprobs_diff**2).mean()
-                                approxkl_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = approxkl
-                                pg_clipfrac_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = (
-                                    pg_clipfrac
+                                entropy = torch.logsumexp(logits, dim=-1) - torch.sum(
+                                    prob_dist * logits, dim=-1
                                 )
-                                pg_loss_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_loss
-                                entropy_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = entropy.mean()
-                                ratio_stats[ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx] = new_ratio.mean()
+                                approxkl = 0.5 * (logprobs_diff**2).mean()
+                                approxkl_stats[
+                                    ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                                ] = approxkl
+                                pg_clipfrac_stats[
+                                    ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                                ] = pg_clipfrac
+                                pg_loss_stats[
+                                    ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                                ] = pg_loss
+                                entropy_stats[
+                                    ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                                ] = entropy.mean()
+                                ratio_stats[
+                                    ppo_epoch_idx, minibatch_idx, gradient_accumulation_idx
+                                ] = new_ratio.mean()
                         gradient_accumulation_idx += 1
                     minibatch_idx += 1
 
@@ -883,23 +1010,47 @@ class _UnslothRLOOTrainer(Trainer):
                 metrics = {}
                 metrics["eps"] = eps
                 metrics["objective/kl"] = self.accelerator.gather_for_metrics(mean_kl).mean().item()
-                metrics["objective/entropy"] = self.accelerator.gather_for_metrics(mean_entropy).mean().item()
+                metrics["objective/entropy"] = (
+                    self.accelerator.gather_for_metrics(mean_entropy).mean().item()
+                )
                 metrics["objective/non_score_reward"] = (
                     self.accelerator.gather_for_metrics(mean_non_score_reward).mean().item()
                 )
-                metrics["objective/rlhf_reward"] = self.accelerator.gather_for_metrics(rlhf_reward).mean().item()
-                metrics["objective/scores"] = self.accelerator.gather_for_metrics(scores.mean()).mean().item()
-                metrics["policy/approxkl_avg"] = self.accelerator.gather_for_metrics(approxkl_stats).mean().item()
-                metrics["policy/clipfrac_avg"] = self.accelerator.gather_for_metrics(pg_clipfrac_stats).mean().item()
-                metrics["loss/policy_avg"] = self.accelerator.gather_for_metrics(pg_loss_stats).mean().item()
-                metrics["val/clipfrac_avg"] = self.accelerator.gather_for_metrics(vf_clipfrac_stats).mean().item()
-                metrics["policy/entropy_avg"] = self.accelerator.gather_for_metrics(entropy_stats).mean().item()
-                metrics["val/ratio"] = self.accelerator.gather_for_metrics(ratio_stats).mean().item()
-                metrics["val/ratio_var"] = self.accelerator.gather_for_metrics(ratio_stats).var().item()
-                metrics["val/num_eos_tokens"] = (responses == processing_class.eos_token_id).sum().item()
+                metrics["objective/rlhf_reward"] = (
+                    self.accelerator.gather_for_metrics(rlhf_reward).mean().item()
+                )
+                metrics["objective/scores"] = (
+                    self.accelerator.gather_for_metrics(scores.mean()).mean().item()
+                )
+                metrics["policy/approxkl_avg"] = (
+                    self.accelerator.gather_for_metrics(approxkl_stats).mean().item()
+                )
+                metrics["policy/clipfrac_avg"] = (
+                    self.accelerator.gather_for_metrics(pg_clipfrac_stats).mean().item()
+                )
+                metrics["loss/policy_avg"] = (
+                    self.accelerator.gather_for_metrics(pg_loss_stats).mean().item()
+                )
+                metrics["val/clipfrac_avg"] = (
+                    self.accelerator.gather_for_metrics(vf_clipfrac_stats).mean().item()
+                )
+                metrics["policy/entropy_avg"] = (
+                    self.accelerator.gather_for_metrics(entropy_stats).mean().item()
+                )
+                metrics["val/ratio"] = (
+                    self.accelerator.gather_for_metrics(ratio_stats).mean().item()
+                )
+                metrics["val/ratio_var"] = (
+                    self.accelerator.gather_for_metrics(ratio_stats).var().item()
+                )
+                metrics["val/num_eos_tokens"] = (
+                    (responses == processing_class.eos_token_id).sum().item()
+                )
                 metrics["lr"] = self.lr_scheduler.get_last_lr()[0]
                 metrics["episode"] = self.state.episode
-                self.state.epoch = self.state.episode / (args.rloo_k * self.train_dataset_len)  # used by self.log
+                self.state.epoch = self.state.episode / (
+                    args.rloo_k * self.train_dataset_len
+                )  # used by self.log
                 self.log(metrics)
             del kl, mean_kl, mean_entropy, scores
 
@@ -934,7 +1085,9 @@ class _UnslothRLOOTrainer(Trainer):
 
         table = defaultdict(list)
         with unwrap_model_for_generation(
-            self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
+            self.model,
+            self.accelerator,
+            gather_deepspeed3_params=self.args.ds3_gather_for_generation,
         ) as unwrapped_model:
             for batch in self.eval_dataloader:
                 query = batch["input_ids"]
@@ -949,12 +1102,16 @@ class _UnslothRLOOTrainer(Trainer):
                     )
                     response = query_response[:, context_length:]
                     postprocessed_response = response
-                    if args.stop_token_id is not None:  # handle the edge case when stop_token_id exists but is 0
+                    if (
+                        args.stop_token_id is not None
+                    ):  # handle the edge case when stop_token_id exists but is 0
                         postprocessed_response = truncate_response(
                             args.stop_token_id, processing_class.pad_token_id, response
                         )
                     table["query"].extend(
-                        gather_object(processing_class.batch_decode(query, skip_special_tokens=True))
+                        gather_object(
+                            processing_class.batch_decode(query, skip_special_tokens=True)
+                        )
                     )
                     table["model response"].extend(
                         gather_object(processing_class.batch_decode(postprocessed_response))
@@ -972,11 +1129,15 @@ class _UnslothRLOOTrainer(Trainer):
                     else:
                         score = torch.tensor(
                             self.reward_model(
-                                processing_class.batch_decode(postprocessed_query_response, skip_special_tokens=True)
+                                processing_class.batch_decode(
+                                    postprocessed_query_response, skip_special_tokens=True
+                                )
                             ),
                             dtype=torch.float,
                         ).to(postprocessed_query_response.device)
-                    table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
+                    table["score"].extend(
+                        self.accelerator.gather_for_metrics(score).float().cpu().numpy()
+                    )
 
                 if sampling:
                     break
@@ -1016,7 +1177,9 @@ class _UnslothRLOOTrainer(Trainer):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -1028,7 +1191,8 @@ class _UnslothRLOOTrainer(Trainer):
         if hasattr(self.model.config, "unsloth_version"):
             tags.append("unsloth")
 
-        citation = textwrap.dedent("""\
+        citation = textwrap.dedent(
+            """\
         @inproceedings{ahmadian2024back,
             title        = {{Back to Basics: Revisiting REINFORCE-Style Optimization for Learning from Human Feedback in LLMs}},
             author       = {Arash Ahmadian and Chris Cremer and Matthias Gall{\'{e}} and Marzieh Fadaee and Julia Kreutzer and Olivier Pietquin and Ahmet {\"{U}}st{\"{u}}n and Sara Hooker},
@@ -1037,7 +1201,8 @@ class _UnslothRLOOTrainer(Trainer):
             publisher    = {Association for Computational Linguistics},
             pages        = {12248--12267},
             editor       = {Lun{-}Wei Ku and Andre Martins and Vivek Srikumar},
-        }""")
+        }"""
+        )
 
         model_card = generate_model_card(
             base_model=base_model,
@@ -1045,7 +1210,9 @@ class _UnslothRLOOTrainer(Trainer):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb.run.get_url()
+            if is_wandb_available() and wandb.run is not None
+            else None,
             comet_url=get_comet_experiment_url(),
             trainer_name="RLOO",
             trainer_citation=citation,
@@ -1054,10 +1221,11 @@ class _UnslothRLOOTrainer(Trainer):
         )
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
+
+
 class UnslothRLOOTrainer(_UnslothRLOOTrainer):
-    """
-    
-    """
+    """ """
+
     def __init__(
         self,
         config,
@@ -1066,68 +1234,94 @@ class UnslothRLOOTrainer(_UnslothRLOOTrainer):
         ref_policy,
         reward_model,
         train_dataset,
-        data_collator = None,
-        eval_dataset = None,
-        callbacks = None,
-        **kwargs
+        data_collator=None,
+        eval_dataset=None,
+        callbacks=None,
+        **kwargs,
     ):
-        if args is None: args = UnslothRLOOConfig()
+        if args is None:
+            args = UnslothRLOOConfig()
         _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
+        if locals().get("compute_metrics", None) is not None:
+            _output_logits = True
+        if locals().get("preprocess_logits_for_metrics", None) is not None:
+            _output_logits = True
         if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
-        if 'max_seq_length' not in locals() and not hasattr(args, 'max_seq_length'):
+            os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+        if "max_seq_length" not in locals() and not hasattr(args, "max_seq_length"):
             pass
         else:
-            model_max_seq_length = getattr(model, 'max_seq_length', None)
-            args_max_seq_length  = getattr(args,  'max_seq_length', None)
+            model_max_seq_length = getattr(model, "max_seq_length", None)
+            args_max_seq_length = getattr(args, "max_seq_length", None)
             if args_max_seq_length is None and model_max_seq_length is not None:
                 max_seq_length = model.max_seq_length
-                if hasattr(args, 'max_seq_length'): args.max_seq_length = max_seq_length
-        if model is not None and hasattr(model, 'for_training'):
+                if hasattr(args, "max_seq_length"):
+                    args.max_seq_length = max_seq_length
+        if model is not None and hasattr(model, "for_training"):
             model.for_training()
-        if 'tokenizer' in locals() and hasattr(tokenizer, 'padding_side'): tokenizer.padding_side = 'right'
-        if 'processing_class' in locals():
-            if hasattr(processing_class, 'padding_side'): processing_class.padding_side = 'right'
-            if hasattr(processing_class, 'tokenizer') and hasattr(processing_class.tokenizer, 'padding_side'): processing_class.tokenizer.padding_side = 'right'
-        __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
+        if "tokenizer" in locals() and hasattr(tokenizer, "padding_side"):
+            tokenizer.padding_side = "right"
+        if "processing_class" in locals():
+            if hasattr(processing_class, "padding_side"):
+                processing_class.padding_side = "right"
+            if hasattr(processing_class, "tokenizer") and hasattr(
+                processing_class.tokenizer, "padding_side"
+            ):
+                processing_class.tokenizer.padding_side = "right"
+        __tokenizer = processing_class if "processing_class" in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
+
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
-                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm = False)
-            elif isinstance(data_collator, DataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            if (
+                isinstance(data_collator, DataCollatorForSeq2Seq)
+                and "labels" not in train_dataset.column_names
+            ):
+                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm=False)
+            elif (
+                isinstance(data_collator, DataCollatorForLanguageModeling)
+                and "labels" in train_dataset.column_names
+            ):
                 data_collator = DataCollatorForSeq2Seq(__tokenizer)
         else:
-            if hasattr(args, 'remove_unused_columns'): args.remove_unused_columns = False
-            if hasattr(args, 'dataset_text_field'): args.dataset_text_field = ''
-            if hasattr(args, 'dataset_kwargs'): args.dataset_kwargs = {'skip_prepare_dataset': True}
+            if hasattr(args, "remove_unused_columns"):
+                args.remove_unused_columns = False
+            if hasattr(args, "dataset_text_field"):
+                args.dataset_text_field = ""
+            if hasattr(args, "dataset_kwargs"):
+                args.dataset_kwargs = {"skip_prepare_dataset": True}
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if not hasattr(__tokenizer, 'pad') and hasattr(__tokenizer, 'tokenizer'):
+            if not hasattr(__tokenizer, "pad") and hasattr(__tokenizer, "tokenizer"):
                 if isinstance(data_collator, DataCollatorForSeq2Seq):
                     data_collator = DataCollatorForSeq2Seq(__tokenizer.tokenizer)
                 else:
-                    data_collator = DataCollatorForLanguageModeling(__tokenizer.tokenizer, mlm = False)
+                    data_collator = DataCollatorForLanguageModeling(
+                        __tokenizer.tokenizer, mlm=False
+                    )
         other_metrics = []
-        
+
         from unsloth_zoo.logging_utils import PatchRLStatistics
-        PatchRLStatistics('rloo_trainer', other_metrics)
-        
+
+        PatchRLStatistics("rloo_trainer", other_metrics)
+
         super().__init__(
-            config = config,
-            processing_class = processing_class,
-            policy = policy,
-            ref_policy = ref_policy,
-            reward_model = reward_model,
-            train_dataset = train_dataset,
-            data_collator = data_collator,
-            eval_dataset = eval_dataset,
-            callbacks = callbacks,**kwargs)
-        if hasattr(self, 'neftune_hook_handle'):
+            config=config,
+            processing_class=processing_class,
+            policy=policy,
+            ref_policy=ref_policy,
+            reward_model=reward_model,
+            train_dataset=train_dataset,
+            data_collator=data_collator,
+            eval_dataset=eval_dataset,
+            callbacks=callbacks,
+            **kwargs,
+        )
+        if hasattr(self, "neftune_hook_handle"):
             self.neftune_hook_handle.remove()
-            if hasattr(self, 'neftune_hook_handle'): del self.neftune_hook_handle
-        if getattr(args, 'neftune_noise_alpha', None) is not None:
+            if hasattr(self, "neftune_hook_handle"):
+                del self.neftune_hook_handle
+        if getattr(args, "neftune_noise_alpha", None) is not None:
             model.get_input_embeddings().neftune_noise_alpha = self.neftune_noise_alpha
         pass
-        
+
+
 pass

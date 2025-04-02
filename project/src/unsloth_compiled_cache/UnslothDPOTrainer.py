@@ -5,44 +5,116 @@
 0.15.2
 __UNSLOTH_VERSIONING__
 """
-from torch import Tensor
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import *
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from trl.trainer.dpo_trainer import (Any, AutoModelForCausalLM, BaseImageProcessor, Callable, DPOConfig, DPOTrainer, DataCollator, DataCollatorForPreference, DataLoader, Dataset, EvalLoopOutput, F, FDivergenceConstants, FDivergenceType, FeatureExtractionMixin, IterableDataset, Literal, MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES, Optional, PartialState, PeftModel, PreTrainedModel, PreTrainedModelWrapper, PreTrainedTokenizerBase, ProcessorMixin, RunningMoments, SyncRefModelCallback, Trainer, TrainerCallback, Union, amp, cap_exp, contextmanager, create_reference_model, dataclass, deepcopy, defaultdict, deprecate_kwarg, disable_dropout_in_model, empty_cache, flush_left, generate_model_card, get_comet_experiment_url, inspect, is_comet_available, is_peft_available, is_torch_xpu_available, is_wandb_available, log_table_to_comet_experiment, maybe_apply_chat_template, maybe_extract_prompt, nn, nullcontext, os, pad, pad_to_length, pd, peft_module_casting_to_bf16, prepare_model_for_kbit_training, random, textwrap, torch, tqdm, transformers, version, wandb, warnings)
-
-
-import os
-from typing import *
-from dataclasses import dataclass, field
 from packaging.version import Version
-import torch
-import numpy as np
-from contextlib import nullcontext
+from torch import Tensor
 from torch.nn import functional as F
-from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+from transformers import DataCollatorForLanguageModeling, DataCollatorForSeq2Seq
+from trl.trainer.dpo_trainer import (
+    MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES,
+    Any,
+    AutoModelForCausalLM,
+    BaseImageProcessor,
+    Callable,
+    DataCollator,
+    DataCollatorForPreference,
+    DataLoader,
+    Dataset,
+    DPOConfig,
+    DPOTrainer,
+    EvalLoopOutput,
+    F,
+    FDivergenceConstants,
+    FDivergenceType,
+    FeatureExtractionMixin,
+    IterableDataset,
+    Literal,
+    Optional,
+    PartialState,
+    PeftModel,
+    PreTrainedModel,
+    PreTrainedModelWrapper,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+    RunningMoments,
+    SyncRefModelCallback,
+    Trainer,
+    TrainerCallback,
+    Union,
+    amp,
+    cap_exp,
+    contextmanager,
+    create_reference_model,
+    dataclass,
+    deepcopy,
+    defaultdict,
+    deprecate_kwarg,
+    disable_dropout_in_model,
+    empty_cache,
+    flush_left,
+    generate_model_card,
+    get_comet_experiment_url,
+    inspect,
+    is_comet_available,
+    is_peft_available,
+    is_torch_xpu_available,
+    is_wandb_available,
+    log_table_to_comet_experiment,
+    maybe_apply_chat_template,
+    maybe_extract_prompt,
+    nn,
+    nullcontext,
+    os,
+    pad,
+    pad_to_length,
+    pd,
+    peft_module_casting_to_bf16,
+    prepare_model_for_kbit_training,
+    random,
+    textwrap,
+    torch,
+    tqdm,
+    transformers,
+    version,
+    wandb,
+    warnings,
+)
 
 torch_compile_options = {
-    "epilogue_fusion"   : True,
-    "max_autotune"      : False,
-    "shape_padding"     : True,
-    "trace.enabled"     : False,
-    "triton.cudagraphs" : False,
+    "epilogue_fusion": True,
+    "max_autotune": False,
+    "shape_padding": True,
+    "trace.enabled": False,
+    "triton.cudagraphs": False,
 }
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    options=torch_compile_options,
+)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
-    selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     # loop to reduce peak mem consumption
     # logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-    logsumexp_values = torch.logsumexp(logits, dim = -1)
+    logsumexp_values = torch.logsumexp(logits, dim=-1)
     per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     return per_token_logps
+
+
 @dataclass
 class UnslothDPOConfig(DPOConfig):
     """
-    
+
     Configuration class for the [`DPOTrainer`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
@@ -171,357 +243,371 @@ class UnslothDPOConfig(DPOConfig):
         generate_during_eval (`bool`, *optional*, defaults to `False`):
             Whether to generate and log completions from both the model and the reference model to W&B or Comet during
             evaluation.
-    
+
     """
+
     vllm_sampling_params: Optional[Any] = field(
-        default = None,
-        metadata = {'help': 'vLLM SamplingParams'},
+        default=None,
+        metadata={"help": "vLLM SamplingParams"},
     )
-    unsloth_num_chunks : Optional[int] = field(
-        default = -1,
-        metadata = {'help': 'Chunk size to reduce memory usage. -1 is most efficient.'},
+    unsloth_num_chunks: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk size to reduce memory usage. -1 is most efficient."},
     )
+
     def __init__(
         self,
-        output_dir = None,
-        overwrite_output_dir = None,
-        do_train = False,
-        do_eval = False,
-        do_predict = False,
-        eval_strategy = 'no',
-        prediction_loss_only = False,
-        per_device_train_batch_size = 4,
-        per_device_eval_batch_size = 4,
-        per_gpu_train_batch_size = None,
-        per_gpu_eval_batch_size = None,
-        gradient_accumulation_steps = 2,
-        eval_accumulation_steps = 2,
-        eval_delay = 0,
-        torch_empty_cache_steps = 250,
-        learning_rate = 5e-05,
-        weight_decay = 0.01,
-        adam_beta1 = 0.9,
-        adam_beta2 = 0.999,
-        adam_epsilon = 1e-08,
-        max_grad_norm = 1.0,
-        num_train_epochs = 3.0,
-        max_steps = -1,
-        lr_scheduler_type = 'linear',
-        warmup_ratio = 0.1,
-        warmup_steps = 0,
-        log_level = 'passive',
-        log_level_replica = 'warning',
-        log_on_each_node = True,
-        logging_dir = None,
-        logging_strategy = 'steps',
-        logging_first_step = False,
-        logging_steps = 1,
-        logging_nan_inf_filter = False,
-        save_strategy = 'steps',
-        save_steps = 500,
-        save_total_limit = None,
-        save_safetensors = True,
-        save_on_each_node = False,
-        save_only_model = False,
-        restore_callback_states_from_checkpoint = False,
-        no_cuda = False,
-        use_cpu = False,
-        use_mps_device = False,
-        seed = 3407,
-        data_seed = 3407,
-        jit_mode_eval = False,
-        use_ipex = False,
-        bf16 = False,
-        fp16 = False,
-        fp16_opt_level = 'O1',
-        half_precision_backend = 'auto',
-        bf16_full_eval = False,
-        fp16_full_eval = False,
-        tf32 = None,
-        local_rank = -1,
-        ddp_backend = None,
-        tpu_num_cores = None,
-        tpu_metrics_debug = False,
-        debug = '',
-        dataloader_drop_last = False,
-        eval_steps = None,
-        dataloader_num_workers = 0,
-        dataloader_prefetch_factor = None,
-        past_index = -1,
-        run_name = None,
-        disable_tqdm = None,
-        remove_unused_columns = True,
-        label_names = None,
-        load_best_model_at_end = False,
-        metric_for_best_model = None,
-        greater_is_better = None,
-        ignore_data_skip = False,
-        fsdp = '',
-        fsdp_min_num_params = 0,
-        fsdp_config = None,
-        tp_size = 0,
-        fsdp_transformer_layer_cls_to_wrap = None,
-        accelerator_config = None,
-        deepspeed = None,
-        label_smoothing_factor = 0.0,
-        optim = 'adamw_8bit',
-        optim_args = None,
-        adafactor = False,
-        group_by_length = False,
-        length_column_name = 'length',
-        report_to = None,
-        ddp_find_unused_parameters = None,
-        ddp_bucket_cap_mb = None,
-        ddp_broadcast_buffers = None,
-        dataloader_pin_memory = True,
-        dataloader_persistent_workers = False,
-        skip_memory_metrics = True,
-        use_legacy_prediction_loop = False,
-        push_to_hub = False,
-        resume_from_checkpoint = None,
-        hub_model_id = None,
-        hub_strategy = 'every_save',
-        hub_token = None,
-        hub_private_repo = None,
-        hub_always_push = False,
-        gradient_checkpointing = False,
-        gradient_checkpointing_kwargs = None,
-        include_inputs_for_metrics = False,
-        eval_do_concat_batches = True,
-        fp16_backend = 'auto',
-        evaluation_strategy = None,
-        push_to_hub_model_id = None,
-        push_to_hub_organization = None,
-        push_to_hub_token = None,
-        mp_parameters = '',
-        auto_find_batch_size = False,
-        full_determinism = False,
-        torchdynamo = None,
-        ray_scope = 'last',
-        ddp_timeout = 1800,
-        torch_compile = False,
-        torch_compile_backend = None,
-        torch_compile_mode = None,
-        dispatch_batches = None,
-        split_batches = None,
-        include_tokens_per_second = False,
-        include_num_input_tokens_seen = False,
-        neftune_noise_alpha = None,
-        optim_target_modules = None,
-        batch_eval_metrics = False,
-        eval_on_start = False,
-        use_liger_kernel = False,
-        eval_use_gather_object = False,
-        average_tokens_across_devices = False,
-        model_init_kwargs = None,
-        ref_model_init_kwargs = None,
-        model_adapter_name = None,
-        ref_adapter_name = None,
-        force_use_ref_model = False,
-        disable_dropout = True,
-        use_logits_to_keep = False,
-        dataset_num_proc = None,
-        padding_value = None,
-        label_pad_token_id = -100,
-        max_prompt_length = 512,
-        max_completion_length = None,
-        max_length = 1024,
-        truncation_mode = 'keep_end',
-        padding_free = False,
-        precompute_ref_log_probs = False,
-        precompute_ref_batch_size = None,
-        tools = None,
-        loss_type = 'sigmoid',
-        beta = 0.1,
-        f_alpha_divergence_coef = 1.0,
-        reference_free = False,
-        label_smoothing = 0.0,
-        use_weighting = False,
-        rpo_alpha = None,
-        discopop_tau = 0.05,
-        sync_ref_model = False,
-        ref_model_mixup_alpha = 0.9,
-        ref_model_sync_steps = 64,
-        generate_during_eval = False,
-        use_num_logits_to_keep = False,
-        vllm_sampling_params = None,
-        unsloth_num_chunks = -1,
+        output_dir=None,
+        overwrite_output_dir=None,
+        do_train=False,
+        do_eval=False,
+        do_predict=False,
+        eval_strategy="no",
+        prediction_loss_only=False,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        per_gpu_train_batch_size=None,
+        per_gpu_eval_batch_size=None,
+        gradient_accumulation_steps=2,
+        eval_accumulation_steps=2,
+        eval_delay=0,
+        torch_empty_cache_steps=250,
+        learning_rate=5e-05,
+        weight_decay=0.01,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_epsilon=1e-08,
+        max_grad_norm=1.0,
+        num_train_epochs=3.0,
+        max_steps=-1,
+        lr_scheduler_type="linear",
+        warmup_ratio=0.1,
+        warmup_steps=0,
+        log_level="passive",
+        log_level_replica="warning",
+        log_on_each_node=True,
+        logging_dir=None,
+        logging_strategy="steps",
+        logging_first_step=False,
+        logging_steps=1,
+        logging_nan_inf_filter=False,
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=None,
+        save_safetensors=True,
+        save_on_each_node=False,
+        save_only_model=False,
+        restore_callback_states_from_checkpoint=False,
+        no_cuda=False,
+        use_cpu=False,
+        use_mps_device=False,
+        seed=3407,
+        data_seed=3407,
+        jit_mode_eval=False,
+        use_ipex=False,
+        bf16=False,
+        fp16=False,
+        fp16_opt_level="O1",
+        half_precision_backend="auto",
+        bf16_full_eval=False,
+        fp16_full_eval=False,
+        tf32=None,
+        local_rank=-1,
+        ddp_backend=None,
+        tpu_num_cores=None,
+        tpu_metrics_debug=False,
+        debug="",
+        dataloader_drop_last=False,
+        eval_steps=None,
+        dataloader_num_workers=0,
+        dataloader_prefetch_factor=None,
+        past_index=-1,
+        run_name=None,
+        disable_tqdm=None,
+        remove_unused_columns=True,
+        label_names=None,
+        load_best_model_at_end=False,
+        metric_for_best_model=None,
+        greater_is_better=None,
+        ignore_data_skip=False,
+        fsdp="",
+        fsdp_min_num_params=0,
+        fsdp_config=None,
+        tp_size=0,
+        fsdp_transformer_layer_cls_to_wrap=None,
+        accelerator_config=None,
+        deepspeed=None,
+        label_smoothing_factor=0.0,
+        optim="adamw_8bit",
+        optim_args=None,
+        adafactor=False,
+        group_by_length=False,
+        length_column_name="length",
+        report_to=None,
+        ddp_find_unused_parameters=None,
+        ddp_bucket_cap_mb=None,
+        ddp_broadcast_buffers=None,
+        dataloader_pin_memory=True,
+        dataloader_persistent_workers=False,
+        skip_memory_metrics=True,
+        use_legacy_prediction_loop=False,
+        push_to_hub=False,
+        resume_from_checkpoint=None,
+        hub_model_id=None,
+        hub_strategy="every_save",
+        hub_token=None,
+        hub_private_repo=None,
+        hub_always_push=False,
+        gradient_checkpointing=False,
+        gradient_checkpointing_kwargs=None,
+        include_inputs_for_metrics=False,
+        eval_do_concat_batches=True,
+        fp16_backend="auto",
+        evaluation_strategy=None,
+        push_to_hub_model_id=None,
+        push_to_hub_organization=None,
+        push_to_hub_token=None,
+        mp_parameters="",
+        auto_find_batch_size=False,
+        full_determinism=False,
+        torchdynamo=None,
+        ray_scope="last",
+        ddp_timeout=1800,
+        torch_compile=False,
+        torch_compile_backend=None,
+        torch_compile_mode=None,
+        dispatch_batches=None,
+        split_batches=None,
+        include_tokens_per_second=False,
+        include_num_input_tokens_seen=False,
+        neftune_noise_alpha=None,
+        optim_target_modules=None,
+        batch_eval_metrics=False,
+        eval_on_start=False,
+        use_liger_kernel=False,
+        eval_use_gather_object=False,
+        average_tokens_across_devices=False,
+        model_init_kwargs=None,
+        ref_model_init_kwargs=None,
+        model_adapter_name=None,
+        ref_adapter_name=None,
+        force_use_ref_model=False,
+        disable_dropout=True,
+        use_logits_to_keep=False,
+        dataset_num_proc=None,
+        padding_value=None,
+        label_pad_token_id=-100,
+        max_prompt_length=512,
+        max_completion_length=None,
+        max_length=1024,
+        truncation_mode="keep_end",
+        padding_free=False,
+        precompute_ref_log_probs=False,
+        precompute_ref_batch_size=None,
+        tools=None,
+        loss_type="sigmoid",
+        beta=0.1,
+        f_alpha_divergence_coef=1.0,
+        reference_free=False,
+        label_smoothing=0.0,
+        use_weighting=False,
+        rpo_alpha=None,
+        discopop_tau=0.05,
+        sync_ref_model=False,
+        ref_model_mixup_alpha=0.9,
+        ref_model_sync_steps=64,
+        generate_during_eval=False,
+        use_num_logits_to_keep=False,
+        vllm_sampling_params=None,
+        unsloth_num_chunks=-1,
         **kwargs,
     ):
-        if learning_rate < 1e-7: raise FloatingPointError(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
-        if learning_rate > 1: raise OverflowError(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
-        if output_dir is None and save_strategy == 'steps' and save_steps == 500:
-            output_dir = 'unsloth_training_checkpoints'
-            save_strategy = 'no'
+        if learning_rate < 1e-7:
+            raise FloatingPointError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!"
+            )
+        if learning_rate > 1:
+            raise OverflowError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!"
+            )
+        if output_dir is None and save_strategy == "steps" and save_steps == 500:
+            output_dir = "unsloth_training_checkpoints"
+            save_strategy = "no"
         if dataset_num_proc is None:
             from multiprocessing import cpu_count
+
             dataset_num_proc = cpu_count()
-        
+
         super().__init__(
-            output_dir = output_dir,
-            overwrite_output_dir = overwrite_output_dir,
-            do_train = do_train,
-            do_eval = do_eval,
-            do_predict = do_predict,
-            eval_strategy = eval_strategy,
-            prediction_loss_only = prediction_loss_only,
-            per_device_train_batch_size = per_device_train_batch_size,
-            per_device_eval_batch_size = per_device_eval_batch_size,
-            per_gpu_train_batch_size = per_gpu_train_batch_size,
-            per_gpu_eval_batch_size = per_gpu_eval_batch_size,
-            gradient_accumulation_steps = gradient_accumulation_steps,
-            eval_accumulation_steps = eval_accumulation_steps,
-            eval_delay = eval_delay,
-            torch_empty_cache_steps = torch_empty_cache_steps,
-            learning_rate = learning_rate,
-            weight_decay = weight_decay,
-            adam_beta1 = adam_beta1,
-            adam_beta2 = adam_beta2,
-            adam_epsilon = adam_epsilon,
-            max_grad_norm = max_grad_norm,
-            num_train_epochs = num_train_epochs,
-            max_steps = max_steps,
-            lr_scheduler_type = lr_scheduler_type,
-            warmup_ratio = warmup_ratio,
-            warmup_steps = warmup_steps,
-            log_level = log_level,
-            log_level_replica = log_level_replica,
-            log_on_each_node = log_on_each_node,
-            logging_dir = logging_dir,
-            logging_strategy = logging_strategy,
-            logging_first_step = logging_first_step,
-            logging_steps = logging_steps,
-            logging_nan_inf_filter = logging_nan_inf_filter,
-            save_strategy = save_strategy,
-            save_steps = save_steps,
-            save_total_limit = save_total_limit,
-            save_safetensors = save_safetensors,
-            save_on_each_node = save_on_each_node,
-            save_only_model = save_only_model,
-            restore_callback_states_from_checkpoint = restore_callback_states_from_checkpoint,
-            no_cuda = no_cuda,
-            use_cpu = use_cpu,
-            use_mps_device = use_mps_device,
-            seed = seed,
-            data_seed = data_seed,
-            jit_mode_eval = jit_mode_eval,
-            use_ipex = use_ipex,
-            bf16 = bf16,
-            fp16 = fp16,
-            fp16_opt_level = fp16_opt_level,
-            half_precision_backend = half_precision_backend,
-            bf16_full_eval = bf16_full_eval,
-            fp16_full_eval = fp16_full_eval,
-            tf32 = tf32,
-            local_rank = local_rank,
-            ddp_backend = ddp_backend,
-            tpu_num_cores = tpu_num_cores,
-            tpu_metrics_debug = tpu_metrics_debug,
-            debug = debug,
-            dataloader_drop_last = dataloader_drop_last,
-            eval_steps = eval_steps,
-            dataloader_num_workers = dataloader_num_workers,
-            dataloader_prefetch_factor = dataloader_prefetch_factor,
-            past_index = past_index,
-            run_name = run_name,
-            disable_tqdm = disable_tqdm,
-            remove_unused_columns = remove_unused_columns,
-            label_names = label_names,
-            load_best_model_at_end = load_best_model_at_end,
-            metric_for_best_model = metric_for_best_model,
-            greater_is_better = greater_is_better,
-            ignore_data_skip = ignore_data_skip,
-            fsdp = fsdp,
-            fsdp_min_num_params = fsdp_min_num_params,
-            fsdp_config = fsdp_config,
-            tp_size = tp_size,
-            fsdp_transformer_layer_cls_to_wrap = fsdp_transformer_layer_cls_to_wrap,
-            accelerator_config = accelerator_config,
-            deepspeed = deepspeed,
-            label_smoothing_factor = label_smoothing_factor,
-            optim = optim,
-            optim_args = optim_args,
-            adafactor = adafactor,
-            group_by_length = group_by_length,
-            length_column_name = length_column_name,
-            report_to = report_to,
-            ddp_find_unused_parameters = ddp_find_unused_parameters,
-            ddp_bucket_cap_mb = ddp_bucket_cap_mb,
-            ddp_broadcast_buffers = ddp_broadcast_buffers,
-            dataloader_pin_memory = dataloader_pin_memory,
-            dataloader_persistent_workers = dataloader_persistent_workers,
-            skip_memory_metrics = skip_memory_metrics,
-            use_legacy_prediction_loop = use_legacy_prediction_loop,
-            push_to_hub = push_to_hub,
-            resume_from_checkpoint = resume_from_checkpoint,
-            hub_model_id = hub_model_id,
-            hub_strategy = hub_strategy,
-            hub_token = hub_token,
-            hub_private_repo = hub_private_repo,
-            hub_always_push = hub_always_push,
-            gradient_checkpointing = gradient_checkpointing,
-            gradient_checkpointing_kwargs = gradient_checkpointing_kwargs,
-            include_inputs_for_metrics = include_inputs_for_metrics,
-            eval_do_concat_batches = eval_do_concat_batches,
-            fp16_backend = fp16_backend,
-            evaluation_strategy = evaluation_strategy,
-            push_to_hub_model_id = push_to_hub_model_id,
-            push_to_hub_organization = push_to_hub_organization,
-            push_to_hub_token = push_to_hub_token,
-            mp_parameters = mp_parameters,
-            auto_find_batch_size = auto_find_batch_size,
-            full_determinism = full_determinism,
-            torchdynamo = torchdynamo,
-            ray_scope = ray_scope,
-            ddp_timeout = ddp_timeout,
-            torch_compile = torch_compile,
-            torch_compile_backend = torch_compile_backend,
-            torch_compile_mode = torch_compile_mode,
-            dispatch_batches = dispatch_batches,
-            split_batches = split_batches,
-            include_tokens_per_second = include_tokens_per_second,
-            include_num_input_tokens_seen = include_num_input_tokens_seen,
-            neftune_noise_alpha = neftune_noise_alpha,
-            optim_target_modules = optim_target_modules,
-            batch_eval_metrics = batch_eval_metrics,
-            eval_on_start = eval_on_start,
-            use_liger_kernel = use_liger_kernel,
-            eval_use_gather_object = eval_use_gather_object,
-            average_tokens_across_devices = average_tokens_across_devices,
-            model_init_kwargs = model_init_kwargs,
-            ref_model_init_kwargs = ref_model_init_kwargs,
-            model_adapter_name = model_adapter_name,
-            ref_adapter_name = ref_adapter_name,
-            force_use_ref_model = force_use_ref_model,
-            disable_dropout = disable_dropout,
-            use_logits_to_keep = use_logits_to_keep,
-            dataset_num_proc = dataset_num_proc,
-            padding_value = padding_value,
-            label_pad_token_id = label_pad_token_id,
-            max_prompt_length = max_prompt_length,
-            max_completion_length = max_completion_length,
-            max_length = max_length,
-            truncation_mode = truncation_mode,
-            padding_free = padding_free,
-            precompute_ref_log_probs = precompute_ref_log_probs,
-            precompute_ref_batch_size = precompute_ref_batch_size,
-            tools = tools,
-            loss_type = loss_type,
-            beta = beta,
-            f_alpha_divergence_coef = f_alpha_divergence_coef,
-            reference_free = reference_free,
-            label_smoothing = label_smoothing,
-            use_weighting = use_weighting,
-            rpo_alpha = rpo_alpha,
-            discopop_tau = discopop_tau,
-            sync_ref_model = sync_ref_model,
-            ref_model_mixup_alpha = ref_model_mixup_alpha,
-            ref_model_sync_steps = ref_model_sync_steps,
-            generate_during_eval = generate_during_eval,
-            use_num_logits_to_keep = use_num_logits_to_keep,**kwargs)
+            output_dir=output_dir,
+            overwrite_output_dir=overwrite_output_dir,
+            do_train=do_train,
+            do_eval=do_eval,
+            do_predict=do_predict,
+            eval_strategy=eval_strategy,
+            prediction_loss_only=prediction_loss_only,
+            per_device_train_batch_size=per_device_train_batch_size,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            per_gpu_train_batch_size=per_gpu_train_batch_size,
+            per_gpu_eval_batch_size=per_gpu_eval_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            eval_accumulation_steps=eval_accumulation_steps,
+            eval_delay=eval_delay,
+            torch_empty_cache_steps=torch_empty_cache_steps,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            adam_beta1=adam_beta1,
+            adam_beta2=adam_beta2,
+            adam_epsilon=adam_epsilon,
+            max_grad_norm=max_grad_norm,
+            num_train_epochs=num_train_epochs,
+            max_steps=max_steps,
+            lr_scheduler_type=lr_scheduler_type,
+            warmup_ratio=warmup_ratio,
+            warmup_steps=warmup_steps,
+            log_level=log_level,
+            log_level_replica=log_level_replica,
+            log_on_each_node=log_on_each_node,
+            logging_dir=logging_dir,
+            logging_strategy=logging_strategy,
+            logging_first_step=logging_first_step,
+            logging_steps=logging_steps,
+            logging_nan_inf_filter=logging_nan_inf_filter,
+            save_strategy=save_strategy,
+            save_steps=save_steps,
+            save_total_limit=save_total_limit,
+            save_safetensors=save_safetensors,
+            save_on_each_node=save_on_each_node,
+            save_only_model=save_only_model,
+            restore_callback_states_from_checkpoint=restore_callback_states_from_checkpoint,
+            no_cuda=no_cuda,
+            use_cpu=use_cpu,
+            use_mps_device=use_mps_device,
+            seed=seed,
+            data_seed=data_seed,
+            jit_mode_eval=jit_mode_eval,
+            use_ipex=use_ipex,
+            bf16=bf16,
+            fp16=fp16,
+            fp16_opt_level=fp16_opt_level,
+            half_precision_backend=half_precision_backend,
+            bf16_full_eval=bf16_full_eval,
+            fp16_full_eval=fp16_full_eval,
+            tf32=tf32,
+            local_rank=local_rank,
+            ddp_backend=ddp_backend,
+            tpu_num_cores=tpu_num_cores,
+            tpu_metrics_debug=tpu_metrics_debug,
+            debug=debug,
+            dataloader_drop_last=dataloader_drop_last,
+            eval_steps=eval_steps,
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_prefetch_factor=dataloader_prefetch_factor,
+            past_index=past_index,
+            run_name=run_name,
+            disable_tqdm=disable_tqdm,
+            remove_unused_columns=remove_unused_columns,
+            label_names=label_names,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=greater_is_better,
+            ignore_data_skip=ignore_data_skip,
+            fsdp=fsdp,
+            fsdp_min_num_params=fsdp_min_num_params,
+            fsdp_config=fsdp_config,
+            tp_size=tp_size,
+            fsdp_transformer_layer_cls_to_wrap=fsdp_transformer_layer_cls_to_wrap,
+            accelerator_config=accelerator_config,
+            deepspeed=deepspeed,
+            label_smoothing_factor=label_smoothing_factor,
+            optim=optim,
+            optim_args=optim_args,
+            adafactor=adafactor,
+            group_by_length=group_by_length,
+            length_column_name=length_column_name,
+            report_to=report_to,
+            ddp_find_unused_parameters=ddp_find_unused_parameters,
+            ddp_bucket_cap_mb=ddp_bucket_cap_mb,
+            ddp_broadcast_buffers=ddp_broadcast_buffers,
+            dataloader_pin_memory=dataloader_pin_memory,
+            dataloader_persistent_workers=dataloader_persistent_workers,
+            skip_memory_metrics=skip_memory_metrics,
+            use_legacy_prediction_loop=use_legacy_prediction_loop,
+            push_to_hub=push_to_hub,
+            resume_from_checkpoint=resume_from_checkpoint,
+            hub_model_id=hub_model_id,
+            hub_strategy=hub_strategy,
+            hub_token=hub_token,
+            hub_private_repo=hub_private_repo,
+            hub_always_push=hub_always_push,
+            gradient_checkpointing=gradient_checkpointing,
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+            include_inputs_for_metrics=include_inputs_for_metrics,
+            eval_do_concat_batches=eval_do_concat_batches,
+            fp16_backend=fp16_backend,
+            evaluation_strategy=evaluation_strategy,
+            push_to_hub_model_id=push_to_hub_model_id,
+            push_to_hub_organization=push_to_hub_organization,
+            push_to_hub_token=push_to_hub_token,
+            mp_parameters=mp_parameters,
+            auto_find_batch_size=auto_find_batch_size,
+            full_determinism=full_determinism,
+            torchdynamo=torchdynamo,
+            ray_scope=ray_scope,
+            ddp_timeout=ddp_timeout,
+            torch_compile=torch_compile,
+            torch_compile_backend=torch_compile_backend,
+            torch_compile_mode=torch_compile_mode,
+            dispatch_batches=dispatch_batches,
+            split_batches=split_batches,
+            include_tokens_per_second=include_tokens_per_second,
+            include_num_input_tokens_seen=include_num_input_tokens_seen,
+            neftune_noise_alpha=neftune_noise_alpha,
+            optim_target_modules=optim_target_modules,
+            batch_eval_metrics=batch_eval_metrics,
+            eval_on_start=eval_on_start,
+            use_liger_kernel=use_liger_kernel,
+            eval_use_gather_object=eval_use_gather_object,
+            average_tokens_across_devices=average_tokens_across_devices,
+            model_init_kwargs=model_init_kwargs,
+            ref_model_init_kwargs=ref_model_init_kwargs,
+            model_adapter_name=model_adapter_name,
+            ref_adapter_name=ref_adapter_name,
+            force_use_ref_model=force_use_ref_model,
+            disable_dropout=disable_dropout,
+            use_logits_to_keep=use_logits_to_keep,
+            dataset_num_proc=dataset_num_proc,
+            padding_value=padding_value,
+            label_pad_token_id=label_pad_token_id,
+            max_prompt_length=max_prompt_length,
+            max_completion_length=max_completion_length,
+            max_length=max_length,
+            truncation_mode=truncation_mode,
+            padding_free=padding_free,
+            precompute_ref_log_probs=precompute_ref_log_probs,
+            precompute_ref_batch_size=precompute_ref_batch_size,
+            tools=tools,
+            loss_type=loss_type,
+            beta=beta,
+            f_alpha_divergence_coef=f_alpha_divergence_coef,
+            reference_free=reference_free,
+            label_smoothing=label_smoothing,
+            use_weighting=use_weighting,
+            rpo_alpha=rpo_alpha,
+            discopop_tau=discopop_tau,
+            sync_ref_model=sync_ref_model,
+            ref_model_mixup_alpha=ref_model_mixup_alpha,
+            ref_model_sync_steps=ref_model_sync_steps,
+            generate_during_eval=generate_during_eval,
+            use_num_logits_to_keep=use_num_logits_to_keep,
+            **kwargs,
+        )
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+
+
 pass
+
 
 class _UnslothDPOTrainer(Trainer):
     r""""""
@@ -529,7 +615,11 @@ class _UnslothDPOTrainer(Trainer):
     _tag_names = ["trl", "dpo"]
 
     @deprecate_kwarg(
-        "tokenizer", "0.16.0", "processing_class", warn_if_greater_or_equal_version=True, raise_if_both_names=True
+        "tokenizer",
+        "0.16.0",
+        "processing_class",
+        warn_if_greater_or_equal_version=True,
+        raise_if_both_names=True,
     )
     def __init__(
         self,
@@ -540,13 +630,17 @@ class _UnslothDPOTrainer(Trainer):
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
         processing_class: Optional[
-            Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
+            Union[
+                PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin
+            ]
         ] = None,
         model_init: Optional[Callable[[], PreTrainedModel]] = None,
         compute_metrics: Optional[Callable[[EvalLoopOutput], dict]] = None,
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        preprocess_logits_for_metrics: Optional[
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        ] = None,
         peft_config: Optional[dict] = None,
     ):
         if model is None:
@@ -622,7 +716,9 @@ class _UnslothDPOTrainer(Trainer):
                     " if you want to use a different ref_model."
                 )
 
-            if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False):
+            if getattr(model, "is_loaded_in_8bit", False) or getattr(
+                model, "is_loaded_in_4bit", False
+            ):
                 _support_gc_kwargs = hasattr(
                     args, "gradient_checkpointing_kwargs"
                 ) and "gradient_checkpointing_kwargs" in list(
@@ -632,7 +728,9 @@ class _UnslothDPOTrainer(Trainer):
                 prepare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
 
                 if _support_gc_kwargs:
-                    prepare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
+                    prepare_model_kwargs[
+                        "gradient_checkpointing_kwargs"
+                    ] = args.gradient_checkpointing_kwargs
 
                 model = prepare_model_for_kbit_training(model, **prepare_model_kwargs)
             elif getattr(args, "gradient_checkpointing", False):
@@ -674,7 +772,9 @@ class _UnslothDPOTrainer(Trainer):
             )
 
         self.is_encoder_decoder = model.config.is_encoder_decoder
-        self.is_vision_model = model.config.model_type in MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES.keys()
+        self.is_vision_model = (
+            model.config.model_type in MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES.keys()
+        )
         self.is_peft_model = is_peft_available() and isinstance(model, PeftModel)
         self.model_adapter_name = args.model_adapter_name
         self.ref_adapter_name = args.ref_adapter_name
@@ -694,9 +794,15 @@ class _UnslothDPOTrainer(Trainer):
         if args.padding_value is not None:
             self.padding_value = args.padding_value
         else:
-            if hasattr(processing_class, "pad_token_id") and processing_class.pad_token_id is not None:
+            if (
+                hasattr(processing_class, "pad_token_id")
+                and processing_class.pad_token_id is not None
+            ):
                 self.padding_value = processing_class.pad_token_id
-            elif hasattr(processing_class, "tokenizer") and processing_class.tokenizer.pad_token_id is not None:
+            elif (
+                hasattr(processing_class, "tokenizer")
+                and processing_class.tokenizer.pad_token_id is not None
+            ):
                 self.padding_value = processing_class.tokenizer.pad_token_id
             else:
                 raise ValueError(
@@ -742,7 +848,8 @@ class _UnslothDPOTrainer(Trainer):
         self._precomputed_eval_ref_log_probs = False
 
         if (
-            args.loss_type in ["hinge", "ipo", "bco_pair", "sppo_hard", "nca_pair", "apo_zero", "apo_down"]
+            args.loss_type
+            in ["hinge", "ipo", "bco_pair", "sppo_hard", "nca_pair", "apo_zero", "apo_down"]
             and args.label_smoothing > 0
         ):
             warnings.warn(
@@ -751,7 +858,9 @@ class _UnslothDPOTrainer(Trainer):
                 UserWarning,
             )
         if args.loss_type == "kto_pair":
-            raise ValueError("Support for kto_pair has been removed in DPOTrainer. Please use KTOTrainer.")
+            raise ValueError(
+                "Support for kto_pair has been removed in DPOTrainer. Please use KTOTrainer."
+            )
 
         self.beta = args.beta
         self.label_smoothing = args.label_smoothing
@@ -770,7 +879,9 @@ class _UnslothDPOTrainer(Trainer):
 
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
         self.f_divergence_type = args.f_divergence_type
-        self.f_divergence_params = {FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY: args.f_alpha_divergence_coef}
+        self.f_divergence_params = {
+            FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY: args.f_alpha_divergence_coef
+        }
         self.dataset_num_proc = args.dataset_num_proc
 
         # The trainer estimates the number of FLOPs (floating-point operations) using the number of elements in the
@@ -823,7 +934,10 @@ class _UnslothDPOTrainer(Trainer):
 
         # Deepspeed Zero-3 does not support precompute_ref_log_probs
         if self.is_deepspeed_enabled:
-            if self.accelerator.state.deepspeed_plugin.zero_stage == 3 and self.precompute_ref_log_probs:
+            if (
+                self.accelerator.state.deepspeed_plugin.zero_stage == 3
+                and self.precompute_ref_log_probs
+            ):
                 raise ValueError(
                     "You cannot use `precompute_ref_log_probs=True` with Deepspeed ZeRO-3. Please set `precompute_ref_log_probs=False`."
                 )
@@ -841,7 +955,9 @@ class _UnslothDPOTrainer(Trainer):
             if self.is_deepspeed_enabled:
                 self.ref_model = self._prepare_deepspeed(self.ref_model)
             else:
-                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+                self.ref_model = self.accelerator.prepare_model(
+                    self.ref_model, evaluation_mode=True
+                )
 
         if args.sync_ref_model:
             if self.precompute_ref_log_probs:
@@ -849,7 +965,9 @@ class _UnslothDPOTrainer(Trainer):
                     "You cannot use `precompute_ref_log_probs=True` with TR-DPO method. Please set `precompute_ref_log_probs=False`."
                 )
 
-            self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
+            self.add_callback(
+                SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator)
+            )
 
         if self.loss_type == "bco_pair":
             self.running = RunningMoments(self.accelerator)
@@ -857,7 +975,9 @@ class _UnslothDPOTrainer(Trainer):
     def _prepare_dataset(
         self,
         dataset: Union[Dataset, IterableDataset],
-        processing_class: Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin],
+        processing_class: Union[
+            PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin
+        ],
         args: DPOConfig,
         dataset_name: str,
     ) -> Union[Dataset, IterableDataset]:
@@ -876,7 +996,9 @@ class _UnslothDPOTrainer(Trainer):
             if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
                 map_kwargs["desc"] = f"Applying chat template to {dataset_name} dataset"
             dataset = dataset.map(
-                maybe_apply_chat_template, fn_kwargs={"tokenizer": processing_class, "tools": args.tools}, **map_kwargs
+                maybe_apply_chat_template,
+                fn_kwargs={"tokenizer": processing_class, "tools": args.tools},
+                **map_kwargs,
             )
 
             # Tokenize the dataset
@@ -899,7 +1021,9 @@ class _UnslothDPOTrainer(Trainer):
         return dataset
 
     @staticmethod
-    def tokenize_row(features, processing_class, max_prompt_length, max_completion_length, add_special_tokens):
+    def tokenize_row(
+        features, processing_class, max_prompt_length, max_completion_length, add_special_tokens
+    ):
         """
         Tokenize a row of the dataset.
 
@@ -961,12 +1085,19 @@ class _UnslothDPOTrainer(Trainer):
         }
 
     @staticmethod
-    def process_row(features, processing_class, max_prompt_length, max_completion_length, add_special_tokens):
+    def process_row(
+        features, processing_class, max_prompt_length, max_completion_length, add_special_tokens
+    ):
         """
         Same as `tokenize_row` but for vision models. Please refer to `tokenize_row` for more information.
         """
-        processor, tokenizer = processing_class, processing_class.tokenizer  # the processing class is a processor
-        processed_features = processor(images=features["images"], text=features["prompt"], add_special_tokens=False)
+        processor, tokenizer = (
+            processing_class,
+            processing_class.tokenizer,
+        )  # the processing class is a processor
+        processed_features = processor(
+            images=features["images"], text=features["prompt"], add_special_tokens=False
+        )
 
         prompt_input_ids = processed_features["input_ids"][0]
         pixel_values = processed_features["pixel_values"][0]
@@ -1021,8 +1152,11 @@ class _UnslothDPOTrainer(Trainer):
                     config_kwargs.update(
                         {
                             "zero_optimization.reduce_bucket_size": hidden_size * hidden_size,
-                            "zero_optimization.stage3_param_persistence_threshold": 10 * hidden_size,
-                            "zero_optimization.stage3_prefetch_bucket_size": 0.9 * hidden_size * hidden_size,
+                            "zero_optimization.stage3_param_persistence_threshold": 10
+                            * hidden_size,
+                            "zero_optimization.stage3_prefetch_bucket_size": 0.9
+                            * hidden_size
+                            * hidden_size,
                         }
                     )
 
@@ -1057,7 +1191,9 @@ class _UnslothDPOTrainer(Trainer):
         """
 
         if self.precompute_ref_log_probs and not self._precomputed_train_ref_log_probs:
-            batch_size = self.args.precompute_ref_batch_size or self.args.per_device_train_batch_size
+            batch_size = (
+                self.args.precompute_ref_batch_size or self.args.per_device_train_batch_size
+            )
             dataloader_params = {
                 "batch_size": batch_size,
                 "collate_fn": self.data_collator,
@@ -1067,11 +1203,15 @@ class _UnslothDPOTrainer(Trainer):
             }
 
             # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(self.train_dataset, **dataloader_params))
+            data_loader = self.accelerator.prepare(
+                DataLoader(self.train_dataset, **dataloader_params)
+            )
 
             ref_chosen_logps = []
             ref_rejected_logps = []
-            for padded_batch in tqdm(iterable=data_loader, desc="Train dataset reference log probs"):
+            for padded_batch in tqdm(
+                iterable=data_loader, desc="Train dataset reference log probs"
+            ):
                 ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(padded_batch)
                 ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
                     (ref_chosen_logp, ref_rejected_logp)
@@ -1086,7 +1226,9 @@ class _UnslothDPOTrainer(Trainer):
             all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
             all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
 
-            self.train_dataset = self.train_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
+            self.train_dataset = self.train_dataset.add_column(
+                name="ref_chosen_logps", column=all_ref_chosen_logps
+            )
             self.train_dataset = self.train_dataset.add_column(
                 name="ref_rejected_logps", column=all_ref_rejected_logps
             )
@@ -1136,8 +1278,12 @@ class _UnslothDPOTrainer(Trainer):
             all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
             all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
 
-            eval_dataset = eval_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
-            eval_dataset = eval_dataset.add_column(name="ref_rejected_logps", column=all_ref_rejected_logps)
+            eval_dataset = eval_dataset.add_column(
+                name="ref_chosen_logps", column=all_ref_chosen_logps
+            )
+            eval_dataset = eval_dataset.add_column(
+                name="ref_rejected_logps", column=all_ref_rejected_logps
+            )
 
             # Save calculated ref_chosen_logps and ref_rejected_logps to the eval_dataset for subsequent runs
             if self.eval_dataset is not None:
@@ -1163,7 +1309,9 @@ class _UnslothDPOTrainer(Trainer):
     def compute_ref_log_probs(self, batch: dict[str, torch.LongTensor]) -> dict:
         """Computes log probabilities of the reference model for a single padded batch of a DPO specific dataset."""
         device_type = "xpu" if is_torch_xpu_available() else "cuda"
-        compte_ref_context_manager = amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        compte_ref_context_manager = (
+            amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
         with torch.no_grad(), compte_ref_context_manager:
             if self.ref_model is None:
                 with self.null_ref_context():
@@ -1211,12 +1359,16 @@ class _UnslothDPOTrainer(Trainer):
         output = {}
 
         # For the prompt, the input_ids are the same for both the chosen and rejected responses
-        output["prompt_input_ids"] = torch.cat([batch["prompt_input_ids"], batch["prompt_input_ids"]], dim=0)
+        output["prompt_input_ids"] = torch.cat(
+            [batch["prompt_input_ids"], batch["prompt_input_ids"]], dim=0
+        )
         output["prompt_attention_mask"] = torch.cat(
             [batch["prompt_attention_mask"], batch["prompt_attention_mask"]], dim=0
         )
         if "pixel_values" in batch:
-            output["pixel_values"] = torch.cat([batch["pixel_values"], batch["pixel_values"]], dim=0)
+            output["pixel_values"] = torch.cat(
+                [batch["pixel_values"], batch["pixel_values"]], dim=0
+            )
 
         if "pixel_attention_mask" in batch:
             output["pixel_attention_mask"] = torch.cat(
@@ -1226,11 +1378,17 @@ class _UnslothDPOTrainer(Trainer):
             output["image_sizes"] = torch.cat([batch["image_sizes"], batch["image_sizes"]], dim=0)
 
         # Concatenate the chosen and rejected completions
-        max_completion_length = max(batch["chosen_input_ids"].shape[1], batch["rejected_input_ids"].shape[1])
+        max_completion_length = max(
+            batch["chosen_input_ids"].shape[1], batch["rejected_input_ids"].shape[1]
+        )
         output["completion_input_ids"] = torch.cat(
             (
-                pad_to_length(batch["chosen_input_ids"], max_completion_length, pad_value=padding_value),
-                pad_to_length(batch["rejected_input_ids"], max_completion_length, pad_value=padding_value),
+                pad_to_length(
+                    batch["chosen_input_ids"], max_completion_length, pad_value=padding_value
+                ),
+                pad_to_length(
+                    batch["rejected_input_ids"], max_completion_length, pad_value=padding_value
+                ),
             ),
         )
         output["completion_attention_mask"] = torch.cat(
@@ -1271,8 +1429,12 @@ class _UnslothDPOTrainer(Trainer):
         device = self.accelerator.device
 
         # Get the log ratios for the chosen and rejected responses
-        chosen_logratios = chosen_logps.to(device) - (not self.reference_free) * ref_chosen_logps.to(device)
-        rejected_logratios = rejected_logps.to(device) - (not self.reference_free) * ref_rejected_logps.to(device)
+        chosen_logratios = chosen_logps.to(device) - (
+            not self.reference_free
+        ) * ref_chosen_logps.to(device)
+        rejected_logratios = rejected_logps.to(device) - (
+            not self.reference_free
+        ) * ref_rejected_logps.to(device)
 
         if self.f_divergence_type == FDivergenceType.ALPHA_DIVERGENCE.value:
             # The alpha-divergence formula: (1 - u^-alpha) / alpha
@@ -1282,9 +1444,16 @@ class _UnslothDPOTrainer(Trainer):
             # where u[w] and u[l] are the policy/reference probability ratios
             # for the chosen and rejected samples, respectively.
             alpha_coef = FDivergenceConstants.ALPHA_DIVERGENCE_COEF_DEFAULT
-            if self.f_divergence_params and FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY in self.f_divergence_params:
-                alpha_coef = float(self.f_divergence_params[FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY])
-            logits = (cap_exp(rejected_logratios * -alpha_coef) - cap_exp(chosen_logratios * -alpha_coef)) / alpha_coef
+            if (
+                self.f_divergence_params
+                and FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY in self.f_divergence_params
+            ):
+                alpha_coef = float(
+                    self.f_divergence_params[FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY]
+                )
+            logits = (
+                cap_exp(rejected_logratios * -alpha_coef) - cap_exp(chosen_logratios * -alpha_coef)
+            ) / alpha_coef
         else:
             logratios = chosen_logps - rejected_logps
             if self.reference_free:
@@ -1328,7 +1497,9 @@ class _UnslothDPOTrainer(Trainer):
                 self.label_smoothing = 1e-3
             losses = (self.beta * logits).sigmoid() * (
                 F.logsigmoid(self.beta * logits) - math.log(1 - self.label_smoothing)
-            ) + (-self.beta * logits).sigmoid() * (F.logsigmoid(-self.beta * logits) - math.log(self.label_smoothing))
+            ) + (-self.beta * logits).sigmoid() * (
+                F.logsigmoid(-self.beta * logits) - math.log(self.label_smoothing)
+            )
 
         elif self.loss_type == "hinge":
             losses = torch.relu(1 - self.beta * logits)
@@ -1392,8 +1563,12 @@ class _UnslothDPOTrainer(Trainer):
         elif self.loss_type == "apo_zero":
             # Eqn (7) of the APO paper (https://huggingface.co/papers/2408.06266)
             # Use this loss when you believe the chosen outputs are better than your model's default output
-            losses_chosen = 1 - F.sigmoid(self.beta * chosen_logratios)  # Increase chosen likelihood
-            losses_rejected = F.sigmoid(self.beta * rejected_logratios)  # Decrease rejected likelihood
+            losses_chosen = 1 - F.sigmoid(
+                self.beta * chosen_logratios
+            )  # Increase chosen likelihood
+            losses_rejected = F.sigmoid(
+                self.beta * rejected_logratios
+            )  # Decrease rejected likelihood
             losses = losses_chosen + losses_rejected
 
         elif self.loss_type == "apo_down":
@@ -1416,7 +1591,10 @@ class _UnslothDPOTrainer(Trainer):
             logistic_component = -F.logsigmoid(logits)
             exp_component = torch.exp(-logits)
             # Blend between logistic and exponential component based on log ratio modulation
-            losses = logistic_component * (1 - log_ratio_modulation) + exp_component * log_ratio_modulation
+            losses = (
+                logistic_component * (1 - log_ratio_modulation)
+                + exp_component * log_ratio_modulation
+            )
 
         else:
             raise ValueError(
@@ -1424,12 +1602,18 @@ class _UnslothDPOTrainer(Trainer):
                 "'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'discopop', 'apo_zero', 'apo_down']"
             )
 
-        chosen_rewards = self.beta * (chosen_logps.to(device) - ref_chosen_logps.to(device)).detach()
-        rejected_rewards = self.beta * (rejected_logps.to(device) - ref_rejected_logps.to(device)).detach()
+        chosen_rewards = (
+            self.beta * (chosen_logps.to(device) - ref_chosen_logps.to(device)).detach()
+        )
+        rejected_rewards = (
+            self.beta * (rejected_logps.to(device) - ref_rejected_logps.to(device)).detach()
+        )
 
         return losses, chosen_rewards, rejected_rewards
 
-    def concatenated_forward(self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]]):
+    def concatenated_forward(
+        self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]]
+    ):
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
 
         We do this to avoid doing two forward passes, because it's faster for FSDP.
@@ -1502,7 +1686,9 @@ class _UnslothDPOTrainer(Trainer):
                 #  [0, 0, 0, x, x, x, 0]]
                 #         ^ start computing logits from here ([:, -(7-3+1):])
                 first_compute_index = loss_mask.nonzero(as_tuple=True)[1].min()
-                logits_to_keep = (loss_mask.shape[1] - first_compute_index).item() + 1  # +1 for the first label
+                logits_to_keep = (
+                    loss_mask.shape[1] - first_compute_index
+                ).item() + 1  # +1 for the first label
                 model_kwargs["logits_to_keep"] = logits_to_keep
 
             if self.padding_free:
@@ -1561,12 +1747,16 @@ class _UnslothDPOTrainer(Trainer):
             with torch.no_grad():
                 # Eq (2) of the WPO paper: https://huggingface.co/papers/2406.11827
                 logprobs = F.log_softmax(logits, dim=-1)
-                weights_adjustment_factor = torch.logsumexp(2 * logprobs, dim=-1)  # same as sum(probs**2) in log space
+                weights_adjustment_factor = torch.logsumexp(
+                    2 * logprobs, dim=-1
+                )  # same as sum(probs**2) in log space
                 per_token_logps_adjusted = per_token_logps - weights_adjustment_factor
                 all_weights = (per_token_logps_adjusted * loss_mask).sum(-1) / loss_mask.sum(-1)
                 chosen_weights = all_weights[:num_examples]
                 rejected_weights = all_weights[num_examples:]
-                output["policy_weights"] = torch.clamp(torch.exp(chosen_weights + rejected_weights), max=1)
+                output["policy_weights"] = torch.clamp(
+                    torch.exp(chosen_weights + rejected_weights), max=1
+                )
 
         if self.args.rpo_alpha is not None:
             # Only use the chosen logits for the RPO loss
@@ -1575,7 +1765,9 @@ class _UnslothDPOTrainer(Trainer):
 
             # Compute the log probabilities of the labels
             output["nll_loss"] = F.cross_entropy(
-                torch.flatten(chosen_logits, end_dim=1), torch.flatten(chosen_labels, end_dim=1), ignore_index=0
+                torch.flatten(chosen_logits, end_dim=1),
+                torch.flatten(chosen_labels, end_dim=1),
+                ignore_index=0,
             )
 
         if self.loss_type == "ipo":
@@ -1624,12 +1816,17 @@ class _UnslothDPOTrainer(Trainer):
             ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
 
         losses, chosen_rewards, rejected_rewards = self.dpo_loss(
-            model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
+            model_output["chosen_logps"],
+            model_output["rejected_logps"],
+            ref_chosen_logps,
+            ref_rejected_logps,
         )
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
         if self.args.rpo_alpha is not None:
-            losses = losses + self.args.rpo_alpha * model_output["nll_loss"]  # RPO loss from V3 of the paper
+            losses = (
+                losses + self.args.rpo_alpha * model_output["nll_loss"]
+            )  # RPO loss from V3 of the paper
 
         if self.use_weighting:
             losses = losses * model_output["policy_weights"]
@@ -1638,9 +1835,15 @@ class _UnslothDPOTrainer(Trainer):
             losses = losses + self.aux_loss_coef * model_output["aux_loss"]
 
         prefix = "eval_" if train_eval == "eval" else ""
-        metrics[f"{prefix}rewards/chosen"] = self.accelerator.gather_for_metrics(chosen_rewards).mean().item()
-        metrics[f"{prefix}rewards/rejected"] = self.accelerator.gather_for_metrics(rejected_rewards).mean().item()
-        metrics[f"{prefix}rewards/accuracies"] = self.accelerator.gather_for_metrics(reward_accuracies).mean().item()
+        metrics[f"{prefix}rewards/chosen"] = (
+            self.accelerator.gather_for_metrics(chosen_rewards).mean().item()
+        )
+        metrics[f"{prefix}rewards/rejected"] = (
+            self.accelerator.gather_for_metrics(rejected_rewards).mean().item()
+        )
+        metrics[f"{prefix}rewards/accuracies"] = (
+            self.accelerator.gather_for_metrics(reward_accuracies).mean().item()
+        )
         metrics[f"{prefix}rewards/margins"] = (
             self.accelerator.gather_for_metrics(chosen_rewards - rejected_rewards).mean().item()
         )
@@ -1648,13 +1851,22 @@ class _UnslothDPOTrainer(Trainer):
             self.accelerator.gather_for_metrics(model_output["chosen_logps"]).detach().mean().item()
         )
         metrics[f"{prefix}logps/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["rejected_logps"]).detach().mean().item()
+            self.accelerator.gather_for_metrics(model_output["rejected_logps"])
+            .detach()
+            .mean()
+            .item()
         )
         metrics[f"{prefix}logits/chosen"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_chosen_logits"]).detach().mean().item()
+            self.accelerator.gather_for_metrics(model_output["mean_chosen_logits"])
+            .detach()
+            .mean()
+            .item()
         )
         metrics[f"{prefix}logits/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_rejected_logits"]).detach().mean().item()
+            self.accelerator.gather_for_metrics(model_output["mean_rejected_logits"])
+            .detach()
+            .mean()
+            .item()
         )
         if self.args.rpo_alpha is not None:
             metrics[f"{prefix}nll_loss"] = (
@@ -1691,13 +1903,17 @@ class _UnslothDPOTrainer(Trainer):
 
         return loss
 
-    def generate_from_model_and_ref(self, model, batch: dict[str, torch.LongTensor]) -> tuple[str, str]:
+    def generate_from_model_and_ref(
+        self, model, batch: dict[str, torch.LongTensor]
+    ) -> tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
 
         # If one uses `generate_during_eval` with peft + bf16, we need to explicitly call generate with
         # the torch amp context manager as some hidden states are silently casted to full precision.
         device_type = "xpu" if is_torch_xpu_available() else "cuda"
-        generate_context_manager = amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        generate_context_manager = (
+            amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
 
         with generate_context_manager:
             policy_output = model.generate(
@@ -1731,10 +1947,14 @@ class _UnslothDPOTrainer(Trainer):
                     )
 
         policy_output = pad_to_length(policy_output, self.max_length, self.padding_value)
-        policy_output_decoded = self.processing_class.batch_decode(policy_output, skip_special_tokens=True)
+        policy_output_decoded = self.processing_class.batch_decode(
+            policy_output, skip_special_tokens=True
+        )
 
         ref_output = pad_to_length(ref_output, self.max_length, self.padding_value)
-        ref_output_decoded = self.processing_class.batch_decode(ref_output, skip_special_tokens=True)
+        ref_output_decoded = self.processing_class.batch_decode(
+            ref_output, skip_special_tokens=True
+        )
 
         return policy_output_decoded, ref_output_decoded
 
@@ -1752,7 +1972,9 @@ class _UnslothDPOTrainer(Trainer):
                 ignore_keys = []
 
         device_type = "xpu" if is_torch_xpu_available() else "cuda"
-        prediction_context_manager = amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        prediction_context_manager = (
+            amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
 
         with torch.no_grad(), prediction_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
@@ -1774,7 +1996,9 @@ class _UnslothDPOTrainer(Trainer):
 
         return (loss.detach(), logits, labels)
 
-    def store_metrics(self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
+    def store_metrics(
+        self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train"
+    ) -> None:
         for key, value in metrics.items():
             self._stored_metrics[train_eval][key].append(value)
 
@@ -1804,7 +2028,9 @@ class _UnslothDPOTrainer(Trainer):
             random_batch = self.data_collator(random_batch_dataset)
             random_batch = self._prepare_inputs(random_batch)
 
-            policy_output_decoded, ref_output_decoded = self.generate_from_model_and_ref(self.model, random_batch)
+            policy_output_decoded, ref_output_decoded = self.generate_from_model_and_ref(
+                self.model, random_batch
+            )
 
             table = pd.DataFrame(
                 columns=["Prompt", "Policy", "Ref Model"],
@@ -1873,7 +2099,9 @@ class _UnslothDPOTrainer(Trainer):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -1903,7 +2131,9 @@ class _UnslothDPOTrainer(Trainer):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb.run.get_url()
+            if is_wandb_available() and wandb.run is not None
+            else None,
             comet_url=get_comet_experiment_url(),
             trainer_name="DPO",
             trainer_citation=citation,
@@ -1912,9 +2142,11 @@ class _UnslothDPOTrainer(Trainer):
         )
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
+
+
 class UnslothDPOTrainer(_UnslothDPOTrainer):
     """
-    
+
     Initialize DPOTrainer.
 
     Args:
@@ -1950,140 +2182,198 @@ class UnslothDPOTrainer(_UnslothDPOTrainer):
             The function to use to preprocess the logits before computing the metrics.
         peft_config (`dict`, defaults to `None`):
             The PEFT configuration to use for training. If you pass a PEFT configuration, the model will be wrapped in a PEFT model.
-    
+
     """
+
     def __init__(
         self,
-        model = None,
-        ref_model = None,
-        args = None,
-        data_collator = None,
-        train_dataset = None,
-        eval_dataset = None,
-        processing_class = None,
-        model_init = None,
-        compute_metrics = None,
-        callbacks = None,
-        preprocess_logits_for_metrics = None,
-        peft_config = None,
-        **kwargs
+        model=None,
+        ref_model=None,
+        args=None,
+        data_collator=None,
+        train_dataset=None,
+        eval_dataset=None,
+        processing_class=None,
+        model_init=None,
+        compute_metrics=None,
+        callbacks=None,
+        preprocess_logits_for_metrics=None,
+        peft_config=None,
+        **kwargs,
     ):
-        if args is None: args = UnslothDPOConfig()
-        use_bf16 = getattr(args, 'bf16', False)
-        use_fp16 = getattr(args, 'fp16', False)
+        if args is None:
+            args = UnslothDPOConfig()
+        use_bf16 = getattr(args, "bf16", False)
+        use_fp16 = getattr(args, "fp16", False)
         force_float32 = False
-        if os.environ.get('UNSLOTH_FORCE_FLOAT32', '0') == '1':
-            print('Unsloth: Switching to float32 training since model cannot work with float16')
+        if os.environ.get("UNSLOTH_FORCE_FLOAT32", "0") == "1":
+            print("Unsloth: Switching to float32 training since model cannot work with float16")
             force_float32 = True
-        mixed_precision_dtype = os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32')
-        dtype = getattr(model.config, 'torch_dtype', None)
-        if dtype is None: dtype = model.get_input_embeddings().dtype
+        mixed_precision_dtype = os.environ.get("UNSLOTH_MIXED_PRECISION", "float32")
+        dtype = getattr(model.config, "torch_dtype", None)
+        if dtype is None:
+            dtype = model.get_input_embeddings().dtype
         from unsloth_zoo.utils import _get_dtype
+
         dtype = _get_dtype(dtype)
         float16 = dtype == torch.float16
-        if not force_float32 and (float16 and use_bf16): raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
-        if not force_float32 and (not float16 and use_fp16): raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
+        if not force_float32 and (float16 and use_bf16):
+            raise TypeError(
+                "Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`"
+            )
+        if not force_float32 and (not float16 and use_fp16):
+            raise TypeError(
+                "Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`"
+            )
         if force_float32:
             args.fp16 = False
             args.bf16 = False
-            os.environ['ACCELERATE_MIXED_PRECISION'] = 'no'
-        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == 'float32':
+            os.environ["ACCELERATE_MIXED_PRECISION"] = "no"
+        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == "float32":
             args.fp16 = float16
             args.bf16 = not float16
-            os.environ['ACCELERATE_MIXED_PRECISION'] = 'fp16' if float16 else 'bf16'
-        if getattr(args, 'eval_dataset', None) is not None and getattr(args, 'eval_strategy', 'no') == 'no':
-            args.eval_strategy = 'steps'
-            if getattr(args, 'eval_steps', None) is None: args.eval_steps = 0.1
-        ga_steps = getattr(args, 'gradient_accumulation_steps', None)
+            os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16" if float16 else "bf16"
+        if (
+            getattr(args, "eval_dataset", None) is not None
+            and getattr(args, "eval_strategy", "no") == "no"
+        ):
+            args.eval_strategy = "steps"
+            if getattr(args, "eval_steps", None) is None:
+                args.eval_steps = 0.1
+        ga_steps = getattr(args, "gradient_accumulation_steps", None)
         if ga_steps is not None and ga_steps > 1:
             from transformers import __version__ as transformers_version
-            if Version(transformers_version) <= Version('4.45.2'):
-                print('**** Unsloth: Please use our fixed gradient_accumulation_steps by updating transformers, TRL and Unsloth!\n'
-                      '`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`')
-        if getattr(args, 'eval_strategy', 'no') != 'no':
-            eval_bsz = getattr(args, 'per_device_eval_batch_size', 8)
-            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz: args.per_device_eval_batch_size = args.per_device_train_batch_size
-            if getattr(args, 'eval_accumulation_steps', None) is None and ga_steps is not None: args.eval_accumulation_steps = ga_steps
-        fp16_full_eval = getattr(args, 'fp16_full_eval', False)
-        bf16_full_eval = getattr(args, 'bf16_full_eval', False)
-        if args.fp16 and bf16_full_eval: args.bf16_full_eval = False; args.fp16_full_eval = True
-        if args.bf16 and fp16_full_eval: args.bf16_full_eval = True; args.fp16_full_eval = False
+
+            if Version(transformers_version) <= Version("4.45.2"):
+                print(
+                    "**** Unsloth: Please use our fixed gradient_accumulation_steps by updating transformers, TRL and Unsloth!\n"
+                    "`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`"
+                )
+        if getattr(args, "eval_strategy", "no") != "no":
+            eval_bsz = getattr(args, "per_device_eval_batch_size", 8)
+            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz:
+                args.per_device_eval_batch_size = args.per_device_train_batch_size
+            if getattr(args, "eval_accumulation_steps", None) is None and ga_steps is not None:
+                args.eval_accumulation_steps = ga_steps
+        fp16_full_eval = getattr(args, "fp16_full_eval", False)
+        bf16_full_eval = getattr(args, "bf16_full_eval", False)
+        if args.fp16 and bf16_full_eval:
+            args.bf16_full_eval = False
+            args.fp16_full_eval = True
+        if args.bf16 and fp16_full_eval:
+            args.bf16_full_eval = True
+            args.fp16_full_eval = False
         if force_float32:
             args.bf16_full_eval = False
             args.fp16_full_eval = False
-        elif os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32') == 'bfloat16':
+        elif os.environ.get("UNSLOTH_MIXED_PRECISION", "float32") == "bfloat16":
             args.bf16_full_eval = True
             args.fp16_full_eval = False
         elif not bf16_full_eval and not fp16_full_eval:
             args.bf16_full_eval = args.bf16
             args.fp16_full_eval = args.fp16
         _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
+        if locals().get("compute_metrics", None) is not None:
+            _output_logits = True
+        if locals().get("preprocess_logits_for_metrics", None) is not None:
+            _output_logits = True
         if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
-        if 'max_seq_length' not in locals() and not hasattr(args, 'max_seq_length'):
+            os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+        if "max_seq_length" not in locals() and not hasattr(args, "max_seq_length"):
             pass
         else:
-            model_max_seq_length = getattr(model, 'max_seq_length', None)
-            args_max_seq_length  = getattr(args,  'max_seq_length', None)
+            model_max_seq_length = getattr(model, "max_seq_length", None)
+            args_max_seq_length = getattr(args, "max_seq_length", None)
             if args_max_seq_length is None and model_max_seq_length is not None:
                 max_seq_length = model.max_seq_length
-                if hasattr(args, 'max_seq_length'): args.max_seq_length = max_seq_length
-        if model is not None and hasattr(model, 'for_training'):
+                if hasattr(args, "max_seq_length"):
+                    args.max_seq_length = max_seq_length
+        if model is not None and hasattr(model, "for_training"):
             model.for_training()
-        if 'tokenizer' in locals() and hasattr(tokenizer, 'padding_side'): tokenizer.padding_side = 'right'
-        if 'processing_class' in locals():
-            if hasattr(processing_class, 'padding_side'): processing_class.padding_side = 'right'
-            if hasattr(processing_class, 'tokenizer') and hasattr(processing_class.tokenizer, 'padding_side'): processing_class.tokenizer.padding_side = 'right'
-        __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
+        if "tokenizer" in locals() and hasattr(tokenizer, "padding_side"):
+            tokenizer.padding_side = "right"
+        if "processing_class" in locals():
+            if hasattr(processing_class, "padding_side"):
+                processing_class.padding_side = "right"
+            if hasattr(processing_class, "tokenizer") and hasattr(
+                processing_class.tokenizer, "padding_side"
+            ):
+                processing_class.tokenizer.padding_side = "right"
+        __tokenizer = processing_class if "processing_class" in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
+
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
-                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm = False)
-            elif isinstance(data_collator, DataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            if (
+                isinstance(data_collator, DataCollatorForSeq2Seq)
+                and "labels" not in train_dataset.column_names
+            ):
+                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm=False)
+            elif (
+                isinstance(data_collator, DataCollatorForLanguageModeling)
+                and "labels" in train_dataset.column_names
+            ):
                 data_collator = DataCollatorForSeq2Seq(__tokenizer)
         else:
-            if hasattr(args, 'remove_unused_columns'): args.remove_unused_columns = False
-            if hasattr(args, 'dataset_text_field'): args.dataset_text_field = ''
-            if hasattr(args, 'dataset_kwargs'): args.dataset_kwargs = {'skip_prepare_dataset': True}
+            if hasattr(args, "remove_unused_columns"):
+                args.remove_unused_columns = False
+            if hasattr(args, "dataset_text_field"):
+                args.dataset_text_field = ""
+            if hasattr(args, "dataset_kwargs"):
+                args.dataset_kwargs = {"skip_prepare_dataset": True}
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if not hasattr(__tokenizer, 'pad') and hasattr(__tokenizer, 'tokenizer'):
+            if not hasattr(__tokenizer, "pad") and hasattr(__tokenizer, "tokenizer"):
                 if isinstance(data_collator, DataCollatorForSeq2Seq):
                     data_collator = DataCollatorForSeq2Seq(__tokenizer.tokenizer)
                 else:
-                    data_collator = DataCollatorForLanguageModeling(__tokenizer.tokenizer, mlm = False)
+                    data_collator = DataCollatorForLanguageModeling(
+                        __tokenizer.tokenizer, mlm=False
+                    )
         other_metrics = []
-        
+
         from unsloth_zoo.logging_utils import PatchRLStatistics
-        PatchRLStatistics('dpo_trainer', other_metrics)
-        if hasattr(train_dataset, 'column_names'):
+
+        PatchRLStatistics("dpo_trainer", other_metrics)
+        if hasattr(train_dataset, "column_names"):
             column_names = set(train_dataset.column_names)
-            check = ['chosen', 'rejected', 'prompt', 'chosen_input_ids', 'chosen_attention_mask',
-                     'chosen_labels', 'rejected_input_ids', 'rejected_attention_mask', 'rejected_labels',
-                     'prompt_input_ids', 'prompt_attention_mask']
+            check = [
+                "chosen",
+                "rejected",
+                "prompt",
+                "chosen_input_ids",
+                "chosen_attention_mask",
+                "chosen_labels",
+                "rejected_input_ids",
+                "rejected_attention_mask",
+                "rejected_labels",
+                "prompt_input_ids",
+                "prompt_attention_mask",
+            ]
             if all(x in column_names for x in check):
-                train_dataset = train_dataset.remove_columns(['chosen', 'rejected', 'prompt'])
+                train_dataset = train_dataset.remove_columns(["chosen", "rejected", "prompt"])
             del check, column_names
-        
+
         super().__init__(
-            model = model,
-            ref_model = ref_model,
-            args = args,
-            data_collator = data_collator,
-            train_dataset = train_dataset,
-            eval_dataset = eval_dataset,
-            processing_class = processing_class,
-            model_init = model_init,
-            compute_metrics = compute_metrics,
-            callbacks = callbacks,
-            preprocess_logits_for_metrics = preprocess_logits_for_metrics,
-            peft_config = peft_config,**kwargs)
-        if hasattr(self, 'neftune_hook_handle'):
+            model=model,
+            ref_model=ref_model,
+            args=args,
+            data_collator=data_collator,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=processing_class,
+            model_init=model_init,
+            compute_metrics=compute_metrics,
+            callbacks=callbacks,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            peft_config=peft_config,
+            **kwargs,
+        )
+        if hasattr(self, "neftune_hook_handle"):
             self.neftune_hook_handle.remove()
-            if hasattr(self, 'neftune_hook_handle'): del self.neftune_hook_handle
-        if getattr(args, 'neftune_noise_alpha', None) is not None:
+            if hasattr(self, "neftune_hook_handle"):
+                del self.neftune_hook_handle
+        if getattr(args, "neftune_noise_alpha", None) is not None:
             model.get_input_embeddings().neftune_noise_alpha = self.neftune_noise_alpha
         pass
-        
+
+
 pass

@@ -29,6 +29,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# wandb
+wandb/
+
+# Unsloth
+unsloth_compiled_cache/
+
 # PyTorch
 *.pt
 *.pth
@@ -97,4 +103,3 @@ site/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
-

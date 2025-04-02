@@ -5,44 +5,70 @@
 0.15.2
 __UNSLOTH_VERSIONING__
 """
-from torch import Tensor
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import *
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from trl.trainer.alignprop_trainer import (Accelerator, AlignPropConfig, AlignPropTrainer, Any, Callable, DDPOStableDiffusionPipeline, Optional, ProjectConfiguration, PyTorchModelHubMixin, Union, defaultdict, generate_model_card, get_comet_experiment_url, is_wandb_available, logger, os, set_seed, textwrap, torch, wandb, warn)
-
-
-import os
-from typing import *
-from dataclasses import dataclass, field
 from packaging.version import Version
-import torch
-import numpy as np
-from contextlib import nullcontext
+from torch import Tensor
 from torch.nn import functional as F
-from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+from transformers import DataCollatorForLanguageModeling, DataCollatorForSeq2Seq
+from trl.trainer.alignprop_trainer import (
+    Accelerator,
+    AlignPropConfig,
+    AlignPropTrainer,
+    Any,
+    Callable,
+    DDPOStableDiffusionPipeline,
+    Optional,
+    ProjectConfiguration,
+    PyTorchModelHubMixin,
+    Union,
+    defaultdict,
+    generate_model_card,
+    get_comet_experiment_url,
+    is_wandb_available,
+    logger,
+    os,
+    set_seed,
+    textwrap,
+    torch,
+    wandb,
+    warn,
+)
 
 torch_compile_options = {
-    "epilogue_fusion"   : True,
-    "max_autotune"      : False,
-    "shape_padding"     : True,
-    "trace.enabled"     : False,
-    "triton.cudagraphs" : False,
+    "epilogue_fusion": True,
+    "max_autotune": False,
+    "shape_padding": True,
+    "trace.enabled": False,
+    "triton.cudagraphs": False,
 }
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    options=torch_compile_options,
+)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
-    selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     # loop to reduce peak mem consumption
     # logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-    logsumexp_values = torch.logsumexp(logits, dim = -1)
+    logsumexp_values = torch.logsumexp(logits, dim=-1)
     per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     return per_token_logps
+
+
 @dataclass
 class UnslothAlignPropConfig(AlignPropConfig):
     """
-    
+
     Configuration class for the [`AlignPropTrainer`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
@@ -117,85 +143,91 @@ class UnslothAlignPropConfig(AlignPropConfig):
             Range of diffusion timesteps for randomized truncated backpropagation.
         push_to_hub (`bool`, *optional*, defaults to `False`):
             Whether to push the final model to the Hub.
-    
+
     """
+
     vllm_sampling_params: Optional[Any] = field(
-        default = None,
-        metadata = {'help': 'vLLM SamplingParams'},
+        default=None,
+        metadata={"help": "vLLM SamplingParams"},
     )
-    unsloth_num_chunks : Optional[int] = field(
-        default = -1,
-        metadata = {'help': 'Chunk size to reduce memory usage. -1 is most efficient.'},
+    unsloth_num_chunks: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk size to reduce memory usage. -1 is most efficient."},
     )
+
     def __init__(
         self,
-        exp_name = 'ipykernel_launcher',
-        run_name = '',
-        seed = 3407,
-        log_with = None,
-        log_image_freq = 1,
-        tracker_project_name = 'trl',
-        logdir = 'logs',
-        num_epochs = 100,
-        save_freq = 1,
-        num_checkpoint_limit = 5,
-        mixed_precision = 'fp16',
-        allow_tf32 = True,
-        resume_from = '',
-        sample_num_steps = 50,
-        sample_eta = 1.0,
-        sample_guidance_scale = 5.0,
-        train_batch_size = 1,
-        train_use_8bit_adam = False,
-        train_learning_rate = 5e-05,
-        train_adam_beta1 = 0.9,
-        train_adam_beta2 = 0.999,
-        train_adam_weight_decay = 0.01,
-        train_adam_epsilon = 1e-08,
-        train_gradient_accumulation_steps = 2,
-        train_max_grad_norm = 1.0,
-        negative_prompts = None,
-        truncated_backprop_rand = True,
-        truncated_backprop_timestep = 49,
-        push_to_hub = False,
-        vllm_sampling_params = None,
-        unsloth_num_chunks = -1,
+        exp_name="run",
+        run_name="",
+        seed=3407,
+        log_with=None,
+        log_image_freq=1,
+        tracker_project_name="trl",
+        logdir="logs",
+        num_epochs=100,
+        save_freq=1,
+        num_checkpoint_limit=5,
+        mixed_precision="fp16",
+        allow_tf32=True,
+        resume_from="",
+        sample_num_steps=50,
+        sample_eta=1.0,
+        sample_guidance_scale=5.0,
+        train_batch_size=1,
+        train_use_8bit_adam=False,
+        train_learning_rate=5e-05,
+        train_adam_beta1=0.9,
+        train_adam_beta2=0.999,
+        train_adam_weight_decay=0.01,
+        train_adam_epsilon=1e-08,
+        train_gradient_accumulation_steps=2,
+        train_max_grad_norm=1.0,
+        negative_prompts=None,
+        truncated_backprop_rand=True,
+        truncated_backprop_timestep=49,
+        push_to_hub=False,
+        vllm_sampling_params=None,
+        unsloth_num_chunks=-1,
         **kwargs,
     ):
-        
         super().__init__(
-            exp_name = exp_name,
-            run_name = run_name,
-            seed = seed,
-            log_with = log_with,
-            log_image_freq = log_image_freq,
-            tracker_project_name = tracker_project_name,
-            logdir = logdir,
-            num_epochs = num_epochs,
-            save_freq = save_freq,
-            num_checkpoint_limit = num_checkpoint_limit,
-            mixed_precision = mixed_precision,
-            allow_tf32 = allow_tf32,
-            resume_from = resume_from,
-            sample_num_steps = sample_num_steps,
-            sample_eta = sample_eta,
-            sample_guidance_scale = sample_guidance_scale,
-            train_batch_size = train_batch_size,
-            train_use_8bit_adam = train_use_8bit_adam,
-            train_learning_rate = train_learning_rate,
-            train_adam_beta1 = train_adam_beta1,
-            train_adam_beta2 = train_adam_beta2,
-            train_adam_weight_decay = train_adam_weight_decay,
-            train_adam_epsilon = train_adam_epsilon,
-            train_gradient_accumulation_steps = train_gradient_accumulation_steps,
-            train_max_grad_norm = train_max_grad_norm,
-            negative_prompts = negative_prompts,
-            truncated_backprop_rand = truncated_backprop_rand,
-            truncated_backprop_timestep = truncated_backprop_timestep,
-            push_to_hub = push_to_hub,**kwargs)
+            exp_name=exp_name,
+            run_name=run_name,
+            seed=seed,
+            log_with=log_with,
+            log_image_freq=log_image_freq,
+            tracker_project_name=tracker_project_name,
+            logdir=logdir,
+            num_epochs=num_epochs,
+            save_freq=save_freq,
+            num_checkpoint_limit=num_checkpoint_limit,
+            mixed_precision=mixed_precision,
+            allow_tf32=allow_tf32,
+            resume_from=resume_from,
+            sample_num_steps=sample_num_steps,
+            sample_eta=sample_eta,
+            sample_guidance_scale=sample_guidance_scale,
+            train_batch_size=train_batch_size,
+            train_use_8bit_adam=train_use_8bit_adam,
+            train_learning_rate=train_learning_rate,
+            train_adam_beta1=train_adam_beta1,
+            train_adam_beta2=train_adam_beta2,
+            train_adam_weight_decay=train_adam_weight_decay,
+            train_adam_epsilon=train_adam_epsilon,
+            train_gradient_accumulation_steps=train_gradient_accumulation_steps,
+            train_max_grad_norm=train_max_grad_norm,
+            negative_prompts=negative_prompts,
+            truncated_backprop_rand=truncated_backprop_rand,
+            truncated_backprop_timestep=truncated_backprop_timestep,
+            push_to_hub=push_to_hub,
+            **kwargs,
+        )
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+
+
 pass
+
 
 class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
     """"""
@@ -300,7 +332,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
             torch.backends.cuda.matmul.allow_tf32 = True
 
         self.optimizer = self._setup_optimizer(
-            trainable_layers.parameters() if not isinstance(trainable_layers, list) else trainable_layers
+            trainable_layers.parameters()
+            if not isinstance(trainable_layers, list)
+            else trainable_layers
         )
 
         self.neg_prompt_embed = self.sd_pipeline.text_encoder(
@@ -321,7 +355,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
             unet, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
             self.trainable_layers = list(filter(lambda p: p.requires_grad, unet.parameters()))
         else:
-            self.trainable_layers, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
+            self.trainable_layers, self.optimizer = self.accelerator.prepare(
+                trainable_layers, self.optimizer
+            )
 
         if config.resume_from:
             logger.info(f"Resuming from {config.resume_from}")
@@ -332,7 +368,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
 
     def compute_rewards(self, prompt_image_pairs):
         reward, reward_metadata = self.reward_fn(
-            prompt_image_pairs["images"], prompt_image_pairs["prompts"], prompt_image_pairs["prompt_metadata"]
+            prompt_image_pairs["images"],
+            prompt_image_pairs["prompts"],
+            prompt_image_pairs["prompt_metadata"],
         )
         return reward
 
@@ -357,7 +395,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
         self.sd_pipeline.unet.train()
 
         for _ in range(self.config.train_gradient_accumulation_steps):
-            with self.accelerator.accumulate(self.sd_pipeline.unet), self.autocast(), torch.enable_grad():
+            with self.accelerator.accumulate(
+                self.sd_pipeline.unet
+            ), self.autocast(), torch.enable_grad():
                 prompt_image_pairs = self._generate_samples(
                     batch_size=self.config.train_batch_size,
                 )
@@ -401,8 +441,13 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
                 "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
             )
         # Logs generated images
-        if self.image_samples_callback is not None and global_step % self.config.log_image_freq == 0:
-            self.image_samples_callback(prompt_image_pairs, global_step, self.accelerator.trackers[0])
+        if (
+            self.image_samples_callback is not None
+            and global_step % self.config.log_image_freq == 0
+        ):
+            self.image_samples_callback(
+                prompt_image_pairs, global_step, self.accelerator.trackers[0]
+            )
 
         if epoch != 0 and epoch % self.config.save_freq == 0 and self.accelerator.is_main_process:
             self.accelerator.save_state()
@@ -557,7 +602,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -569,13 +616,15 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
         if hasattr(self.model.config, "unsloth_version"):
             tags.append("unsloth")
 
-        citation = textwrap.dedent("""\
+        citation = textwrap.dedent(
+            """\
         @article{prabhudesai2024aligning,
             title        = {{Aligning Text-to-Image Diffusion Models with Reward Backpropagation}},
             author       = {Mihir Prabhudesai and Anirudh Goyal and Deepak Pathak and Katerina Fragkiadaki},
             year         = 2024,
             eprint       = {arXiv:2310.03739}
-        }""")
+        }"""
+        )
 
         model_card = generate_model_card(
             base_model=base_model,
@@ -583,7 +632,9 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb.run.get_url()
+            if is_wandb_available() and wandb.run is not None
+            else None,
             comet_url=get_comet_experiment_url(),
             trainer_name="AlignProp",
             trainer_citation=citation,
@@ -592,9 +643,11 @@ class _UnslothAlignPropTrainer(PyTorchModelHubMixin):
         )
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
+
+
 class UnslothAlignPropTrainer(_UnslothAlignPropTrainer):
     """
-    
+
     The AlignPropTrainer uses Deep Diffusion Policy Optimization to optimise diffusion models.
     Note, this trainer is heavily inspired by the work here: https://github.com/mihirp1998/AlignProp/
     As of now only Stable Diffusion based pipelines are supported
@@ -610,28 +663,34 @@ class UnslothAlignPropTrainer(_UnslothAlignPropTrainer):
             Stable Diffusion pipeline to be used for training.
         image_samples_hook (`Optional[Callable[[Any, Any, Any], Any]]`):
             Hook to be called to log images
-    
+
     """
+
     def __init__(
         self,
         config,
         reward_function,
         prompt_function,
         sd_pipeline,
-        image_samples_hook = None,
-        **kwargs
+        image_samples_hook=None,
+        **kwargs,
     ):
-        if args is None: args = UnslothAlignPropConfig()
+        if args is None:
+            args = UnslothAlignPropConfig()
         other_metrics = []
-        
+
         from unsloth_zoo.logging_utils import PatchRLStatistics
-        PatchRLStatistics('alignprop_trainer', other_metrics)
-        
+
+        PatchRLStatistics("alignprop_trainer", other_metrics)
+
         super().__init__(
-            config = config,
-            reward_function = reward_function,
-            prompt_function = prompt_function,
-            sd_pipeline = sd_pipeline,
-            image_samples_hook = image_samples_hook,**kwargs)
-        
+            config=config,
+            reward_function=reward_function,
+            prompt_function=prompt_function,
+            sd_pipeline=sd_pipeline,
+            image_samples_hook=image_samples_hook,
+            **kwargs,
+        )
+
+
 pass

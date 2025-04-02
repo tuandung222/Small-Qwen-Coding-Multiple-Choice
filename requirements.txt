@@ -1,31 +1,27 @@
-# Core deep learning libraries
-torch>=2.2.0
-transformers>=4.41.2
-peft>=0.9.0
-accelerate>=0.30.0
-flash-attn>=2.5.6
-bitsandbytes>=0.43.0
+# Core ML and Training
+torch>=2.0.0
+transformers>=4.36.0
+peft>=0.7.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+unsloth>=0.3.0
 
-# Unsloth for optimized LLM training
-unsloth>=2024.8.1
+# Data Processing and Management
+datasets>=2.15.0
+numpy>=1.24.0
+pandas>=2.0.0
 
-# Data processing and utilities
-datasets>=2.18.0
-pandas>=2.2.0
-numpy>=1.26.4
-scikit-learn>=1.4.1
-tqdm>=4.66.2
-pyyaml>=6.0.1
-huggingface_hub>=0.20.3
+# Development and Monitoring
+wandb>=0.16.0
+pre-commit>=3.5.0
 
-# Visualization and UI
-matplotlib>=3.8.3
-gradio>=4.19.2
-wandb>=0.16.3
+# Code Quality - Simplified
+black>=23.12.0
+isort>=5.13.0
+flake8>=7.0.0
+flake8-docstrings>=1.7.0
+flake8-bugbear>=23.3.12
 
-# Testing and API integration
-pytest>=7.4.0
-openai>=1.12.0
-
-# Optional: for GGUF export support
-sentencepiece>=0.1.99
+# Optional: Jupyter Support (if using notebooks)
+jupyter>=1.0.0
+ipykernel>=6.0.0

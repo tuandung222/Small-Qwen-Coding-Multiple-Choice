@@ -5,44 +5,72 @@
 0.15.2
 __UNSLOTH_VERSIONING__
 """
-from torch import Tensor
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import *
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from trl.trainer.ddpo_trainer import (Accelerator, Any, Callable, DDPOConfig, DDPOStableDiffusionPipeline, DDPOTrainer, Optional, PerPromptStatTracker, ProjectConfiguration, PyTorchModelHubMixin, Union, defaultdict, futures, generate_model_card, get_comet_experiment_url, is_wandb_available, logger, os, set_seed, textwrap, torch, wandb, warn)
-
-
-import os
-from typing import *
-from dataclasses import dataclass, field
 from packaging.version import Version
-import torch
-import numpy as np
-from contextlib import nullcontext
+from torch import Tensor
 from torch.nn import functional as F
-from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+from transformers import DataCollatorForLanguageModeling, DataCollatorForSeq2Seq
+from trl.trainer.ddpo_trainer import (
+    Accelerator,
+    Any,
+    Callable,
+    DDPOConfig,
+    DDPOStableDiffusionPipeline,
+    DDPOTrainer,
+    Optional,
+    PerPromptStatTracker,
+    ProjectConfiguration,
+    PyTorchModelHubMixin,
+    Union,
+    defaultdict,
+    futures,
+    generate_model_card,
+    get_comet_experiment_url,
+    is_wandb_available,
+    logger,
+    os,
+    set_seed,
+    textwrap,
+    torch,
+    wandb,
+    warn,
+)
 
 torch_compile_options = {
-    "epilogue_fusion"   : True,
-    "max_autotune"      : False,
-    "shape_padding"     : True,
-    "trace.enabled"     : False,
-    "triton.cudagraphs" : False,
+    "epilogue_fusion": True,
+    "max_autotune": False,
+    "shape_padding": True,
+    "trace.enabled": False,
+    "triton.cudagraphs": False,
 }
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    options=torch_compile_options,
+)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
-    selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     # loop to reduce peak mem consumption
     # logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-    logsumexp_values = torch.logsumexp(logits, dim = -1)
+    logsumexp_values = torch.logsumexp(logits, dim=-1)
     per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     return per_token_logps
+
+
 @dataclass
 class UnslothDDPOConfig(DDPOConfig):
     """
-    
+
     Configuration class for the [`DDPOTrainer`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
@@ -133,103 +161,109 @@ class UnslothDDPOConfig(DDPOConfig):
             Comma-separated list of prompts to use as negative examples.
         push_to_hub (`bool`, *optional*, defaults to `False`):
             Whether to push the final model checkpoint to the Hub.
-    
+
     """
+
     vllm_sampling_params: Optional[Any] = field(
-        default = None,
-        metadata = {'help': 'vLLM SamplingParams'},
+        default=None,
+        metadata={"help": "vLLM SamplingParams"},
     )
-    unsloth_num_chunks : Optional[int] = field(
-        default = -1,
-        metadata = {'help': 'Chunk size to reduce memory usage. -1 is most efficient.'},
+    unsloth_num_chunks: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk size to reduce memory usage. -1 is most efficient."},
     )
+
     def __init__(
         self,
-        exp_name = 'pyt',
-        run_name = '',
-        seed = 3407,
-        log_with = None,
-        tracker_project_name = 'trl',
-        logdir = 'logs',
-        num_epochs = 100,
-        save_freq = 1,
-        num_checkpoint_limit = 5,
-        mixed_precision = 'fp16',
-        allow_tf32 = True,
-        resume_from = '',
-        sample_num_steps = 50,
-        sample_eta = 1.0,
-        sample_guidance_scale = 5.0,
-        sample_batch_size = 1,
-        sample_num_batches_per_epoch = 2,
-        train_batch_size = 1,
-        train_use_8bit_adam = False,
-        train_learning_rate = 5e-05,
-        train_adam_beta1 = 0.9,
-        train_adam_beta2 = 0.999,
-        train_adam_weight_decay = 0.01,
-        train_adam_epsilon = 1e-08,
-        train_gradient_accumulation_steps = 2,
-        train_max_grad_norm = 1.0,
-        train_num_inner_epochs = 1,
-        train_cfg = True,
-        train_adv_clip_max = 5.0,
-        train_clip_range = 0.0001,
-        train_timestep_fraction = 1.0,
-        per_prompt_stat_tracking = False,
-        per_prompt_stat_tracking_buffer_size = 16,
-        per_prompt_stat_tracking_min_count = 16,
-        async_reward_computation = False,
-        max_workers = 2,
-        negative_prompts = '',
-        push_to_hub = False,
-        vllm_sampling_params = None,
-        unsloth_num_chunks = -1,
+        exp_name="pyt",
+        run_name="",
+        seed=3407,
+        log_with=None,
+        tracker_project_name="trl",
+        logdir="logs",
+        num_epochs=100,
+        save_freq=1,
+        num_checkpoint_limit=5,
+        mixed_precision="fp16",
+        allow_tf32=True,
+        resume_from="",
+        sample_num_steps=50,
+        sample_eta=1.0,
+        sample_guidance_scale=5.0,
+        sample_batch_size=1,
+        sample_num_batches_per_epoch=2,
+        train_batch_size=1,
+        train_use_8bit_adam=False,
+        train_learning_rate=5e-05,
+        train_adam_beta1=0.9,
+        train_adam_beta2=0.999,
+        train_adam_weight_decay=0.01,
+        train_adam_epsilon=1e-08,
+        train_gradient_accumulation_steps=2,
+        train_max_grad_norm=1.0,
+        train_num_inner_epochs=1,
+        train_cfg=True,
+        train_adv_clip_max=5.0,
+        train_clip_range=0.0001,
+        train_timestep_fraction=1.0,
+        per_prompt_stat_tracking=False,
+        per_prompt_stat_tracking_buffer_size=16,
+        per_prompt_stat_tracking_min_count=16,
+        async_reward_computation=False,
+        max_workers=2,
+        negative_prompts="",
+        push_to_hub=False,
+        vllm_sampling_params=None,
+        unsloth_num_chunks=-1,
         **kwargs,
     ):
-        
         super().__init__(
-            exp_name = exp_name,
-            run_name = run_name,
-            seed = seed,
-            log_with = log_with,
-            tracker_project_name = tracker_project_name,
-            logdir = logdir,
-            num_epochs = num_epochs,
-            save_freq = save_freq,
-            num_checkpoint_limit = num_checkpoint_limit,
-            mixed_precision = mixed_precision,
-            allow_tf32 = allow_tf32,
-            resume_from = resume_from,
-            sample_num_steps = sample_num_steps,
-            sample_eta = sample_eta,
-            sample_guidance_scale = sample_guidance_scale,
-            sample_batch_size = sample_batch_size,
-            sample_num_batches_per_epoch = sample_num_batches_per_epoch,
-            train_batch_size = train_batch_size,
-            train_use_8bit_adam = train_use_8bit_adam,
-            train_learning_rate = train_learning_rate,
-            train_adam_beta1 = train_adam_beta1,
-            train_adam_beta2 = train_adam_beta2,
-            train_adam_weight_decay = train_adam_weight_decay,
-            train_adam_epsilon = train_adam_epsilon,
-            train_gradient_accumulation_steps = train_gradient_accumulation_steps,
-            train_max_grad_norm = train_max_grad_norm,
-            train_num_inner_epochs = train_num_inner_epochs,
-            train_cfg = train_cfg,
-            train_adv_clip_max = train_adv_clip_max,
-            train_clip_range = train_clip_range,
-            train_timestep_fraction = train_timestep_fraction,
-            per_prompt_stat_tracking = per_prompt_stat_tracking,
-            per_prompt_stat_tracking_buffer_size = per_prompt_stat_tracking_buffer_size,
-            per_prompt_stat_tracking_min_count = per_prompt_stat_tracking_min_count,
-            async_reward_computation = async_reward_computation,
-            max_workers = max_workers,
-            negative_prompts = negative_prompts,
-            push_to_hub = push_to_hub,**kwargs)
+            exp_name=exp_name,
+            run_name=run_name,
+            seed=seed,
+            log_with=log_with,
+            tracker_project_name=tracker_project_name,
+            logdir=logdir,
+            num_epochs=num_epochs,
+            save_freq=save_freq,
+            num_checkpoint_limit=num_checkpoint_limit,
+            mixed_precision=mixed_precision,
+            allow_tf32=allow_tf32,
+            resume_from=resume_from,
+            sample_num_steps=sample_num_steps,
+            sample_eta=sample_eta,
+            sample_guidance_scale=sample_guidance_scale,
+            sample_batch_size=sample_batch_size,
+            sample_num_batches_per_epoch=sample_num_batches_per_epoch,
+            train_batch_size=train_batch_size,
+            train_use_8bit_adam=train_use_8bit_adam,
+            train_learning_rate=train_learning_rate,
+            train_adam_beta1=train_adam_beta1,
+            train_adam_beta2=train_adam_beta2,
+            train_adam_weight_decay=train_adam_weight_decay,
+            train_adam_epsilon=train_adam_epsilon,
+            train_gradient_accumulation_steps=train_gradient_accumulation_steps,
+            train_max_grad_norm=train_max_grad_norm,
+            train_num_inner_epochs=train_num_inner_epochs,
+            train_cfg=train_cfg,
+            train_adv_clip_max=train_adv_clip_max,
+            train_clip_range=train_clip_range,
+            train_timestep_fraction=train_timestep_fraction,
+            per_prompt_stat_tracking=per_prompt_stat_tracking,
+            per_prompt_stat_tracking_buffer_size=per_prompt_stat_tracking_buffer_size,
+            per_prompt_stat_tracking_min_count=per_prompt_stat_tracking_min_count,
+            async_reward_computation=async_reward_computation,
+            max_workers=max_workers,
+            negative_prompts=negative_prompts,
+            push_to_hub=push_to_hub,
+            **kwargs,
+        )
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+
+
 pass
+
 
 class _UnslothDDPOTrainer(PyTorchModelHubMixin):
     """"""
@@ -275,7 +309,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
                 accelerator_project_config.iteration = checkpoint_numbers[-1] + 1
 
         # number of timesteps within each trajectory to train on
-        self.num_train_timesteps = int(self.config.sample_num_steps * self.config.train_timestep_fraction)
+        self.num_train_timesteps = int(
+            self.config.sample_num_steps * self.config.train_timestep_fraction
+        )
 
         self.accelerator = Accelerator(
             log_with=self.config.log_with,
@@ -284,7 +320,8 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             # we always accumulate gradients across timesteps; we want config.train.gradient_accumulation_steps to be the
             # number of *samples* we accumulate across, so we need to multiply by the number of training timesteps to get
             # the total number of optimizer steps to accumulate across.
-            gradient_accumulation_steps=self.config.train_gradient_accumulation_steps * self.num_train_timesteps,
+            gradient_accumulation_steps=self.config.train_gradient_accumulation_steps
+            * self.num_train_timesteps,
             **self.config.accelerator_kwargs,
         )
 
@@ -297,7 +334,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
         if self.accelerator.is_main_process:
             self.accelerator.init_trackers(
                 self.config.tracker_project_name,
-                config=dict(ddpo_trainer_config=config.to_dict()) if not is_using_tensorboard else config.to_dict(),
+                config=dict(ddpo_trainer_config=config.to_dict())
+                if not is_using_tensorboard
+                else config.to_dict(),
                 init_kwargs=self.config.tracker_kwargs,
             )
 
@@ -339,7 +378,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             torch.backends.cuda.matmul.allow_tf32 = True
 
         self.optimizer = self._setup_optimizer(
-            trainable_layers.parameters() if not isinstance(trainable_layers, list) else trainable_layers
+            trainable_layers.parameters()
+            if not isinstance(trainable_layers, list)
+            else trainable_layers
         )
 
         self.neg_prompt_embed = self.sd_pipeline.text_encoder(
@@ -366,7 +407,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             unet, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
             self.trainable_layers = list(filter(lambda p: p.requires_grad, unet.parameters()))
         else:
-            self.trainable_layers, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
+            self.trainable_layers, self.optimizer = self.accelerator.prepare(
+                trainable_layers, self.optimizer
+            )
 
         if self.config.async_reward_computation:
             self.executor = futures.ThreadPoolExecutor(max_workers=config.max_workers)
@@ -392,7 +435,10 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
         else:
             rewards = self.executor.map(lambda x: self.reward_fn(*x), prompt_image_pairs)
             rewards = [
-                (torch.as_tensor(reward.result(), device=self.accelerator.device), reward_metadata.result())
+                (
+                    torch.as_tensor(reward.result(), device=self.accelerator.device),
+                    reward_metadata.result(),
+                )
                 for reward, reward_metadata in rewards
             ]
 
@@ -430,7 +476,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             image_data.extend([rewards[i], rewards_metadata[i]])
 
         if self.image_samples_callback is not None:
-            self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0])
+            self.image_samples_callback(
+                prompt_image_data, global_step, self.accelerator.trackers[0]
+            )
 
         rewards = torch.cat(rewards)
         rewards = self.accelerator.gather(rewards).cpu().numpy()
@@ -472,7 +520,10 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             # shuffle along time dimension independently for each sample
             # still trying to understand the code below
             perms = torch.stack(
-                [torch.randperm(num_timesteps, device=self.accelerator.device) for _ in range(total_batch_size)]
+                [
+                    torch.randperm(num_timesteps, device=self.accelerator.device)
+                    for _ in range(total_batch_size)
+                ]
             )
 
             for key in ["timesteps", "latents", "next_latents", "log_probs"]:
@@ -484,15 +535,21 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             original_keys = samples.keys()
             original_values = samples.values()
             # rebatch them as user defined train_batch_size is different from sample_batch_size
-            reshaped_values = [v.reshape(-1, self.config.train_batch_size, *v.shape[1:]) for v in original_values]
+            reshaped_values = [
+                v.reshape(-1, self.config.train_batch_size, *v.shape[1:]) for v in original_values
+            ]
 
             # Transpose the list of original values
             transposed_values = zip(*reshaped_values)
             # Create new dictionaries for each row of transposed values
-            samples_batched = [dict(zip(original_keys, row_values)) for row_values in transposed_values]
+            samples_batched = [
+                dict(zip(original_keys, row_values)) for row_values in transposed_values
+            ]
 
             self.sd_pipeline.unet.train()
-            global_step = self._train_batched_samples(inner_epoch, epoch, global_step, samples_batched)
+            global_step = self._train_batched_samples(
+                inner_epoch, epoch, global_step, samples_batched
+            )
             # ensure optimization step at the end of the inner epoch
             if not self.accelerator.sync_gradients:
                 raise ValueError(
@@ -655,7 +712,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
 
             latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
             log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-            timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
+            timesteps = self.sd_pipeline.scheduler.timesteps.repeat(
+                batch_size, 1
+            )  # (batch_size, num_steps)
 
             samples.append(
                 {
@@ -735,7 +794,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
 
     def _config_check(self) -> tuple[bool, str]:
         samples_per_epoch = (
-            self.config.sample_batch_size * self.accelerator.num_processes * self.config.sample_num_batches_per_epoch
+            self.config.sample_batch_size
+            * self.accelerator.num_processes
+            * self.config.sample_num_batches_per_epoch
         )
         total_train_batch_size = (
             self.config.train_batch_size
@@ -794,7 +855,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -806,7 +869,8 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
         if hasattr(self.model.config, "unsloth_version"):
             tags.append("unsloth")
 
-        citation = textwrap.dedent("""\
+        citation = textwrap.dedent(
+            """\
         @inproceedings{black2024training,
             title        = {{Training Diffusion Models with Reinforcement Learning}},
             author       = {Kevin Black and Michael Janner and Yilun Du and Ilya Kostrikov and Sergey Levine},
@@ -814,7 +878,8 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             booktitle    = {The Twelfth International Conference on Learning Representations, {ICLR} 2024, Vienna, Austria, May 7-11, 2024},
             publisher    = {OpenReview.net},
             url          = {https://openreview.net/forum?id=YCWjhGrJFD},
-        }""")
+        }"""
+        )
 
         model_card = generate_model_card(
             base_model=base_model,
@@ -822,7 +887,9 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb.run.get_url()
+            if is_wandb_available() and wandb.run is not None
+            else None,
             comet_url=get_comet_experiment_url(),
             trainer_name="DDPO",
             trainer_citation=citation,
@@ -831,9 +898,11 @@ class _UnslothDDPOTrainer(PyTorchModelHubMixin):
         )
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
+
+
 class UnslothDDPOTrainer(_UnslothDDPOTrainer):
     """
-    
+
     The DDPOTrainer uses Deep Diffusion Policy Optimization to optimise diffusion models.
     Note, this trainer is heavily inspired by the work here: https://github.com/kvablack/ddpo-pytorch
     As of now only Stable Diffusion based pipelines are supported
@@ -845,28 +914,34 @@ class UnslothDDPOTrainer(_UnslothDDPOTrainer):
         **prompt_function** (Callable[[], tuple[str, Any]]) -- Function to generate prompts to guide model
         **sd_pipeline** (`DDPOStableDiffusionPipeline`) -- Stable Diffusion pipeline to be used for training.
         **image_samples_hook** (Optional[Callable[[Any, Any, Any], Any]]) -- Hook to be called to log images
-    
+
     """
+
     def __init__(
         self,
         config,
         reward_function,
         prompt_function,
         sd_pipeline,
-        image_samples_hook = None,
-        **kwargs
+        image_samples_hook=None,
+        **kwargs,
     ):
-        if args is None: args = UnslothDDPOConfig()
+        if args is None:
+            args = UnslothDDPOConfig()
         other_metrics = []
-        
+
         from unsloth_zoo.logging_utils import PatchRLStatistics
-        PatchRLStatistics('ddpo_trainer', other_metrics)
-        
+
+        PatchRLStatistics("ddpo_trainer", other_metrics)
+
         super().__init__(
-            config = config,
-            reward_function = reward_function,
-            prompt_function = prompt_function,
-            sd_pipeline = sd_pipeline,
-            image_samples_hook = image_samples_hook,**kwargs)
-        
+            config=config,
+            reward_function=reward_function,
+            prompt_function=prompt_function,
+            sd_pipeline=sd_pipeline,
+            image_samples_hook=image_samples_hook,
+            **kwargs,
+        )
+
+
 pass

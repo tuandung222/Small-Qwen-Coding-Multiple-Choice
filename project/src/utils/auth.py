@@ -1,8 +1,9 @@
 import os
+
 from dotenv import load_dotenv
 from huggingface_hub import login as hf_login
-import wandb
 
+import wandb
 
 # This file is project/src/utils/auth.py
 # The env file is in project or in src
@@ -23,8 +24,8 @@ def setup_authentication():
 
     # Start from current directory and move up to find .env
     for i in range(max_levels):
-        search_dir = os.path.abspath(os.path.join(current_dir, '../' * i))
-        env_path = os.path.join(search_dir, '.env')
+        search_dir = os.path.abspath(os.path.join(current_dir, "../" * i))
+        env_path = os.path.join(search_dir, ".env")
         if os.path.exists(env_path):
             load_dotenv(env_path)
             break

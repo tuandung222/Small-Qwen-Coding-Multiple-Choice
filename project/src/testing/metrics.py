@@ -1,10 +1,14 @@
-import torch
-import numpy as np
-from typing import Dict, Any, List
 import re
+from typing import Any, Dict, List
+
+import numpy as np
+import torch
 import yaml
 
-def evaluate_reasoning_quality(predicted_reasoning: str, teacher_reasoning: str, model=None, tokenizer=None) -> float:
+
+def evaluate_reasoning_quality(
+    predicted_reasoning: str, teacher_reasoning: str, model=None, tokenizer=None
+) -> float:
     """
     Evaluate the quality of predicted reasoning compared to teacher reasoning
 
@@ -102,7 +106,10 @@ def evaluate_reasoning_quality(predicted_reasoning: str, teacher_reasoning: str,
 
     return max(0.0, min(1.0, sum(section_scores) / len(section_scores))) if section_scores else 0.0
 
-def calculate_combined_score(accuracy: float, reasoning_quality: float, weight: float = 0.6) -> float:
+
+def calculate_combined_score(
+    accuracy: float, reasoning_quality: float, weight: float = 0.6
+) -> float:
     """
     Calculate combined score from accuracy and reasoning quality
 
@@ -115,6 +122,7 @@ def calculate_combined_score(accuracy: float, reasoning_quality: float, weight: 
         Combined score between 0 and 1
     """
     return weight * reasoning_quality + (1 - weight) * accuracy
+
 
 def calculate_perplexity(model, tokenizer, prompt: str, answer: str) -> float:
     """

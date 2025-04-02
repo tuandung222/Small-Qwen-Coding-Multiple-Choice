@@ -5,51 +5,123 @@
 0.15.2
 __UNSLOTH_VERSIONING__
 """
-from torch import Tensor
+import os
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from typing import *
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from trl.trainer.bco_trainer import (Any, AutoModelForCausalLM, BCOConfig, BCOTrainer, BaseImageProcessor, CLF_NAME, Callable, DPODataCollatorWithPadding, DataCollator, DataLoader, Dataset, EvalLoopOutput, F, FeatureExtractionMixin, Literal, LogisticRegression, Optional, PartialState, PeftModel, PreTrainedModel, PreTrainedModelWrapper, PreTrainedTokenizerBase, ProcessorMixin, RUNNING_NAME, RunningMoments, SequentialSampler, Trainer, TrainerCallback, TrainingArguments, Union, _process_tokens, _tokenize, amp, contextmanager, create_reference_model, deepcopy, defaultdict, disable_dropout_in_model, generate_model_card, get_comet_experiment_url, has_length, inspect, is_comet_available, is_peft_available, is_sklearn_available, is_wandb_available, itemgetter, log_table_to_comet_experiment, maybe_apply_chat_template, nn, np, nullcontext, os, pad_to_length, pd, peft_module_casting_to_bf16, prepare_model_for_kbit_training, random, textwrap, torch, tqdm, transformers, version, wandb, warnings, F, Optional, PeftModel, PreTrainedModel, Trainer, is_peft_available, os, torch)
-
-
-import os
-from typing import *
-from dataclasses import dataclass, field
 from packaging.version import Version
-import torch
-import numpy as np
-from contextlib import nullcontext
+from torch import Tensor
 from torch.nn import functional as F
-from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling
+from transformers import DataCollatorForLanguageModeling, DataCollatorForSeq2Seq
+from trl.trainer.kto_trainer import (
+    Any,
+    AutoModelForCausalLM,
+    BaseImageProcessor,
+    Callable,
+    DataCollator,
+    DataLoader,
+    Dataset,
+    DPODataCollatorWithPadding,
+    EvalLoopOutput,
+    F,
+    FeatureExtractionMixin,
+    KTOConfig,
+    KTOTrainer,
+    Literal,
+    Optional,
+    PartialState,
+    PeftModel,
+    PreTrainedModel,
+    PreTrainedModelWrapper,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+    SequentialSampler,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+    Union,
+    _get_kl_dataset,
+    _process_tokens,
+    _tokenize,
+    amp,
+    concatenate_datasets,
+    contextmanager,
+    create_reference_model,
+    deepcopy,
+    defaultdict,
+    disable_dropout_in_model,
+    generate_model_card,
+    get_comet_experiment_url,
+    has_length,
+    inspect,
+    is_comet_available,
+    is_peft_available,
+    is_wandb_available,
+    itemgetter,
+    log_table_to_comet_experiment,
+    maybe_apply_chat_template,
+    maybe_extract_prompt,
+    maybe_unpair_preference_dataset,
+    nn,
+    np,
+    nullcontext,
+    os,
+    pad_to_length,
+    pd,
+    peft_module_casting_to_bf16,
+    prepare_model_for_kbit_training,
+    random,
+    textwrap,
+    torch,
+    tqdm,
+    transformers,
+    version,
+    wandb,
+    warnings,
+)
 
 torch_compile_options = {
-    "epilogue_fusion"   : True,
-    "max_autotune"      : False,
-    "shape_padding"     : True,
-    "trace.enabled"     : False,
-    "triton.cudagraphs" : False,
+    "epilogue_fusion": True,
+    "max_autotune": False,
+    "shape_padding": True,
+    "trace.enabled": False,
+    "triton.cudagraphs": False,
 }
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+
+@torch.compile(
+    dynamic=True,
+    fullgraph=True,
+    options=torch_compile_options,
+)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
-    selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
     # loop to reduce peak mem consumption
     # logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-    logsumexp_values = torch.logsumexp(logits, dim = -1)
+    logsumexp_values = torch.logsumexp(logits, dim=-1)
     per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     return per_token_logps
+
+
 @dataclass
-class UnslothBCOConfig(BCOConfig):
+class UnslothKTOConfig(KTOConfig):
     """
-    
-    Configuration class for the [`BCOTrainer`].
+
+    Configuration class for the [`KTOTrainer`].
 
     Using [`~transformers.HfArgumentParser`] we can turn this class into
     [argparse](https://docs.python.org/3/library/argparse#module-argparse) arguments that can be specified on the
     command line.
 
     Parameters:
+        learning_rate (`float`, *optional*, defaults to `5e-7`):
+            Initial learning rate for [`AdamW`] optimizer. The default value replaces that of
+            [`~transformers.TrainingArguments`].
         max_length (`int` or `None`, *optional*, defaults to `1024`):
             Maximum length of the sequences (prompt + completion) in the batch. This argument is required if you want
             to use the default data collator.
@@ -61,15 +133,23 @@ class UnslothBCOConfig(BCOConfig):
         beta (`float`, *optional*, defaults to `0.1`):
             Parameter controlling the deviation from the reference model. Higher β means less deviation from the
             reference model.
-        label_pad_token_id (`int`,  *optional*, defaults to `-100`):
+        loss_type (`str`, *optional*, defaults to `"kto"`):
+            Type of loss to use. Possible values are:
+
+                - `"kto"`: KTO loss from the [KTO](https://huggingface.co/papers/2402.01306) paper.
+                - `"apo_zero_unpaired"`: Unpaired variant of APO-zero loss from the [APO](https://huggingface.co/papers/2408.06266) paper.
+
+        desirable_weight (`float`, *optional*, defaults to `1.0`):
+            Desirable losses are weighed by this factor to counter unequal number of desirable and undesirable paris.
+        undesirable_weight (`float`, *optional*, defaults to `1.0`):
+            Undesirable losses are weighed by this factor to counter unequal number of desirable and undesirable pairs.
+        label_pad_token_id (`int`, *optional*, defaults to `-100`):
             Label pad token id. This argument is required if you want to use the default data collator.
         padding_value (`int` or `None`, *optional*, defaults to `None`):
             Padding value to use. If `None`, the padding value of the tokenizer is used.
         truncation_mode (`str`, *optional*, defaults to `"keep_end"`):
             Truncation mode to use when the prompt is too long. Possible values are `"keep_end"` or `"keep_start"`.
             This argument is required if you want to use the default data collator.
-        disable_dropout (`bool`, *optional*, defaults to `True`):
-            Whether to disable dropout in the model and reference model.
         generate_during_eval (`bool`, *optional*, defaults to `False`):
             If `True`, generates and logs completions from both the model and the reference model to W&B or Comet during
             evaluation.
@@ -85,372 +165,379 @@ class UnslothBCOConfig(BCOConfig):
         ref_model_init_kwargs (`dict[str, Any]` or `None`, *optional*, defaults to `None`):
             Keyword arguments to pass to `AutoModelForCausalLM.from_pretrained` when instantiating the reference model
             from a string.
-        dataset_num_proc (`int` or `None`, *optional*, defaults to `None`):
+        dataset_num_proc: (`int` or `None`, *optional*, defaults to `None`):
             Number of processes to use for processing the dataset.
-        prompt_sample_size (`int`, *optional*, defaults to `1024`):
-            Number of prompts that are fed to density ratio classifier.
-        min_density_ratio (`float`, *optional*, defaults to `0.5`):
-            Minimum value of the density ratio. The estimated density ratio is clamped to this value.
-        max_density_ratio (`float`, *optional*, defaults to `10.0`):
-            Maximum value of the density ratio. The estimated density ratio is clamped to this value.
-    
+        disable_dropout (`bool`, *optional*, defaults to `True`):
+            Whether to disable dropout in the model and reference model.
+
     """
+
     vllm_sampling_params: Optional[Any] = field(
-        default = None,
-        metadata = {'help': 'vLLM SamplingParams'},
+        default=None,
+        metadata={"help": "vLLM SamplingParams"},
     )
-    unsloth_num_chunks : Optional[int] = field(
-        default = -1,
-        metadata = {'help': 'Chunk size to reduce memory usage. -1 is most efficient.'},
+    unsloth_num_chunks: Optional[int] = field(
+        default=-1,
+        metadata={"help": "Chunk size to reduce memory usage. -1 is most efficient."},
     )
+
     def __init__(
         self,
-        output_dir = None,
-        overwrite_output_dir = None,
-        do_train = False,
-        do_eval = False,
-        do_predict = False,
-        eval_strategy = 'no',
-        prediction_loss_only = False,
-        per_device_train_batch_size = 4,
-        per_device_eval_batch_size = 4,
-        per_gpu_train_batch_size = None,
-        per_gpu_eval_batch_size = None,
-        gradient_accumulation_steps = 2,
-        eval_accumulation_steps = 2,
-        eval_delay = 0,
-        torch_empty_cache_steps = 250,
-        learning_rate = 5e-05,
-        weight_decay = 0.01,
-        adam_beta1 = 0.9,
-        adam_beta2 = 0.999,
-        adam_epsilon = 1e-08,
-        max_grad_norm = 1.0,
-        num_train_epochs = 3.0,
-        max_steps = -1,
-        lr_scheduler_type = 'linear',
-        warmup_ratio = 0.1,
-        warmup_steps = 0,
-        log_level = 'passive',
-        log_level_replica = 'warning',
-        log_on_each_node = True,
-        logging_dir = None,
-        logging_strategy = 'steps',
-        logging_first_step = False,
-        logging_steps = 1,
-        logging_nan_inf_filter = False,
-        save_strategy = 'steps',
-        save_steps = 500,
-        save_total_limit = None,
-        save_safetensors = True,
-        save_on_each_node = False,
-        save_only_model = False,
-        restore_callback_states_from_checkpoint = False,
-        no_cuda = False,
-        use_cpu = False,
-        use_mps_device = False,
-        seed = 3407,
-        data_seed = 3407,
-        jit_mode_eval = False,
-        use_ipex = False,
-        bf16 = False,
-        fp16 = False,
-        fp16_opt_level = 'O1',
-        half_precision_backend = 'auto',
-        bf16_full_eval = False,
-        fp16_full_eval = False,
-        tf32 = None,
-        local_rank = -1,
-        ddp_backend = None,
-        tpu_num_cores = None,
-        tpu_metrics_debug = False,
-        debug = '',
-        dataloader_drop_last = False,
-        eval_steps = None,
-        dataloader_num_workers = 0,
-        dataloader_prefetch_factor = None,
-        past_index = -1,
-        run_name = None,
-        disable_tqdm = None,
-        remove_unused_columns = True,
-        label_names = None,
-        load_best_model_at_end = False,
-        metric_for_best_model = None,
-        greater_is_better = None,
-        ignore_data_skip = False,
-        fsdp = '',
-        fsdp_min_num_params = 0,
-        fsdp_config = None,
-        tp_size = 0,
-        fsdp_transformer_layer_cls_to_wrap = None,
-        accelerator_config = None,
-        deepspeed = None,
-        label_smoothing_factor = 0.0,
-        optim = 'adamw_8bit',
-        optim_args = None,
-        adafactor = False,
-        group_by_length = False,
-        length_column_name = 'length',
-        report_to = None,
-        ddp_find_unused_parameters = None,
-        ddp_bucket_cap_mb = None,
-        ddp_broadcast_buffers = None,
-        dataloader_pin_memory = True,
-        dataloader_persistent_workers = False,
-        skip_memory_metrics = True,
-        use_legacy_prediction_loop = False,
-        push_to_hub = False,
-        resume_from_checkpoint = None,
-        hub_model_id = None,
-        hub_strategy = 'every_save',
-        hub_token = None,
-        hub_private_repo = None,
-        hub_always_push = False,
-        gradient_checkpointing = False,
-        gradient_checkpointing_kwargs = None,
-        include_inputs_for_metrics = False,
-        eval_do_concat_batches = True,
-        fp16_backend = 'auto',
-        evaluation_strategy = None,
-        push_to_hub_model_id = None,
-        push_to_hub_organization = None,
-        push_to_hub_token = None,
-        mp_parameters = '',
-        auto_find_batch_size = False,
-        full_determinism = False,
-        torchdynamo = None,
-        ray_scope = 'last',
-        ddp_timeout = 1800,
-        torch_compile = False,
-        torch_compile_backend = None,
-        torch_compile_mode = None,
-        dispatch_batches = None,
-        split_batches = None,
-        include_tokens_per_second = False,
-        include_num_input_tokens_seen = False,
-        neftune_noise_alpha = None,
-        optim_target_modules = None,
-        batch_eval_metrics = False,
-        eval_on_start = False,
-        use_liger_kernel = False,
-        eval_use_gather_object = False,
-        average_tokens_across_devices = False,
-        max_length = 1024,
-        max_prompt_length = 512,
-        max_completion_length = None,
-        beta = 0.1,
-        label_pad_token_id = -100,
-        padding_value = None,
-        truncation_mode = 'keep_end',
-        disable_dropout = True,
-        generate_during_eval = False,
-        is_encoder_decoder = None,
-        precompute_ref_log_probs = False,
-        model_init_kwargs = None,
-        ref_model_init_kwargs = None,
-        dataset_num_proc = None,
-        prompt_sample_size = 1024,
-        min_density_ratio = 0.5,
-        max_density_ratio = 10.0,
-        vllm_sampling_params = None,
-        unsloth_num_chunks = -1,
+        output_dir=None,
+        overwrite_output_dir=None,
+        do_train=False,
+        do_eval=False,
+        do_predict=False,
+        eval_strategy="no",
+        prediction_loss_only=False,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        per_gpu_train_batch_size=None,
+        per_gpu_eval_batch_size=None,
+        gradient_accumulation_steps=2,
+        eval_accumulation_steps=2,
+        eval_delay=0,
+        torch_empty_cache_steps=250,
+        learning_rate=5e-05,
+        weight_decay=0.01,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_epsilon=1e-08,
+        max_grad_norm=1.0,
+        num_train_epochs=3.0,
+        max_steps=-1,
+        lr_scheduler_type="linear",
+        warmup_ratio=0.1,
+        warmup_steps=0,
+        log_level="passive",
+        log_level_replica="warning",
+        log_on_each_node=True,
+        logging_dir=None,
+        logging_strategy="steps",
+        logging_first_step=False,
+        logging_steps=1,
+        logging_nan_inf_filter=False,
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=None,
+        save_safetensors=True,
+        save_on_each_node=False,
+        save_only_model=False,
+        restore_callback_states_from_checkpoint=False,
+        no_cuda=False,
+        use_cpu=False,
+        use_mps_device=False,
+        seed=3407,
+        data_seed=3407,
+        jit_mode_eval=False,
+        use_ipex=False,
+        bf16=False,
+        fp16=False,
+        fp16_opt_level="O1",
+        half_precision_backend="auto",
+        bf16_full_eval=False,
+        fp16_full_eval=False,
+        tf32=None,
+        local_rank=-1,
+        ddp_backend=None,
+        tpu_num_cores=None,
+        tpu_metrics_debug=False,
+        debug="",
+        dataloader_drop_last=False,
+        eval_steps=None,
+        dataloader_num_workers=0,
+        dataloader_prefetch_factor=None,
+        past_index=-1,
+        run_name=None,
+        disable_tqdm=None,
+        remove_unused_columns=True,
+        label_names=None,
+        load_best_model_at_end=False,
+        metric_for_best_model=None,
+        greater_is_better=None,
+        ignore_data_skip=False,
+        fsdp="",
+        fsdp_min_num_params=0,
+        fsdp_config=None,
+        tp_size=0,
+        fsdp_transformer_layer_cls_to_wrap=None,
+        accelerator_config=None,
+        deepspeed=None,
+        label_smoothing_factor=0.0,
+        optim="adamw_8bit",
+        optim_args=None,
+        adafactor=False,
+        group_by_length=False,
+        length_column_name="length",
+        report_to=None,
+        ddp_find_unused_parameters=None,
+        ddp_bucket_cap_mb=None,
+        ddp_broadcast_buffers=None,
+        dataloader_pin_memory=True,
+        dataloader_persistent_workers=False,
+        skip_memory_metrics=True,
+        use_legacy_prediction_loop=False,
+        push_to_hub=False,
+        resume_from_checkpoint=None,
+        hub_model_id=None,
+        hub_strategy="every_save",
+        hub_token=None,
+        hub_private_repo=None,
+        hub_always_push=False,
+        gradient_checkpointing=False,
+        gradient_checkpointing_kwargs=None,
+        include_inputs_for_metrics=False,
+        eval_do_concat_batches=True,
+        fp16_backend="auto",
+        evaluation_strategy=None,
+        push_to_hub_model_id=None,
+        push_to_hub_organization=None,
+        push_to_hub_token=None,
+        mp_parameters="",
+        auto_find_batch_size=False,
+        full_determinism=False,
+        torchdynamo=None,
+        ray_scope="last",
+        ddp_timeout=1800,
+        torch_compile=False,
+        torch_compile_backend=None,
+        torch_compile_mode=None,
+        dispatch_batches=None,
+        split_batches=None,
+        include_tokens_per_second=False,
+        include_num_input_tokens_seen=False,
+        neftune_noise_alpha=None,
+        optim_target_modules=None,
+        batch_eval_metrics=False,
+        eval_on_start=False,
+        use_liger_kernel=False,
+        eval_use_gather_object=False,
+        average_tokens_across_devices=False,
+        max_length=1024,
+        max_prompt_length=512,
+        max_completion_length=None,
+        beta=0.1,
+        loss_type="kto",
+        desirable_weight=1.0,
+        undesirable_weight=1.0,
+        label_pad_token_id=-100,
+        padding_value=None,
+        truncation_mode="keep_end",
+        generate_during_eval=False,
+        is_encoder_decoder=None,
+        disable_dropout=True,
+        precompute_ref_log_probs=False,
+        model_init_kwargs=None,
+        ref_model_init_kwargs=None,
+        dataset_num_proc=None,
+        vllm_sampling_params=None,
+        unsloth_num_chunks=-1,
         **kwargs,
     ):
-        if learning_rate < 1e-7: raise FloatingPointError(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
-        if learning_rate > 1: raise OverflowError(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
-        if output_dir is None and save_strategy == 'steps' and save_steps == 500:
-            output_dir = 'unsloth_training_checkpoints'
-            save_strategy = 'no'
+        if learning_rate < 1e-7:
+            raise FloatingPointError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!"
+            )
+        if learning_rate > 1:
+            raise OverflowError(
+                f"Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!"
+            )
+        if output_dir is None and save_strategy == "steps" and save_steps == 500:
+            output_dir = "unsloth_training_checkpoints"
+            save_strategy = "no"
         if dataset_num_proc is None:
             from multiprocessing import cpu_count
+
             dataset_num_proc = cpu_count()
-        
+
         super().__init__(
-            output_dir = output_dir,
-            overwrite_output_dir = overwrite_output_dir,
-            do_train = do_train,
-            do_eval = do_eval,
-            do_predict = do_predict,
-            eval_strategy = eval_strategy,
-            prediction_loss_only = prediction_loss_only,
-            per_device_train_batch_size = per_device_train_batch_size,
-            per_device_eval_batch_size = per_device_eval_batch_size,
-            per_gpu_train_batch_size = per_gpu_train_batch_size,
-            per_gpu_eval_batch_size = per_gpu_eval_batch_size,
-            gradient_accumulation_steps = gradient_accumulation_steps,
-            eval_accumulation_steps = eval_accumulation_steps,
-            eval_delay = eval_delay,
-            torch_empty_cache_steps = torch_empty_cache_steps,
-            learning_rate = learning_rate,
-            weight_decay = weight_decay,
-            adam_beta1 = adam_beta1,
-            adam_beta2 = adam_beta2,
-            adam_epsilon = adam_epsilon,
-            max_grad_norm = max_grad_norm,
-            num_train_epochs = num_train_epochs,
-            max_steps = max_steps,
-            lr_scheduler_type = lr_scheduler_type,
-            warmup_ratio = warmup_ratio,
-            warmup_steps = warmup_steps,
-            log_level = log_level,
-            log_level_replica = log_level_replica,
-            log_on_each_node = log_on_each_node,
-            logging_dir = logging_dir,
-            logging_strategy = logging_strategy,
-            logging_first_step = logging_first_step,
-            logging_steps = logging_steps,
-            logging_nan_inf_filter = logging_nan_inf_filter,
-            save_strategy = save_strategy,
-            save_steps = save_steps,
-            save_total_limit = save_total_limit,
-            save_safetensors = save_safetensors,
-            save_on_each_node = save_on_each_node,
-            save_only_model = save_only_model,
-            restore_callback_states_from_checkpoint = restore_callback_states_from_checkpoint,
-            no_cuda = no_cuda,
-            use_cpu = use_cpu,
-            use_mps_device = use_mps_device,
-            seed = seed,
-            data_seed = data_seed,
-            jit_mode_eval = jit_mode_eval,
-            use_ipex = use_ipex,
-            bf16 = bf16,
-            fp16 = fp16,
-            fp16_opt_level = fp16_opt_level,
-            half_precision_backend = half_precision_backend,
-            bf16_full_eval = bf16_full_eval,
-            fp16_full_eval = fp16_full_eval,
-            tf32 = tf32,
-            local_rank = local_rank,
-            ddp_backend = ddp_backend,
-            tpu_num_cores = tpu_num_cores,
-            tpu_metrics_debug = tpu_metrics_debug,
-            debug = debug,
-            dataloader_drop_last = dataloader_drop_last,
-            eval_steps = eval_steps,
-            dataloader_num_workers = dataloader_num_workers,
-            dataloader_prefetch_factor = dataloader_prefetch_factor,
-            past_index = past_index,
-            run_name = run_name,
-            disable_tqdm = disable_tqdm,
-            remove_unused_columns = remove_unused_columns,
-            label_names = label_names,
-            load_best_model_at_end = load_best_model_at_end,
-            metric_for_best_model = metric_for_best_model,
-            greater_is_better = greater_is_better,
-            ignore_data_skip = ignore_data_skip,
-            fsdp = fsdp,
-            fsdp_min_num_params = fsdp_min_num_params,
-            fsdp_config = fsdp_config,
-            tp_size = tp_size,
-            fsdp_transformer_layer_cls_to_wrap = fsdp_transformer_layer_cls_to_wrap,
-            accelerator_config = accelerator_config,
-            deepspeed = deepspeed,
-            label_smoothing_factor = label_smoothing_factor,
-            optim = optim,
-            optim_args = optim_args,
-            adafactor = adafactor,
-            group_by_length = group_by_length,
-            length_column_name = length_column_name,
-            report_to = report_to,
-            ddp_find_unused_parameters = ddp_find_unused_parameters,
-            ddp_bucket_cap_mb = ddp_bucket_cap_mb,
-            ddp_broadcast_buffers = ddp_broadcast_buffers,
-            dataloader_pin_memory = dataloader_pin_memory,
-            dataloader_persistent_workers = dataloader_persistent_workers,
-            skip_memory_metrics = skip_memory_metrics,
-            use_legacy_prediction_loop = use_legacy_prediction_loop,
-            push_to_hub = push_to_hub,
-            resume_from_checkpoint = resume_from_checkpoint,
-            hub_model_id = hub_model_id,
-            hub_strategy = hub_strategy,
-            hub_token = hub_token,
-            hub_private_repo = hub_private_repo,
-            hub_always_push = hub_always_push,
-            gradient_checkpointing = gradient_checkpointing,
-            gradient_checkpointing_kwargs = gradient_checkpointing_kwargs,
-            include_inputs_for_metrics = include_inputs_for_metrics,
-            eval_do_concat_batches = eval_do_concat_batches,
-            fp16_backend = fp16_backend,
-            evaluation_strategy = evaluation_strategy,
-            push_to_hub_model_id = push_to_hub_model_id,
-            push_to_hub_organization = push_to_hub_organization,
-            push_to_hub_token = push_to_hub_token,
-            mp_parameters = mp_parameters,
-            auto_find_batch_size = auto_find_batch_size,
-            full_determinism = full_determinism,
-            torchdynamo = torchdynamo,
-            ray_scope = ray_scope,
-            ddp_timeout = ddp_timeout,
-            torch_compile = torch_compile,
-            torch_compile_backend = torch_compile_backend,
-            torch_compile_mode = torch_compile_mode,
-            dispatch_batches = dispatch_batches,
-            split_batches = split_batches,
-            include_tokens_per_second = include_tokens_per_second,
-            include_num_input_tokens_seen = include_num_input_tokens_seen,
-            neftune_noise_alpha = neftune_noise_alpha,
-            optim_target_modules = optim_target_modules,
-            batch_eval_metrics = batch_eval_metrics,
-            eval_on_start = eval_on_start,
-            use_liger_kernel = use_liger_kernel,
-            eval_use_gather_object = eval_use_gather_object,
-            average_tokens_across_devices = average_tokens_across_devices,
-            max_length = max_length,
-            max_prompt_length = max_prompt_length,
-            max_completion_length = max_completion_length,
-            beta = beta,
-            label_pad_token_id = label_pad_token_id,
-            padding_value = padding_value,
-            truncation_mode = truncation_mode,
-            disable_dropout = disable_dropout,
-            generate_during_eval = generate_during_eval,
-            is_encoder_decoder = is_encoder_decoder,
-            precompute_ref_log_probs = precompute_ref_log_probs,
-            model_init_kwargs = model_init_kwargs,
-            ref_model_init_kwargs = ref_model_init_kwargs,
-            dataset_num_proc = dataset_num_proc,
-            prompt_sample_size = prompt_sample_size,
-            min_density_ratio = min_density_ratio,
-            max_density_ratio = max_density_ratio,**kwargs)
+            output_dir=output_dir,
+            overwrite_output_dir=overwrite_output_dir,
+            do_train=do_train,
+            do_eval=do_eval,
+            do_predict=do_predict,
+            eval_strategy=eval_strategy,
+            prediction_loss_only=prediction_loss_only,
+            per_device_train_batch_size=per_device_train_batch_size,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            per_gpu_train_batch_size=per_gpu_train_batch_size,
+            per_gpu_eval_batch_size=per_gpu_eval_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            eval_accumulation_steps=eval_accumulation_steps,
+            eval_delay=eval_delay,
+            torch_empty_cache_steps=torch_empty_cache_steps,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            adam_beta1=adam_beta1,
+            adam_beta2=adam_beta2,
+            adam_epsilon=adam_epsilon,
+            max_grad_norm=max_grad_norm,
+            num_train_epochs=num_train_epochs,
+            max_steps=max_steps,
+            lr_scheduler_type=lr_scheduler_type,
+            warmup_ratio=warmup_ratio,
+            warmup_steps=warmup_steps,
+            log_level=log_level,
+            log_level_replica=log_level_replica,
+            log_on_each_node=log_on_each_node,
+            logging_dir=logging_dir,
+            logging_strategy=logging_strategy,
+            logging_first_step=logging_first_step,
+            logging_steps=logging_steps,
+            logging_nan_inf_filter=logging_nan_inf_filter,
+            save_strategy=save_strategy,
+            save_steps=save_steps,
+            save_total_limit=save_total_limit,
+            save_safetensors=save_safetensors,
+            save_on_each_node=save_on_each_node,
+            save_only_model=save_only_model,
+            restore_callback_states_from_checkpoint=restore_callback_states_from_checkpoint,
+            no_cuda=no_cuda,
+            use_cpu=use_cpu,
+            use_mps_device=use_mps_device,
+            seed=seed,
+            data_seed=data_seed,
+            jit_mode_eval=jit_mode_eval,
+            use_ipex=use_ipex,
+            bf16=bf16,
+            fp16=fp16,
+            fp16_opt_level=fp16_opt_level,
+            half_precision_backend=half_precision_backend,
+            bf16_full_eval=bf16_full_eval,
+            fp16_full_eval=fp16_full_eval,
+            tf32=tf32,
+            local_rank=local_rank,
+            ddp_backend=ddp_backend,
+            tpu_num_cores=tpu_num_cores,
+            tpu_metrics_debug=tpu_metrics_debug,
+            debug=debug,
+            dataloader_drop_last=dataloader_drop_last,
+            eval_steps=eval_steps,
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_prefetch_factor=dataloader_prefetch_factor,
+            past_index=past_index,
+            run_name=run_name,
+            disable_tqdm=disable_tqdm,
+            remove_unused_columns=remove_unused_columns,
+            label_names=label_names,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=greater_is_better,
+            ignore_data_skip=ignore_data_skip,
+            fsdp=fsdp,
+            fsdp_min_num_params=fsdp_min_num_params,
+            fsdp_config=fsdp_config,
+            tp_size=tp_size,
+            fsdp_transformer_layer_cls_to_wrap=fsdp_transformer_layer_cls_to_wrap,
+            accelerator_config=accelerator_config,
+            deepspeed=deepspeed,
+            label_smoothing_factor=label_smoothing_factor,
+            optim=optim,
+            optim_args=optim_args,
+            adafactor=adafactor,
+            group_by_length=group_by_length,
+            length_column_name=length_column_name,
+            report_to=report_to,
+            ddp_find_unused_parameters=ddp_find_unused_parameters,
+            ddp_bucket_cap_mb=ddp_bucket_cap_mb,
+            ddp_broadcast_buffers=ddp_broadcast_buffers,
+            dataloader_pin_memory=dataloader_pin_memory,
+            dataloader_persistent_workers=dataloader_persistent_workers,
+            skip_memory_metrics=skip_memory_metrics,
+            use_legacy_prediction_loop=use_legacy_prediction_loop,
+            push_to_hub=push_to_hub,
+            resume_from_checkpoint=resume_from_checkpoint,
+            hub_model_id=hub_model_id,
+            hub_strategy=hub_strategy,
+            hub_token=hub_token,
+            hub_private_repo=hub_private_repo,
+            hub_always_push=hub_always_push,
+            gradient_checkpointing=gradient_checkpointing,
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+            include_inputs_for_metrics=include_inputs_for_metrics,
+            eval_do_concat_batches=eval_do_concat_batches,
+            fp16_backend=fp16_backend,
+            evaluation_strategy=evaluation_strategy,
+            push_to_hub_model_id=push_to_hub_model_id,
+            push_to_hub_organization=push_to_hub_organization,
+            push_to_hub_token=push_to_hub_token,
+            mp_parameters=mp_parameters,
+            auto_find_batch_size=auto_find_batch_size,
+            full_determinism=full_determinism,
+            torchdynamo=torchdynamo,
+            ray_scope=ray_scope,
+            ddp_timeout=ddp_timeout,
+            torch_compile=torch_compile,
+            torch_compile_backend=torch_compile_backend,
+            torch_compile_mode=torch_compile_mode,
+            dispatch_batches=dispatch_batches,
+            split_batches=split_batches,
+            include_tokens_per_second=include_tokens_per_second,
+            include_num_input_tokens_seen=include_num_input_tokens_seen,
+            neftune_noise_alpha=neftune_noise_alpha,
+            optim_target_modules=optim_target_modules,
+            batch_eval_metrics=batch_eval_metrics,
+            eval_on_start=eval_on_start,
+            use_liger_kernel=use_liger_kernel,
+            eval_use_gather_object=eval_use_gather_object,
+            average_tokens_across_devices=average_tokens_across_devices,
+            max_length=max_length,
+            max_prompt_length=max_prompt_length,
+            max_completion_length=max_completion_length,
+            beta=beta,
+            loss_type=loss_type,
+            desirable_weight=desirable_weight,
+            undesirable_weight=undesirable_weight,
+            label_pad_token_id=label_pad_token_id,
+            padding_value=padding_value,
+            truncation_mode=truncation_mode,
+            generate_during_eval=generate_during_eval,
+            is_encoder_decoder=is_encoder_decoder,
+            disable_dropout=disable_dropout,
+            precompute_ref_log_probs=precompute_ref_log_probs,
+            model_init_kwargs=model_init_kwargs,
+            ref_model_init_kwargs=ref_model_init_kwargs,
+            dataset_num_proc=dataset_num_proc,
+            **kwargs,
+        )
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+
+
 pass
 
-class _UnslothBCOTrainer(Trainer):
+
+class _UnslothKTOTrainer(Trainer):
     r""""""
 
-    _tag_names = ["trl", "bco"]
+    _tag_names = ["trl", "kto"]
 
     def __init__(
         self,
         model: Union[PreTrainedModel, nn.Module, str] = None,
         ref_model: Optional[Union[PreTrainedModel, nn.Module, str]] = None,
-        args: BCOConfig = None,
+        args: KTOConfig = None,
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
         processing_class: Optional[
-            Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
+            Union[
+                PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin
+            ]
         ] = None,
         data_collator: Optional[DataCollator] = None,
         model_init: Optional[Callable[[], PreTrainedModel]] = None,
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        preprocess_logits_for_metrics: Optional[
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        ] = None,
         peft_config: Optional[dict] = None,
         compute_metrics: Optional[Callable[[EvalLoopOutput], dict]] = None,
         model_adapter_name: Optional[str] = None,
         ref_adapter_name: Optional[str] = None,
-        embedding_func: Optional[Callable] = None,
-        embedding_tokenizer: Optional[PreTrainedTokenizerBase] = None,
     ):
-        if not is_sklearn_available():
-            raise ImportError(
-                "BCOTrainer requires the scikit-learn library. Please install it with `pip install scikit-learn`."
-            )
-
         if type(args) is TrainingArguments:
-            raise ValueError("Please use `BCOConfig` instead `TrainingArguments`.")
+            raise ValueError("Please use `KTOConfig` instead TrainingArguments.")
 
         if not isinstance(model, str) and ref_model is model:
             raise ValueError(
@@ -461,7 +548,9 @@ class _UnslothBCOTrainer(Trainer):
         if args.model_init_kwargs is None:
             model_init_kwargs = {}
         elif not isinstance(model, str):
-            raise ValueError("You passed model_kwargs to the BCOTrainer. But your model is already instantiated.")
+            raise ValueError(
+                "You passed model_kwargs to the KTOTrainer. But your model is already instantiated."
+            )
         else:
             model_init_kwargs = args.model_init_kwargs
             torch_dtype = model_init_kwargs.get("torch_dtype")
@@ -471,7 +560,7 @@ class _UnslothBCOTrainer(Trainer):
                     torch_dtype = getattr(torch, torch_dtype)
                 if torch_dtype != "auto" and not isinstance(torch_dtype, torch.dtype):
                     raise ValueError(
-                        f"Invalid `torch_dtype` passed to the BCOConfig. Expected a string with either `torch.dtype` or 'auto', but got {torch_dtype}."
+                        f"Invalid `torch_dtype` passed to the KTOConfig. Expected a string with either `torch.dtype` or 'auto', but got {torch_dtype}."
                     )
                 model_init_kwargs["torch_dtype"] = torch_dtype
 
@@ -479,7 +568,7 @@ class _UnslothBCOTrainer(Trainer):
             ref_model_init_kwargs = {}
         elif not isinstance(ref_model, str):
             raise ValueError(
-                "You passed ref_model_kwargs to the BCOTrainer. But your ref_model is already instantiated."
+                "You passed ref_model_kwargs to the KTOTrainer. But your ref_model is already instantiated."
             )
         else:
             ref_model_init_kwargs = args.ref_model_init_kwargs
@@ -490,7 +579,7 @@ class _UnslothBCOTrainer(Trainer):
                     torch_dtype = getattr(torch, torch_dtype)
                 if torch_dtype != "auto" and not isinstance(torch_dtype, torch.dtype):
                     raise ValueError(
-                        f"Invalid `torch_dtype` passed to the BCOConfig. Expected a string with either `torch.dtype` or 'auto', but got {torch_dtype}."
+                        f"Invalid `torch_dtype` passed to the KTOConfig. Expected a string with either `torch.dtype` or 'auto', but got {torch_dtype}."
                     )
                 ref_model_init_kwargs["torch_dtype"] = torch_dtype
 
@@ -513,7 +602,9 @@ class _UnslothBCOTrainer(Trainer):
             if isinstance(model, PeftModel):
                 model = model.merge_and_unload()
 
-            if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False):
+            if getattr(model, "is_loaded_in_8bit", False) or getattr(
+                model, "is_loaded_in_4bit", False
+            ):
                 _support_gc_kwargs = hasattr(
                     args, "gradient_checkpointing_kwargs"
                 ) and "gradient_checkpointing_kwargs" in list(
@@ -523,7 +614,9 @@ class _UnslothBCOTrainer(Trainer):
                 prepare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
 
                 if _support_gc_kwargs:
-                    prepare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
+                    prepare_model_kwargs[
+                        "gradient_checkpointing_kwargs"
+                    ] = args.gradient_checkpointing_kwargs
 
                 model = prepare_model_for_kbit_training(model, **prepare_model_kwargs)
             elif getattr(args, "gradient_checkpointing", False):
@@ -567,7 +660,9 @@ class _UnslothBCOTrainer(Trainer):
         if model is not None:
             self.is_encoder_decoder = model.config.is_encoder_decoder
         elif args.is_encoder_decoder is None:
-            raise ValueError("When no model is provided, you need to pass the parameter is_encoder_decoder.")
+            raise ValueError(
+                "When no model is provided, you need to pass the parameter is_encoder_decoder."
+            )
         else:
             self.is_encoder_decoder = args.is_encoder_decoder
 
@@ -589,8 +684,8 @@ class _UnslothBCOTrainer(Trainer):
             )
         if args.max_length is None:
             warnings.warn(
-                "When using DPODataCollatorWithPadding, you should set `max_length` in the `BCOConfig`. "
-                "It will be set to `512` by default, but you should do it yourself in the future.",
+                "When using DPODataCollatorWithPadding, you should set `max_length` in the KTOTrainer's init"
+                " it will be set to `512` by default, but you should do it yourself in the future.",
                 UserWarning,
             )
             max_length = 512
@@ -599,8 +694,8 @@ class _UnslothBCOTrainer(Trainer):
 
         if args.max_prompt_length is None:
             warnings.warn(
-                "When using DPODataCollatorWithPadding, you should set `max_prompt_length` in the `BCOConfig`. "
-                "It will be set to `128` by default, but you should do it yourself in the future.",
+                "When using DPODataCollatorWithPadding, you should set `max_prompt_length` in the KTOTrainer's init"
+                " it will be set to `128` by default, but you should do it yourself in the future.",
                 UserWarning,
             )
             max_prompt_length = 128
@@ -610,7 +705,7 @@ class _UnslothBCOTrainer(Trainer):
         max_completion_length = None
         if args.max_completion_length is None and self.is_encoder_decoder:
             warnings.warn(
-                "When using DPODataCollatorWithPadding with an encoder decoder architecture, you should set `max_completion_length` in the BCOTrainer's init"
+                "When using DPODataCollatorWithPadding with an encoder decoder architecture, you should set `max_completion_length` in the KTOTrainer's init"
                 " it will be set to `128` by default, but you should do it yourself in the future.",
                 UserWarning,
             )
@@ -629,7 +724,7 @@ class _UnslothBCOTrainer(Trainer):
                 args.remove_unused_columns = False
                 # warn users
                 warnings.warn(
-                    "When using DPODataCollatorWithPadding, you should set `remove_unused_columns=False` in your BCOConfig"
+                    "When using DPODataCollatorWithPadding, you should set `remove_unused_columns=False` in your KTOConfig"
                     " we have set it for you, but you should do it yourself in the future.",
                     UserWarning,
                 )
@@ -644,14 +739,23 @@ class _UnslothBCOTrainer(Trainer):
             if self.ref_model is not None:
                 disable_dropout_in_model(self.ref_model)
 
+        self.loss_type = args.loss_type
         self.max_length = max_length
         self.generate_during_eval = args.generate_during_eval
         self.label_pad_token_id = args.label_pad_token_id
-        self.padding_value = args.padding_value if args.padding_value is not None else processing_class.pad_token_id
+        self.padding_value = (
+            args.padding_value if args.padding_value is not None else processing_class.pad_token_id
+        )
         self.max_prompt_length = max_prompt_length
         self.truncation_mode = args.truncation_mode
         self.max_completion_length = max_completion_length
+        self.processing_class = processing_class
         self.precompute_ref_log_probs = args.precompute_ref_log_probs
+
+        # Not all losses require a KL calculation
+        self.calculate_KL = True
+        if self.loss_type in ["apo_zero_unpaired"]:
+            self.calculate_KL = False
 
         # Since ref_logs are precomputed on the first call to get_train/eval_dataloader
         # keep track of first called to avoid computation of future calls
@@ -661,8 +765,10 @@ class _UnslothBCOTrainer(Trainer):
         # metric
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
-        # BCO parameter
+        # KTO parameter
         self.beta = args.beta
+        self.desirable_weight = args.desirable_weight
+        self.undesirable_weight = args.undesirable_weight
         self.aux_loss_enabled = getattr(model.config, "output_router_logits", False)
         self.aux_loss_coef = getattr(model.config, "router_aux_loss_coef", 0.0)
         if self.aux_loss_enabled and self.aux_loss_coef == 0.0:
@@ -674,12 +780,8 @@ class _UnslothBCOTrainer(Trainer):
                 UserWarning,
             )
 
-        # Underlying Distribution Matching argument
-        self.embedding_func = embedding_func
-        self.embedding_tokenizer = embedding_tokenizer
-
         # The trainer estimates the number of FLOPs (floating-point operations) using the number of elements in the
-        # input tensor associated with the key "input_ids". However, in BCO, the sampled data does not include the
+        # input tensor associated with the key "input_ids". However, in KTO, the sampled data does not include the
         # "input_ids" key. Instead, the available keys are "prompt_input_ids" and "completion_input_ids". As a result,
         # the trainer issues the warning: "Could not estimate the number of tokens of the input, floating-point
         # operations will not be computed." To suppress this warning, we set the "estimate_tokens" key in the model's
@@ -687,41 +789,62 @@ class _UnslothBCOTrainer(Trainer):
         # issued.
         model.warnings_issued["estimate_tokens"] = True
 
+        # Compute that only on the main process for faster data processing.
+        # see: https://github.com/huggingface/trl/pull/1255
         with PartialState().local_main_process_first():
+            # Extract the prompt if needed
+            train_dataset = train_dataset.map(
+                maybe_extract_prompt,
+                num_proc=args.dataset_num_proc,
+                desc="Extracting prompt from train dataset",
+            )
+            # Unpair the dataset if needed
+            train_dataset = maybe_unpair_preference_dataset(
+                train_dataset, args.dataset_num_proc, desc="Unpairing train dataset"
+            )
             # Apply the chat template if needed
             train_dataset = train_dataset.map(
-                maybe_apply_chat_template, fn_kwargs={"tokenizer": processing_class}, num_proc=args.dataset_num_proc
+                maybe_apply_chat_template,
+                fn_kwargs={"tokenizer": processing_class},
+                num_proc=args.dataset_num_proc,
+                desc="Applying chat template to train dataset",
             )
             if eval_dataset is not None:
+                eval_dataset = eval_dataset.map(
+                    maybe_extract_prompt,
+                    num_proc=args.dataset_num_proc,
+                    desc="Extracting prompt from eval dataset",
+                )
+                eval_dataset = maybe_unpair_preference_dataset(
+                    eval_dataset, args.dataset_num_proc, desc="Unpairing eval dataset"
+                )
                 eval_dataset = eval_dataset.map(
                     maybe_apply_chat_template,
                     fn_kwargs={"tokenizer": processing_class},
                     num_proc=args.dataset_num_proc,
+                    desc="Applying chat template to eval dataset",
                 )
-            # Shuffle the datasets
-            train_dataset = train_dataset.shuffle(seed=args.data_seed)
-            if eval_dataset is not None:
-                eval_dataset = eval_dataset.shuffle(seed=args.data_seed)
+
             # Tokenize and prepare the training datasets
             train_dataset = train_dataset.map(
                 _tokenize,
                 batched=True,
-                fn_kwargs={"tokenizer": processing_class, "embedding_tokenizer": self.embedding_tokenizer},
+                fn_kwargs={"tokenizer": self.processing_class},
                 num_proc=args.dataset_num_proc,
                 desc="Tokenizing train dataset",
             )
 
-            # Prepare the datasets
             fn_kwargs = {
                 "prefix": "",
                 "is_encoder_decoder": self.is_encoder_decoder,
-                "tokenizer": processing_class,
+                "tokenizer": self.processing_class,
                 "max_length": self.max_length,
                 "truncation_mode": self.truncation_mode,
                 "label_pad_token_id": self.label_pad_token_id,
                 "max_prompt_length": self.max_prompt_length,
                 "max_completion_length": self.max_completion_length,
             }
+
             train_dataset = train_dataset.map(
                 _process_tokens,
                 fn_kwargs=fn_kwargs,
@@ -729,27 +852,16 @@ class _UnslothBCOTrainer(Trainer):
                 desc="Processing tokenized train dataset",
             )
 
+            # Tokenize and prepare the eval datasets
             if eval_dataset is not None:
-                # Tokenize
                 eval_dataset = eval_dataset.map(
                     _tokenize,
-                    fn_kwargs={"tokenizer": processing_class, "embedding_tokenizer": self.embedding_tokenizer},
+                    fn_kwargs={"tokenizer": self.processing_class},
                     batched=True,
                     num_proc=args.dataset_num_proc,
                     desc="Tokenizing eval dataset",
                 )
 
-                # Process
-                fn_kwargs = {
-                    "prefix": "",
-                    "is_encoder_decoder": self.is_encoder_decoder,
-                    "tokenizer": processing_class,
-                    "max_length": self.max_length,
-                    "truncation_mode": self.truncation_mode,
-                    "label_pad_token_id": self.label_pad_token_id,
-                    "max_prompt_length": self.max_prompt_length,
-                    "max_completion_length": self.max_completion_length,
-                }
                 eval_dataset = eval_dataset.map(
                     _process_tokens,
                     fn_kwargs=fn_kwargs,
@@ -757,15 +869,100 @@ class _UnslothBCOTrainer(Trainer):
                     desc="Processing tokenized eval dataset",
                 )
 
-            desirable = train_dataset.filter(
-                lambda x: x["label"], num_proc=args.dataset_num_proc, desc="Filtering desirable examples"
-            )
-            undesirable = train_dataset.filter(
-                lambda x: not x["label"], num_proc=args.dataset_num_proc, desc="Filtering undesirable examples"
-            )
+            # Get KL datasets if needed
+            if self.calculate_KL:
+                if args.per_device_train_batch_size <= 1:
+                    raise ValueError(
+                        "Actual (not effective) batch size must be > 1. KTO will not work properly because the KL term will be equivalent to the implied reward."
+                    )
 
-            desirable = desirable.shuffle(seed=args.data_seed)
-            undesirable = undesirable.shuffle(seed=args.data_seed)
+                # create pairs for estimating the KL term by flipping the matched pairs in each batch of size total_batch_size
+                # i.e., (x_1, y_1), ..., (x_n, y_n) --> (x_1, y_n), ..., (x_n, y_1) = (x'_1, y'_1), ..., (x'_n, y'_n)
+                train_kl_dataset = train_dataset.map(
+                    _get_kl_dataset,
+                    batched=True,
+                    batch_size=args.per_device_train_batch_size,
+                    num_proc=args.dataset_num_proc,
+                    desc="Extracting KL train dataset",
+                )
+
+                fn_kwargs["prefix"] = "KL_"
+                train_kl_dataset = train_kl_dataset.map(
+                    _process_tokens,
+                    fn_kwargs=fn_kwargs,
+                    num_proc=args.dataset_num_proc,
+                    remove_columns=[
+                        c for c in train_kl_dataset.column_names if c in train_dataset.column_names
+                    ],
+                    desc="Processing tokenized train KL dataset",
+                )
+
+                # merge the datasets
+                train_dataset = concatenate_datasets([train_dataset, train_kl_dataset], axis=1)
+
+                if eval_dataset is not None:
+                    # Get KL dataset
+                    eval_kl_dataset = eval_dataset.map(
+                        _get_kl_dataset,
+                        batched=True,
+                        batch_size=args.per_device_train_batch_size,
+                        num_proc=args.dataset_num_proc,
+                        desc="Extracting eval KL dataset",
+                    )
+
+                    eval_kl_dataset = eval_kl_dataset.map(
+                        _process_tokens,
+                        fn_kwargs=fn_kwargs,
+                        num_proc=args.dataset_num_proc,
+                        remove_columns=[
+                            c
+                            for c in eval_kl_dataset.column_names
+                            if c in eval_dataset.column_names
+                        ],
+                        desc="Processing tokenized eval KL dataset",
+                    )
+
+                    # merge the datasets
+                    eval_dataset = concatenate_datasets([eval_dataset, eval_kl_dataset], axis=1)
+
+            # calculate dataset desirability balance
+            num_desirable = max(sum(train_dataset["label"]), 1)
+            num_undesirable = max(
+                len(train_dataset["label"]) - num_desirable, 1
+            )  # "label" is binary
+
+            if num_desirable != num_undesirable:
+                # The lower and upper bounds come from Eq. (8) of https://huggingface.co/papers/2402.01306
+                des_weight_lower_bound = round(
+                    (num_undesirable * self.undesirable_weight / num_desirable) * 1, 2
+                )
+                des_weight_upper_bound = round(
+                    (num_undesirable * self.undesirable_weight / num_desirable) * 1.33, 2
+                )
+                und_weight_lower_bound = round(
+                    (num_desirable * self.desirable_weight / num_undesirable) / 1.33, 2
+                )
+                und_weight_upper_bound = round(
+                    (num_desirable * self.desirable_weight / num_undesirable) / 1, 2
+                )
+
+                des_weight_in_range = (
+                    des_weight_lower_bound <= self.desirable_weight <= des_weight_upper_bound
+                )
+                und_weight_in_range = (
+                    und_weight_lower_bound <= self.undesirable_weight <= und_weight_upper_bound
+                )
+
+                if not (des_weight_in_range or und_weight_in_range):
+                    warnings.warn(
+                        "You have different amounts of desirable/positive and undesirable/negative examples but the "
+                        "weights on the desirable and undesirable losses don't seem to be in an ideal range. Based "
+                        f"on your data, we recommend EITHER "
+                        f"desirable_weight in [{des_weight_lower_bound}, {des_weight_upper_bound}] or "
+                        f"undesirable_weight in [{und_weight_lower_bound}, {und_weight_upper_bound}] (but NOT BOTH). "
+                        "See the documentation on how to optimally set these weights.",
+                        UserWarning,
+                    )
 
         super().__init__(
             model=model,
@@ -797,7 +994,10 @@ class _UnslothBCOTrainer(Trainer):
 
         # Deepspeed Zero-3 does not support precompute_ref_log_probs
         if self.is_deepspeed_enabled:
-            if self.accelerator.state.deepspeed_plugin.zero_stage == 3 and self.precompute_ref_log_probs:
+            if (
+                self.accelerator.state.deepspeed_plugin.zero_stage == 3
+                and self.precompute_ref_log_probs
+            ):
                 raise ValueError(
                     "You cannot use `precompute_ref_log_probs=True` with Deepspeed ZeRO-3. Please set `precompute_ref_log_probs=False`."
                 )
@@ -811,130 +1011,9 @@ class _UnslothBCOTrainer(Trainer):
             if self.is_deepspeed_enabled:
                 self.ref_model = self._prepare_deepspeed(self.ref_model)
             else:
-                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
-
-        self.running = RunningMoments(accelerator=self.accelerator)
-
-        if self.embedding_func is None:
-            return
-
-        chosen_embeddings = self._get_sample_prompt_embeddings(desirable, sample_size=self.args.prompt_sample_size)
-        rejected_embeddings = self._get_sample_prompt_embeddings(undesirable, sample_size=self.args.prompt_sample_size)
-
-        embeddings = torch.cat((chosen_embeddings, rejected_embeddings), dim=0)
-        labels = torch.cat(
-            (torch.ones_like(chosen_embeddings[:, 0]), torch.zeros_like(rejected_embeddings[:, 0])), dim=0
-        )
-
-        self.clf = LogisticRegression(class_weight="balanced").fit(
-            embeddings.cpu().float().numpy(), labels.cpu().numpy()
-        )
-
-    @property
-    def match_underlying_distribution(self):
-        return self.embedding_func is not None and self.embedding_tokenizer is not None
-
-    def _get_chosen_prob(self, prompt_embeddings: torch.FloatTensor) -> torch.FloatTensor:
-        """
-        Calculates the probability if the given prompt embedding is from desirable dataset.
-        This function calculates the probability in the process and ensemble across processes.
-        """
-        dtype = prompt_embeddings.dtype
-        device = prompt_embeddings.device
-        rank = self.accelerator.process_index
-
-        padded_prompt_embeddings = self.accelerator.pad_across_processes(
-            prompt_embeddings, pad_index=self.embedding_tokenizer.pad_token_id
-        )
-        sample_size = padded_prompt_embeddings.shape[0]
-        nonzero = padded_prompt_embeddings.mean(dim=1) != self.embedding_tokenizer.pad_token_id
-        prompt_embeddings = self.accelerator.gather(padded_prompt_embeddings)
-
-        # cannot predict for all empty values
-        if prompt_embeddings.shape[0] == 0:
-            return torch.tensor([], device=device, dtype=dtype)
-
-        prob = self.clf.predict_proba(prompt_embeddings.cpu().float().numpy())[:, 1]
-        prob = torch.as_tensor(prob, dtype=dtype, device=device)
-        prob = self.accelerator.reduce(prob, reduction="mean")
-
-        prob = prob[sample_size * rank : sample_size * (rank + 1)]
-        prob = prob[nonzero]
-
-        return prob
-
-    def _vectorize_prompt(self, input_ids: torch.LongTensor, attention_mask: torch.LongTensor) -> torch.FloatTensor:
-        """
-        Replaces processing_class.pad_token_id to embedding_tokenizer.pad_token_id
-        and applies self.embedding_func
-        """
-        input_ids = torch.where(
-            input_ids == self.processing_class.pad_token_id,
-            self.embedding_tokenizer.pad_token_id,
-            input_ids,
-        )
-
-        with torch.no_grad():
-            embeddings = self.embedding_func(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-
-        return embeddings
-
-    def _get_prompt_embeddings(
-        self, batch: dict[str, Union[list, torch.LongTensor]]
-    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        """Extract embeddings from frozen embedding model"""
-
-        if not self.match_underlying_distribution:
-            return None, None
-
-        embeddings = self._vectorize_prompt(
-            input_ids=batch["embedding_input_ids"],
-            attention_mask=batch["embedding_attention_mask"],
-        )
-
-        chosen_idx = [i for i in range(len(batch["label"])) if batch["label"][i] is True]
-        rejected_idx = [i for i in range(len(batch["label"])) if batch["label"][i] is False]
-
-        chosen_embeddings = embeddings[chosen_idx, ...]
-        rejected_embeddings = embeddings[rejected_idx, ...]
-
-        return (chosen_embeddings, rejected_embeddings)
-
-    def _get_sample_prompt_embeddings(self, dataset: Dataset, sample_size: int = 512) -> torch.FloatTensor:
-        """
-        Sample instances from dataset and get prompt embeddings.
-        Used for density ratio classifier training.
-        """
-        n_samples = min(len(dataset), sample_size)
-        rand_indices = np.random.choice(len(dataset), size=(n_samples,))
-
-        embedding_dataset = dataset.select(rand_indices)
-
-        dataloader_params = {
-            "batch_size": self.args.per_device_train_batch_size,
-            "collate_fn": self.data_collator,
-            "num_workers": self.args.dataloader_num_workers,
-            "pin_memory": self.args.dataloader_pin_memory,
-            "shuffle": False,
-        }
-
-        # prepare dataloader
-        data_loader = self.accelerator.prepare(DataLoader(embedding_dataset, **dataloader_params))
-
-        with torch.no_grad():
-            all_embeddings = torch.empty(0)
-            for padded_batch in tqdm(iterable=data_loader, desc="Building sample prompt embeddings"):
-                embeddings = self._vectorize_prompt(
-                    input_ids=padded_batch["embedding_input_ids"],
-                    attention_mask=padded_batch["embedding_attention_mask"],
+                self.ref_model = self.accelerator.prepare_model(
+                    self.ref_model, evaluation_mode=True
                 )
-                embeddings = self.accelerator.gather_for_metrics(embeddings)
-                all_embeddings = torch.cat((all_embeddings, embeddings.cpu()))
-
-        return all_embeddings
 
     def _prepare_deepspeed(self, model: PreTrainedModelWrapper):
         # Adapted from accelerate: https://github.com/huggingface/accelerate/blob/739b135f8367becb67ffaada12fe76e3aa60fefd/src/accelerate/accelerator.py#L1473
@@ -954,8 +1033,11 @@ class _UnslothBCOTrainer(Trainer):
                     config_kwargs.update(
                         {
                             "zero_optimization.reduce_bucket_size": hidden_size * hidden_size,
-                            "zero_optimization.stage3_param_persistence_threshold": 10 * hidden_size,
-                            "zero_optimization.stage3_prefetch_bucket_size": 0.9 * hidden_size * hidden_size,
+                            "zero_optimization.stage3_param_persistence_threshold": 10
+                            * hidden_size,
+                            "zero_optimization.stage3_prefetch_bucket_size": 0.9
+                            * hidden_size
+                            * hidden_size,
                         }
                     )
 
@@ -966,32 +1048,6 @@ class _UnslothBCOTrainer(Trainer):
         model, *_ = deepspeed.initialize(model=model, config=config_kwargs)
         model.eval()
         return model
-
-    def _save_optimizer_and_scheduler(self, output_dir):
-        super()._save_optimizer_and_scheduler(output_dir)
-
-        # When saving optimizer and scheduler to checkpoint, save also the running delta object.
-        output_dir = output_dir if output_dir is not None else self.args.output_dir
-
-        self.running.save_to_json(os.path.join(output_dir, RUNNING_NAME))
-
-        if self.match_underlying_distribution:
-            torch.save(self.clf.get_params(), os.path.join(output_dir, CLF_NAME))
-
-    def _load_optimizer_and_scheduler(self, checkpoint):
-        super()._load_optimizer_and_scheduler(checkpoint)
-
-        if checkpoint is None:
-            return
-        # when loading optimizer and scheduler from checkpoint, also load the running delta object.
-        running_file = os.path.join(checkpoint, RUNNING_NAME)
-        if os.path.isfile(running_file):
-            self.running = RunningMoments.load_from_json(self.accelerator, running_file)
-
-        if self.match_underlying_distribution:
-            clf_file = os.path.join(checkpoint, CLF_NAME)
-            if os.path.isfile(running_file):
-                self.clf.set_params(**torch.load(clf_file, weights_only=True, map_location="cpu"))
 
     @contextmanager
     def null_ref_context(self):
@@ -1024,18 +1080,36 @@ class _UnslothBCOTrainer(Trainer):
             }
 
             # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(self.train_dataset, **dataloader_params))
+            data_loader = self.accelerator.prepare(
+                DataLoader(self.train_dataset, **dataloader_params)
+            )
             reference_completion_logps = []
+            reference_KL_logps = []
 
-            for padded_batch in tqdm(iterable=data_loader, desc="Train dataset reference log probs"):
-                reference_completion_logp = self.compute_reference_log_probs(padded_batch)
+            for padded_batch in tqdm(
+                iterable=data_loader, desc="Train dataset reference log probs"
+            ):
+                reference_completion_logp, reference_KL_logp = self.compute_reference_log_probs(
+                    padded_batch
+                )
 
-                reference_completion_logp = self.accelerator.gather_for_metrics(reference_completion_logp)
+                reference_completion_logp = self.accelerator.gather_for_metrics(
+                    reference_completion_logp
+                )
                 reference_completion_logps.append(reference_completion_logp.cpu())
+
+                if self.calculate_KL:
+                    reference_KL_logp = self.accelerator.gather_for_metrics(reference_KL_logp)
+                    reference_KL_logps.append(reference_KL_logp.cpu())
 
             self.train_dataset = self.train_dataset.add_column(
                 name="reference_logps", column=torch.cat(reference_completion_logps).float().numpy()
             )
+
+            if self.calculate_KL:
+                self.train_dataset = self.train_dataset.add_column(
+                    name="reference_KL_logps", column=torch.cat(reference_KL_logps).float().numpy()
+                )
 
             self._precomputed_train_ref_log_probs = True
 
@@ -1069,16 +1143,29 @@ class _UnslothBCOTrainer(Trainer):
             data_loader = self.accelerator.prepare(DataLoader(eval_dataset, **dataloader_params))
 
             reference_completion_logps = []
+            reference_KL_logps = []
 
             for padded_batch in tqdm(iterable=data_loader, desc="Eval dataset reference log probs"):
-                reference_completion_logp = self.compute_reference_log_probs(padded_batch)
+                reference_completion_logp, reference_KL_logp = self.compute_reference_log_probs(
+                    padded_batch
+                )
 
-                reference_completion_logp = self.accelerator.gather_for_metrics(reference_completion_logp)
+                reference_completion_logp = self.accelerator.gather_for_metrics(
+                    reference_completion_logp
+                )
                 reference_completion_logps.append(reference_completion_logp.cpu())
+
+                if self.calculate_KL:
+                    reference_KL_logp = self.accelerator.gather_for_metrics(reference_KL_logp)
+                    reference_KL_logps.append(reference_KL_logp.cpu())
 
             eval_dataset = eval_dataset.add_column(
                 name="reference_logps", column=torch.cat(reference_completion_logps).float().numpy()
             )
+            if self.calculate_KL:
+                eval_dataset = eval_dataset.add_column(
+                    name="reference_KL_logps", column=torch.cat(reference_KL_logps).float().numpy()
+                )
 
             # Save calculated reference_chosen_logps and reference_rejected_logps to the eval_dataset for subsequent runs
             if self.eval_dataset is not None:
@@ -1088,7 +1175,7 @@ class _UnslothBCOTrainer(Trainer):
         return super().get_eval_dataloader(eval_dataset=eval_dataset)
 
     def compute_reference_log_probs(self, padded_batch: dict) -> dict:
-        """Computes log probabilities of the reference model for a single padded batch of a BCO specific dataset."""
+        """Computes log probabilities of the reference model for a single padded batch of a KTO specific dataset."""
         with torch.no_grad():
             if self.ref_model is None:
                 with self.null_ref_context():
@@ -1100,12 +1187,26 @@ class _UnslothBCOTrainer(Trainer):
                             labels=padded_batch["completion_labels"],
                         ).logits
 
+                        if self.calculate_KL:
+                            KL_logits = self.model(
+                                padded_batch["KL_prompt_input_ids"],
+                                attention_mask=padded_batch["KL_prompt_attention_mask"],
+                                decoder_input_ids=padded_batch.get(
+                                    "KL_completion_decoder_input_ids"
+                                ),
+                                labels=padded_batch["KL_completion_labels"],
+                            ).logits
                     else:
                         completion_logits = self.model(
                             padded_batch["completion_input_ids"],
                             attention_mask=padded_batch["completion_attention_mask"],
                         ).logits
 
+                        if self.calculate_KL:
+                            KL_logits = self.model(
+                                padded_batch["KL_completion_input_ids"],
+                                attention_mask=padded_batch["KL_completion_attention_mask"],
+                            ).logits
             else:
                 if self.is_encoder_decoder:
                     completion_logits = self.ref_model(
@@ -1115,10 +1216,24 @@ class _UnslothBCOTrainer(Trainer):
                         labels=padded_batch["completion_labels"],
                     ).logits
 
+                    if self.calculate_KL:
+                        KL_logits = self.ref_model(
+                            padded_batch["KL_prompt_input_ids"],
+                            attention_mask=padded_batch["KL_prompt_attention_mask"],
+                            decoder_input_ids=padded_batch.get("KL_completion_decoder_input_ids"),
+                            labels=padded_batch["KL_completion_labels"],
+                        ).logits
                 else:
                     completion_logits = self.ref_model(
-                        padded_batch["completion_input_ids"], attention_mask=padded_batch["completion_attention_mask"]
+                        padded_batch["completion_input_ids"],
+                        attention_mask=padded_batch["completion_attention_mask"],
                     ).logits
+
+                    if self.calculate_KL:
+                        KL_logits = self.ref_model(
+                            padded_batch["KL_completion_input_ids"],
+                            attention_mask=padded_batch["KL_completion_attention_mask"],
+                        ).logits
 
         completion_logps = self.get_batch_logps(
             completion_logits,
@@ -1128,7 +1243,18 @@ class _UnslothBCOTrainer(Trainer):
             label_pad_token_id=self.label_pad_token_id,
         )
 
-        return completion_logps
+        if self.calculate_KL:
+            KL_logps = self.get_batch_logps(
+                KL_logits,
+                padded_batch["KL_completion_labels"],
+                average_log_prob=False,
+                is_encoder_decoder=self.is_encoder_decoder,
+                label_pad_token_id=self.label_pad_token_id,
+            )
+        else:
+            KL_logps = None
+
+        return completion_logps, KL_logps
 
     @staticmethod
     def get_batch_logps(
@@ -1149,7 +1275,9 @@ class _UnslothBCOTrainer(Trainer):
             A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
         """
         if logits.shape[:-1] != labels.shape:
-            raise ValueError("Logits (batch and sequence length dim) and labels must have the same shape.")
+            raise ValueError(
+                "Logits (batch and sequence length dim) and labels must have the same shape."
+            )
 
         if not is_encoder_decoder:
             labels = labels[:, 1:].clone()
@@ -1173,6 +1301,36 @@ class _UnslothBCOTrainer(Trainer):
     def forward(
         self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]]
     ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
+        if self.calculate_KL:
+            KL_logps = None
+            KL_model_kwargs = (
+                {
+                    "input_ids": batch["KL_prompt_input_ids"],
+                    "attention_mask": batch["KL_prompt_attention_mask"],
+                    "labels": batch["KL_completion_labels"],
+                    "decoder_input_ids": batch.get("KL_completion_decoder_input_ids"),
+                }
+                if self.is_encoder_decoder
+                else {
+                    "input_ids": batch["KL_completion_input_ids"],
+                    "attention_mask": batch["KL_completion_attention_mask"],
+                }
+            )
+            with torch.no_grad():
+                KL_logits = model(
+                    **KL_model_kwargs,
+                ).logits
+
+            KL_logps = self.get_batch_logps(
+                KL_logits,
+                batch["KL_completion_labels"],
+                average_log_prob=False,
+                is_encoder_decoder=self.is_encoder_decoder,
+                label_pad_token_id=self.label_pad_token_id,
+            )
+        else:
+            KL_logps = None
+
         model_kwargs = (
             {
                 "labels": batch["completion_labels"],
@@ -1215,89 +1373,100 @@ class _UnslothBCOTrainer(Trainer):
         rejected_logits = completion_logits[rejected_idx, ...]
 
         if self.aux_loss_enabled:
-            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, outputs.aux_loss)
+            return (
+                chosen_logps,
+                rejected_logps,
+                chosen_logits,
+                rejected_logits,
+                KL_logps,
+                outputs.aux_loss,
+            )
         else:
-            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
+            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, KL_logps)
 
-    def _get_udm_weight(self, rejected_embeddings: torch.FloatTensor) -> torch.FloatTensor:
-        prob_desirable = self._get_chosen_prob(rejected_embeddings)
-        min_ratio = self.args.min_density_ratio
-        max_ratio = self.args.max_density_ratio
-
-        weight = (prob_desirable / (1 - prob_desirable + 1e-8)).clamp(min=min_ratio, max=max_ratio)
-
-        return weight
-
-    def bco_loss(
+    def kto_loss(
         self,
         policy_chosen_logps: torch.FloatTensor,
         policy_rejected_logps: torch.FloatTensor,
+        policy_KL_logps: torch.FloatTensor,
         reference_chosen_logps: torch.FloatTensor,
         reference_rejected_logps: torch.FloatTensor,
-        chosen_embeddings: Optional[torch.FloatTensor],
-        rejected_embeddings: Optional[torch.FloatTensor],
+        reference_KL_logps: torch.FloatTensor,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        """Compute the BCO loss for a batch of policy and reference model log probabilities.
+        """Compute the KTO loss for a batch of policy and reference model log probabilities.
 
         Args:
             policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (num(chosen) in batch_size,)
             policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (num(rejected) in batch_size,)
+            policy_KL_logps: Log probabilities of the policy model for the KL responses. Shape: (batch_size,)
             reference_chosen_logps: Log probabilities of the reference model for the chosen responses. Shape: (num(chosen) in batch_size,)
             reference_rejected_logps: Log probabilities of the reference model for the rejected responses. Shape: (num(rejected) in batch_size,)
-            chosen_embeddings: embeddings of desirable prompts
-            rejected_embeddings: embeddings of undesirable prompts
+            reference_KL_logps: Log probabilities of the reference model for the KL responses. Shape: (batch_size,)
 
         Returns:
-            A tuple of four tensors: (losses, chosen_rewards, rejected_rewards, delta).
-            The losses tensor contains the BCO loss for each example in the batch.
+            A tuple of four tensors: (losses, chosen_rewards, rejected_rewards, KL).
+            The losses tensor contains the KTO loss for each example in the batch.
             The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
-            The delta value contains the moving average of all implicit rewards.
+            The KL tensor contains the detached KL divergence estimate between the policy and reference models.
         """
+        if self.calculate_KL:
+            kl = (policy_KL_logps - reference_KL_logps).mean().detach()
+            kl = self.accelerator.gather_for_metrics(kl).mean().clamp(min=0)
+        else:
+            kl = torch.zeros(1).to(policy_chosen_logps.device)
 
+        # Chosen losses
         if policy_chosen_logps.shape[0] != 0 or reference_chosen_logps.shape[0] != 0:
             chosen_logratios = policy_chosen_logps - reference_chosen_logps
-            chosen_rewards = self.beta * chosen_logratios
+
+            if self.loss_type == "kto":
+                # Eqn (7) of the KTO paper (https://huggingface.co/papers/2402.01306)
+                chosen_losses = 1 - F.sigmoid(self.beta * (chosen_logratios - kl))
+            elif self.loss_type == "apo_zero_unpaired":
+                # Unpaired variant of Eqn (7) of the APO paper (https://huggingface.co/papers/2408.06266)
+                # Use this loss when you believe the chosen outputs are better than your model's default output
+                chosen_losses = 1 - F.sigmoid(self.beta * chosen_logratios)
+
+            chosen_rewards = self.beta * chosen_logratios.detach()
+
         else:
             # lists can't be empty -- if they are, then accelerate.gather will hang
             chosen_losses = torch.Tensor([]).to(self.accelerator.device)
             chosen_rewards = torch.Tensor([]).to(self.accelerator.device)
 
+        # Rejected losses
         if policy_rejected_logps.shape[0] != 0 or reference_rejected_logps.shape[0] != 0:
             rejected_logratios = policy_rejected_logps - reference_rejected_logps
-            rejected_rewards = self.beta * rejected_logratios
+
+            if self.loss_type == "kto":
+                rejected_losses = 1 - F.sigmoid(self.beta * (kl - rejected_logratios))
+            elif self.loss_type == "apo_zero_unpaired":
+                rejected_losses = F.sigmoid(self.beta * rejected_logratios)
+
+            rejected_rewards = self.beta * rejected_logratios.detach()
         else:
             # lists can't be empty -- if they are, then accelerate.gather will hang
             rejected_losses = torch.Tensor([]).to(self.accelerator.device)
             rejected_rewards = torch.Tensor([]).to(self.accelerator.device)
 
-        rewards = torch.cat((chosen_rewards, rejected_rewards), 0).mean().detach()
-        self.running.update(rewards)
-        delta = self.running.mean
+        losses = torch.cat(
+            (self.desirable_weight * chosen_losses, self.undesirable_weight * rejected_losses),
+            0,
+        )
 
-        if policy_chosen_logps.shape[0] != 0 or reference_chosen_logps.shape[0] != 0:
-            chosen_losses = -F.logsigmoid(chosen_rewards - delta)
-
-        if policy_rejected_logps.shape[0] != 0 or reference_rejected_logps.shape[0] != 0:
-            rejected_losses = -F.logsigmoid(-(rejected_rewards - delta))
-
-        if self.match_underlying_distribution:
-            chosen_weight = torch.ones_like(chosen_losses)
-            rejected_weight = self._get_udm_weight(rejected_embeddings)
-
-            losses = torch.cat((chosen_weight * chosen_losses, rejected_weight * rejected_losses), dim=0)
-        else:
-            losses = torch.cat((chosen_losses, rejected_losses), dim=0)
-
-        return losses, chosen_rewards, rejected_rewards, torch.as_tensor(delta)
+        return losses, chosen_rewards, rejected_rewards, kl
 
     def get_batch_loss_metrics(
         self,
         model,
         batch: dict[str, Union[list, torch.LongTensor]],
     ):
-        """Compute the BCO loss and other metrics for the given batch of inputs for train or test."""
+        """Compute the KTO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
-        batch = {k: (v.to(self.accelerator.device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+        batch = {
+            k: (v.to(self.accelerator.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()
+        }
 
         forward_output = self.forward(model, batch)
         (
@@ -1305,17 +1474,26 @@ class _UnslothBCOTrainer(Trainer):
             policy_rejected_logps,
             policy_chosen_logits,
             policy_rejected_logits,
-        ) = forward_output[:4]
+            policy_KL_logps,
+        ) = forward_output[:5]
         if self.aux_loss_enabled:
-            aux_loss = forward_output[4]
+            aux_loss = forward_output[5]
 
         # if reference_logps in batch use them, otherwise use the reference model
         if "reference_logps" in batch:
-            chosen_idx = [i for i in range(batch["reference_logps"].shape[0]) if batch["label"][i] is True]
-            rejected_idx = [i for i in range(batch["reference_logps"].shape[0]) if batch["label"][i] is False]
+            chosen_idx = [
+                i for i in range(batch["reference_logps"].shape[0]) if batch["label"][i] is True
+            ]
+            rejected_idx = [
+                i for i in range(batch["reference_logps"].shape[0]) if batch["label"][i] is False
+            ]
 
             reference_chosen_logps = batch["reference_logps"][chosen_idx, ...]
             reference_rejected_logps = batch["reference_logps"][rejected_idx, ...]
+            if self.calculate_KL:
+                reference_KL_logps = batch["reference_KL_logps"]
+            else:
+                reference_KL_logps = None
         else:
             with torch.no_grad():
                 if self.ref_model is None:
@@ -1325,26 +1503,26 @@ class _UnslothBCOTrainer(Trainer):
                             reference_rejected_logps,
                             _,
                             _,
-                        ) = self.forward(self.model, batch)[:4]
+                            reference_KL_logps,
+                        ) = self.forward(self.model, batch)[:5]
                 else:
                     (
                         reference_chosen_logps,
                         reference_rejected_logps,
                         _,
                         _,
-                    ) = self.forward(self.ref_model, batch)[:4]
+                        reference_KL_logps,
+                    ) = self.forward(self.ref_model, batch)[:5]
 
-        chosen_embeddings, rejected_embeddings = self._get_prompt_embeddings(batch)
-
-        losses, chosen_rewards, rejected_rewards, delta = self.bco_loss(
+        losses, chosen_rewards, rejected_rewards, kl = self.kto_loss(
             policy_chosen_logps,
             policy_rejected_logps,
+            policy_KL_logps,
             reference_chosen_logps,
             reference_rejected_logps,
-            chosen_embeddings,
-            rejected_embeddings,
+            reference_KL_logps,
         )
-        metrics["delta"] = self.accelerator.gather_for_metrics(delta).mean().item()
+        metrics["kl"] = kl.item()
 
         num_chosen = torch.Tensor([len(chosen_rewards)]).to(self.accelerator.device)
         num_rejected = torch.Tensor([len(rejected_rewards)]).to(self.accelerator.device)
@@ -1389,7 +1567,9 @@ class _UnslothBCOTrainer(Trainer):
         return_outputs=False,
         num_items_in_batch=None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor]]]:
-        compute_loss_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        compute_loss_context_manager = (
+            amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
 
         with compute_loss_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs)
@@ -1404,7 +1584,9 @@ class _UnslothBCOTrainer(Trainer):
             return (loss, metrics)
         return loss
 
-    def store_metrics(self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
+    def store_metrics(
+        self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train"
+    ) -> None:
         for key, value in metrics.items():
             self._stored_metrics[train_eval][key].append(value)
 
@@ -1413,12 +1595,17 @@ class _UnslothBCOTrainer(Trainer):
             return None
         return SequentialSampler(self.train_dataset)
 
-    def generate_from_model_and_ref(self, model, batch: dict[str, torch.LongTensor]) -> tuple[str, str]:
+    def generate_from_model_and_ref(
+        self, model, batch: dict[str, torch.LongTensor]
+    ) -> tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
 
         # If one uses `generate_during_eval` with peft + bf16, we need to explicitly call generate with
         # the torch cuda amp context manager as some hidden states are silently casted to full precision.
-        generate_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        generate_context_manager = (
+            amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
+
         with generate_context_manager:
             policy_output = model.generate(
                 input_ids=batch["prompt_input_ids"],
@@ -1450,11 +1637,19 @@ class _UnslothBCOTrainer(Trainer):
                         pad_token_id=self.processing_class.pad_token_id,
                     )
 
-        policy_output = pad_to_length(policy_output, self.max_length, self.processing_class.pad_token_id)
-        policy_output_decoded = self.processing_class.batch_decode(policy_output, skip_special_tokens=True)
+        policy_output = pad_to_length(
+            policy_output, self.max_length, self.processing_class.pad_token_id
+        )
+        policy_output_decoded = self.processing_class.batch_decode(
+            policy_output, skip_special_tokens=True
+        )
 
-        reference_output = pad_to_length(reference_output, self.max_length, self.processing_class.pad_token_id)
-        reference_output_decoded = self.processing_class.batch_decode(reference_output, skip_special_tokens=True)
+        reference_output = pad_to_length(
+            reference_output, self.max_length, self.processing_class.pad_token_id
+        )
+        reference_output_decoded = self.processing_class.batch_decode(
+            reference_output, skip_special_tokens=True
+        )
 
         return policy_output_decoded, reference_output_decoded
 
@@ -1471,7 +1666,9 @@ class _UnslothBCOTrainer(Trainer):
             else:
                 ignore_keys = []
 
-        prediction_context_manager = amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        prediction_context_manager = (
+            amp.autocast("cuda") if self._peft_has_been_casted_to_bf16 else nullcontext()
+        )
         with torch.no_grad(), prediction_context_manager:
             loss, metrics = self.get_batch_loss_metrics(model, inputs)
 
@@ -1487,8 +1684,10 @@ class _UnslothBCOTrainer(Trainer):
             "eval_logits/chosen": metrics["logits/chosen"],
             "eval_logits/rejected": metrics["logits/rejected"],
         }
-        logits = tuple(v.unsqueeze(dim=0) for k, v in logits_dict.items() if k not in ignore_keys)
-        logits = torch.stack(logits).mean(axis=1).to(self.accelerator.device)
+        logits = torch.tensor(
+            [v for k, v in logits_dict.items() if k not in ignore_keys],
+            device=self.accelerator.device,
+        )
         labels = torch.zeros(logits.shape[0], device=self.accelerator.device)
 
         return (loss.detach(), logits, labels)
@@ -1519,19 +1718,25 @@ class _UnslothBCOTrainer(Trainer):
             random_batch = self.data_collator(random_batch_dataset)
             random_batch = self._prepare_inputs(random_batch)
 
-            target_indicies = [i for i in range(len(random_batch["label"])) if random_batch["label"][i] is False]
+            target_indicies = [
+                i for i in range(len(random_batch["label"])) if random_batch["label"][i] is False
+            ]
             target_batch = {
                 "prompt_input_ids": random_batch["prompt_input_ids"][target_indicies],
                 "prompt_attention_mask": random_batch["prompt_attention_mask"][target_indicies],
                 "prompt": itemgetter(*target_indicies)(random_batch["prompt"]),
             }
-            policy_output_decoded, ref_output_decoded = self.generate_from_model_and_ref(self.model, target_batch)
+            policy_output_decoded, ref_output_decoded = self.generate_from_model_and_ref(
+                self.model, target_batch
+            )
 
             table = pd.DataFrame(
                 columns=["Prompt", "Policy", "Ref Model"],
                 data=[
                     [prompt, pol[len(prompt) :], ref[len(prompt) :]]
-                    for prompt, pol, ref in zip(target_batch["prompt"], policy_output_decoded, ref_output_decoded)
+                    for prompt, pol, ref in zip(
+                        target_batch["prompt"], policy_output_decoded, ref_output_decoded
+                    )
                 ],
             )
             if "wandb" in self.args.report_to:
@@ -1567,10 +1772,14 @@ class _UnslothBCOTrainer(Trainer):
         # accumulate average metrics from sums and lengths
         for split in ["chosen", "rejected"]:
             if f"count/{split}" in self._stored_metrics[train_eval]:
-                count_sum = torch.Tensor(self._stored_metrics[train_eval][f"count/{split}"]).sum().item()
+                count_sum = (
+                    torch.Tensor(self._stored_metrics[train_eval][f"count/{split}"]).sum().item()
+                )
                 for metric in ["rewards", "logps", "logits"]:
                     logs[f"{prefix}{metric}/{split}"] = (
-                        torch.Tensor(self._stored_metrics[train_eval][f"{metric}/{split}_sum"]).sum().item()
+                        torch.Tensor(self._stored_metrics[train_eval][f"{metric}/{split}_sum"])
+                        .sum()
+                        .item()
                         / count_sum
                     )
                     # delete obsolete metric
@@ -1578,7 +1787,9 @@ class _UnslothBCOTrainer(Trainer):
                 del self._stored_metrics[train_eval][f"count/{split}"]
         # calculate reward margin
         if f"{prefix}rewards/chosen" in logs and f"{prefix}rewards/rejected" in logs:
-            logs[f"{prefix}rewards/margins"] = logs[f"{prefix}rewards/chosen"] - logs[f"{prefix}rewards/rejected"]
+            logs[f"{prefix}rewards/margins"] = (
+                logs[f"{prefix}rewards/chosen"] - logs[f"{prefix}rewards/rejected"]
+            )
         # Add averaged stored metrics to logs
         for key, metrics in self._stored_metrics[train_eval].items():
             logs[f"{prefix}{key}"] = torch.Tensor(metrics).mean().item()
@@ -1609,7 +1820,9 @@ class _UnslothBCOTrainer(Trainer):
         if not self.is_world_process_zero():
             return
 
-        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(
+            self.model.config._name_or_path
+        ):
             base_model = self.model.config._name_or_path
         else:
             base_model = None
@@ -1621,13 +1834,15 @@ class _UnslothBCOTrainer(Trainer):
         if hasattr(self.model.config, "unsloth_version"):
             tags.append("unsloth")
 
-        citation = textwrap.dedent("""\
-        @article{jung2024binary,
-            title        = {{Binary Classifier Optimization for Large Language Model Alignment}},
-            author       = {Seungjae Jung and Gunsoo Han and Daniel Wontae Nam and Kyoung{-}Woon On},
+        citation = textwrap.dedent(
+            """\
+        @article{ethayarajh2024kto,
+            title        = {{KTO: Model Alignment as Prospect Theoretic Optimization}},
+            author       = {Kawin Ethayarajh and Winnie Xu and Niklas Muennighoff and Dan Jurafsky and Douwe Kiela},
             year         = 2024,
-            eprint       = {arXiv:2404.04656}
-        }""")
+            eprint       = {arXiv:2402.01306},
+        }"""
+        )
 
         model_card = generate_model_card(
             base_model=base_model,
@@ -1635,19 +1850,23 @@ class _UnslothBCOTrainer(Trainer):
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb.run.get_url()
+            if is_wandb_available() and wandb.run is not None
+            else None,
             comet_url=get_comet_experiment_url(),
-            trainer_name="BCO",
+            trainer_name="KTO",
             trainer_citation=citation,
-            paper_title="Binary Classifier Optimization for Large Language Model Alignment",
-            paper_id="2404.04656",
+            paper_title="KTO: Model Alignment as Prospect Theoretic Optimization",
+            paper_id="2402.01306",
         )
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
-class UnslothBCOTrainer(_UnslothBCOTrainer):
+
+
+class UnslothKTOTrainer(_UnslothKTOTrainer):
     """
-    
-    Initialize BCOTrainer from [BCO](https://huggingface.co/papers/2404.04656) paper.
+
+    Initialize KTOTrainer.
 
     Args:
         model (`transformers.PreTrainedModel`):
@@ -1655,7 +1874,7 @@ class UnslothBCOTrainer(_UnslothBCOTrainer):
         ref_model (`PreTrainedModelWrapper`):
             Hugging Face transformer model with a casual language modelling head. Used for implicit reward computation and loss. If no
             reference model is provided, the trainer will create a reference model with the same architecture as the model to be optimized.
-        args (`BCOConfig`):
+        args (`KTOConfig`):
             The arguments to use for training.
         train_dataset (`datasets.Dataset`):
             The dataset to use for training.
@@ -1685,140 +1904,184 @@ class UnslothBCOTrainer(_UnslothBCOTrainer):
             Name of the train target PEFT adapter, when using LoRA with multiple adapters.
         ref_adapter_name (`str`, defaults to `None`):
             Name of the reference PEFT adapter, when using LoRA with multiple adapters.
-    
+
     """
+
     def __init__(
         self,
-        model = None,
-        ref_model = None,
-        args = None,
-        train_dataset = None,
-        eval_dataset = None,
-        processing_class = None,
-        data_collator = None,
-        model_init = None,
-        callbacks = None,
-        preprocess_logits_for_metrics = None,
-        peft_config = None,
-        compute_metrics = None,
-        model_adapter_name = None,
-        ref_adapter_name = None,
-        embedding_func = None,
-        embedding_tokenizer = None,
-        **kwargs
+        model=None,
+        ref_model=None,
+        args=None,
+        train_dataset=None,
+        eval_dataset=None,
+        processing_class=None,
+        data_collator=None,
+        model_init=None,
+        callbacks=None,
+        preprocess_logits_for_metrics=None,
+        peft_config=None,
+        compute_metrics=None,
+        model_adapter_name=None,
+        ref_adapter_name=None,
+        **kwargs,
     ):
-        if args is None: args = UnslothBCOConfig()
-        use_bf16 = getattr(args, 'bf16', False)
-        use_fp16 = getattr(args, 'fp16', False)
+        if args is None:
+            args = UnslothKTOConfig()
+        use_bf16 = getattr(args, "bf16", False)
+        use_fp16 = getattr(args, "fp16", False)
         force_float32 = False
-        if os.environ.get('UNSLOTH_FORCE_FLOAT32', '0') == '1':
-            print('Unsloth: Switching to float32 training since model cannot work with float16')
+        if os.environ.get("UNSLOTH_FORCE_FLOAT32", "0") == "1":
+            print("Unsloth: Switching to float32 training since model cannot work with float16")
             force_float32 = True
-        mixed_precision_dtype = os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32')
-        dtype = getattr(model.config, 'torch_dtype', None)
-        if dtype is None: dtype = model.get_input_embeddings().dtype
+        mixed_precision_dtype = os.environ.get("UNSLOTH_MIXED_PRECISION", "float32")
+        dtype = getattr(model.config, "torch_dtype", None)
+        if dtype is None:
+            dtype = model.get_input_embeddings().dtype
         from unsloth_zoo.utils import _get_dtype
+
         dtype = _get_dtype(dtype)
         float16 = dtype == torch.float16
-        if not force_float32 and (float16 and use_bf16): raise TypeError('Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`')
-        if not force_float32 and (not float16 and use_fp16): raise TypeError('Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`')
+        if not force_float32 and (float16 and use_bf16):
+            raise TypeError(
+                "Unsloth: Model is in float16 precision but you want to use bfloat16 precision. Set fp16 to `True` and bf16 to `False`"
+            )
+        if not force_float32 and (not float16 and use_fp16):
+            raise TypeError(
+                "Unsloth: Model is in bfloat16 precision but you want to use float16 precision. Set fp16 to `False` and bf16 to `True`"
+            )
         if force_float32:
             args.fp16 = False
             args.bf16 = False
-            os.environ['ACCELERATE_MIXED_PRECISION'] = 'no'
-        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == 'float32':
+            os.environ["ACCELERATE_MIXED_PRECISION"] = "no"
+        elif (not use_bf16 and not use_fp16) and mixed_precision_dtype == "float32":
             args.fp16 = float16
             args.bf16 = not float16
-            os.environ['ACCELERATE_MIXED_PRECISION'] = 'fp16' if float16 else 'bf16'
-        if getattr(args, 'eval_dataset', None) is not None and getattr(args, 'eval_strategy', 'no') == 'no':
-            args.eval_strategy = 'steps'
-            if getattr(args, 'eval_steps', None) is None: args.eval_steps = 0.1
-        ga_steps = getattr(args, 'gradient_accumulation_steps', None)
+            os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16" if float16 else "bf16"
+        if (
+            getattr(args, "eval_dataset", None) is not None
+            and getattr(args, "eval_strategy", "no") == "no"
+        ):
+            args.eval_strategy = "steps"
+            if getattr(args, "eval_steps", None) is None:
+                args.eval_steps = 0.1
+        ga_steps = getattr(args, "gradient_accumulation_steps", None)
         if ga_steps is not None and ga_steps > 1:
             from transformers import __version__ as transformers_version
-            if Version(transformers_version) <= Version('4.45.2'):
-                print('**** Unsloth: Please use our fixed gradient_accumulation_steps by updating transformers, TRL and Unsloth!\n'
-                      '`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`')
-        if getattr(args, 'eval_strategy', 'no') != 'no':
-            eval_bsz = getattr(args, 'per_device_eval_batch_size', 8)
-            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz: args.per_device_eval_batch_size = args.per_device_train_batch_size
-            if getattr(args, 'eval_accumulation_steps', None) is None and ga_steps is not None: args.eval_accumulation_steps = ga_steps
-        fp16_full_eval = getattr(args, 'fp16_full_eval', False)
-        bf16_full_eval = getattr(args, 'bf16_full_eval', False)
-        if args.fp16 and bf16_full_eval: args.bf16_full_eval = False; args.fp16_full_eval = True
-        if args.bf16 and fp16_full_eval: args.bf16_full_eval = True; args.fp16_full_eval = False
+
+            if Version(transformers_version) <= Version("4.45.2"):
+                print(
+                    "**** Unsloth: Please use our fixed gradient_accumulation_steps by updating transformers, TRL and Unsloth!\n"
+                    "`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`"
+                )
+        if getattr(args, "eval_strategy", "no") != "no":
+            eval_bsz = getattr(args, "per_device_eval_batch_size", 8)
+            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz:
+                args.per_device_eval_batch_size = args.per_device_train_batch_size
+            if getattr(args, "eval_accumulation_steps", None) is None and ga_steps is not None:
+                args.eval_accumulation_steps = ga_steps
+        fp16_full_eval = getattr(args, "fp16_full_eval", False)
+        bf16_full_eval = getattr(args, "bf16_full_eval", False)
+        if args.fp16 and bf16_full_eval:
+            args.bf16_full_eval = False
+            args.fp16_full_eval = True
+        if args.bf16 and fp16_full_eval:
+            args.bf16_full_eval = True
+            args.fp16_full_eval = False
         if force_float32:
             args.bf16_full_eval = False
             args.fp16_full_eval = False
-        elif os.environ.get('UNSLOTH_MIXED_PRECISION', 'float32') == 'bfloat16':
+        elif os.environ.get("UNSLOTH_MIXED_PRECISION", "float32") == "bfloat16":
             args.bf16_full_eval = True
             args.fp16_full_eval = False
         elif not bf16_full_eval and not fp16_full_eval:
             args.bf16_full_eval = args.bf16
             args.fp16_full_eval = args.fp16
         _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
+        if locals().get("compute_metrics", None) is not None:
+            _output_logits = True
+        if locals().get("preprocess_logits_for_metrics", None) is not None:
+            _output_logits = True
         if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
-        if 'max_seq_length' not in locals() and not hasattr(args, 'max_seq_length'):
+            os.environ["UNSLOTH_RETURN_LOGITS"] = "1"
+        if "max_seq_length" not in locals() and not hasattr(args, "max_seq_length"):
             pass
         else:
-            model_max_seq_length = getattr(model, 'max_seq_length', None)
-            args_max_seq_length  = getattr(args,  'max_seq_length', None)
+            model_max_seq_length = getattr(model, "max_seq_length", None)
+            args_max_seq_length = getattr(args, "max_seq_length", None)
             if args_max_seq_length is None and model_max_seq_length is not None:
                 max_seq_length = model.max_seq_length
-                if hasattr(args, 'max_seq_length'): args.max_seq_length = max_seq_length
-        if model is not None and hasattr(model, 'for_training'):
+                if hasattr(args, "max_seq_length"):
+                    args.max_seq_length = max_seq_length
+        if model is not None and hasattr(model, "for_training"):
             model.for_training()
-        if 'tokenizer' in locals() and hasattr(tokenizer, 'padding_side'): tokenizer.padding_side = 'right'
-        if 'processing_class' in locals():
-            if hasattr(processing_class, 'padding_side'): processing_class.padding_side = 'right'
-            if hasattr(processing_class, 'tokenizer') and hasattr(processing_class.tokenizer, 'padding_side'): processing_class.tokenizer.padding_side = 'right'
-        __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
+        if "tokenizer" in locals() and hasattr(tokenizer, "padding_side"):
+            tokenizer.padding_side = "right"
+        if "processing_class" in locals():
+            if hasattr(processing_class, "padding_side"):
+                processing_class.padding_side = "right"
+            if hasattr(processing_class, "tokenizer") and hasattr(
+                processing_class.tokenizer, "padding_side"
+            ):
+                processing_class.tokenizer.padding_side = "right"
+        __tokenizer = processing_class if "processing_class" in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
+
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
-                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm = False)
-            elif isinstance(data_collator, DataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            if (
+                isinstance(data_collator, DataCollatorForSeq2Seq)
+                and "labels" not in train_dataset.column_names
+            ):
+                data_collator = DataCollatorForLanguageModeling(__tokenizer, mlm=False)
+            elif (
+                isinstance(data_collator, DataCollatorForLanguageModeling)
+                and "labels" in train_dataset.column_names
+            ):
                 data_collator = DataCollatorForSeq2Seq(__tokenizer)
         else:
-            if hasattr(args, 'remove_unused_columns'): args.remove_unused_columns = False
-            if hasattr(args, 'dataset_text_field'): args.dataset_text_field = ''
-            if hasattr(args, 'dataset_kwargs'): args.dataset_kwargs = {'skip_prepare_dataset': True}
+            if hasattr(args, "remove_unused_columns"):
+                args.remove_unused_columns = False
+            if hasattr(args, "dataset_text_field"):
+                args.dataset_text_field = ""
+            if hasattr(args, "dataset_kwargs"):
+                args.dataset_kwargs = {"skip_prepare_dataset": True}
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if not hasattr(__tokenizer, 'pad') and hasattr(__tokenizer, 'tokenizer'):
+            if not hasattr(__tokenizer, "pad") and hasattr(__tokenizer, "tokenizer"):
                 if isinstance(data_collator, DataCollatorForSeq2Seq):
                     data_collator = DataCollatorForSeq2Seq(__tokenizer.tokenizer)
                 else:
-                    data_collator = DataCollatorForLanguageModeling(__tokenizer.tokenizer, mlm = False)
+                    data_collator = DataCollatorForLanguageModeling(
+                        __tokenizer.tokenizer, mlm=False
+                    )
         other_metrics = []
-        
+
         from unsloth_zoo.logging_utils import PatchRLStatistics
-        PatchRLStatistics('bco_trainer', other_metrics)
-        
+
+        PatchRLStatistics("kto_trainer", other_metrics)
+
         super().__init__(
-            model = model,
-            ref_model = ref_model,
-            args = args,
-            train_dataset = train_dataset,
-            eval_dataset = eval_dataset,
-            processing_class = processing_class,
-            data_collator = data_collator,
-            model_init = model_init,
-            callbacks = callbacks,
-            preprocess_logits_for_metrics = preprocess_logits_for_metrics,
-            peft_config = peft_config,
-            compute_metrics = compute_metrics,
-            model_adapter_name = model_adapter_name,
-            ref_adapter_name = ref_adapter_name,
-            embedding_func = embedding_func,
-            embedding_tokenizer = embedding_tokenizer,**kwargs)
-        if hasattr(self, 'neftune_hook_handle'):
+            model=model,
+            ref_model=ref_model,
+            args=args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=processing_class,
+            data_collator=data_collator,
+            model_init=model_init,
+            callbacks=callbacks,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            peft_config=peft_config,
+            compute_metrics=compute_metrics,
+            model_adapter_name=model_adapter_name,
+            ref_adapter_name=ref_adapter_name,
+            **kwargs,
+        )
+        if hasattr(self, "neftune_hook_handle"):
             self.neftune_hook_handle.remove()
-            if hasattr(self, 'neftune_hook_handle'): del self.neftune_hook_handle
-        if getattr(args, 'neftune_noise_alpha', None) is not None:
+            if hasattr(self, "neftune_hook_handle"):
+                del self.neftune_hook_handle
+        if getattr(args, "neftune_noise_alpha", None) is not None:
             model.get_input_embeddings().neftune_noise_alpha = self.neftune_noise_alpha
         pass
-        
+
+
 pass

@@ -1,16 +1,20 @@
 import os
 import time
-import wandb
-import torch
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+
+import torch
 from transformers import TrainerCallback
+
+import wandb
+
 from .auth import setup_authentication
+
 
 class WandBConfig:
     """Configuration for W&B logging"""
-    
+
     def __init__(
         self,
         project_name: str,
@@ -31,18 +35,19 @@ class WandBConfig:
         self.log_memory = log_memory
         self.log_gradients = log_gradients
 
+
 class WandBLogger:
     """Logger for W&B integration"""
-    
+
     def __init__(self, config: WandBConfig):
         # Setup authentication
         setup_authentication()
-        
+
         self.config = config
         self.run = None
         self.train_start_time = time.time()
         self.step_start_time = time.time()
-        
+
     def setup(self):
         """Setup W&B run"""
         self.run = wandb.init(
@@ -53,58 +58,63 @@ class WandBLogger:
             notes=self.config.notes,
             config=self.config.config,
         )
-        
+
     def init_run(self, model_name: str):
         """Initialize a new W&B run"""
         # Set run name if not provided
         if not self.config.run_name:
             self.config.run_name = f"{model_name}_{wandb.util.generate_id()}"
-            
+
         # Initialize run
         self.setup()
-        
+
     def log_model_info(self, model):
         """Log model information to W&B"""
         if not self.run:
             raise RuntimeError("W&B run not initialized. Call init_run first.")
-            
+
         # Log model parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        
-        self.run.summary.update({
-            "total_parameters": total_params,
-            "trainable_parameters": trainable_params,
-            "frozen_parameters": total_params - trainable_params,
-        })
-        
+
+        self.run.summary.update(
+            {
+                "total_parameters": total_params,
+                "trainable_parameters": trainable_params,
+                "frozen_parameters": total_params - trainable_params,
+            }
+        )
+
     def finish_run(self):
         """Finish the W&B run"""
         if self.run:
             self.run.finish()
             self.run = None
 
+
 class WandBCallback(TrainerCallback):
     """Callback for logging training metrics to W&B"""
-    
+
     def __init__(self, logger: WandBLogger):
         self.logger = logger
-        
+
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         """Log model info at start of training"""
         if model:
             self.logger.log_model_info(model)
-            
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         """Log metrics during training"""
         if logs:
             wandb.log(logs)
-            
+
     def on_train_end(self, args, state, control, **kwargs):
         """Finish logging when training ends"""
         self.logger.finish_run()
 
-    def log_training_metrics(self, logs: Dict[str, Any], state: Any, model: Optional[torch.nn.Module] = None):
+    def log_training_metrics(
+        self, logs: Dict[str, Any], state: Any, model: Optional[torch.nn.Module] = None
+    ):
         """Log training metrics including gradients and memory"""
         if not self.config.log_training or not self.run:
             return
@@ -112,7 +122,7 @@ class WandBCallback(TrainerCallback):
         # Log basic training metrics
         if "loss" in logs:
             logs["training/loss"] = logs["loss"]
-        
+
         # Log learning rate
         if hasattr(state, "learning_rate"):
             logs["training/learning_rate"] = state.learning_rate
@@ -122,16 +132,16 @@ class WandBCallback(TrainerCallback):
             grad_norm = 0.0
             param_norm = 0.0
             total_params = 0
-            
+
             for param in model.parameters():
                 if param.grad is not None:
                     grad_norm += param.grad.data.norm(2).item() ** 2
                     param_norm += param.data.norm(2).item() ** 2
                     total_params += 1
-            
+
             if total_params > 0:
-                grad_norm = grad_norm ** 0.5
-                param_norm = param_norm ** 0.5
+                grad_norm = grad_norm**0.5
+                param_norm = param_norm**0.5
                 logs["training/gradient_norm"] = grad_norm
                 logs["training/parameter_norm"] = param_norm
                 logs["training/grad_param_ratio"] = grad_norm / param_norm if param_norm > 0 else 0
@@ -190,4 +200,4 @@ class WandBCallback(TrainerCallback):
                 ex["is_correct"],
             )
 
-        wandb.log({f"examples/val_{step}": example_table}) 
+        wandb.log({f"examples/val_{step}": example_table})

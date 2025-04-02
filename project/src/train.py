@@ -1,17 +1,19 @@
 import os
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model
 from datasets import load_from_disk
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 
-from .model.qwen_handler import QwenModelHandler, ModelSource
 from .data.prompt_creator import PromptCreator
+from .model.qwen_handler import ModelSource, QwenModelHandler
+from .training.callbacks import EarlyStoppingCallback, ValidationCallback
 from .training.trainer import QwenTrainer
-from .training.callbacks import ValidationCallback, EarlyStoppingCallback
-from .utils.wandb_logger import WandBLogger, WandBConfig, WandBCallback
 from .utils.auth import setup_authentication
+from .utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
+
 
 def setup_wandb_logging(
     project_name: str,
@@ -30,6 +32,7 @@ def setup_wandb_logging(
     logger.setup()
     return logger
 
+
 def setup_model_and_trainer(
     model_name: str,
     output_dir: str,
@@ -47,7 +50,7 @@ def setup_model_and_trainer(
         quantization="4bit",  # Default to 4-bit quantization
         device_map="auto",
     )
-    
+
     # Create prompt creator and trainer
     prompt_creator = PromptCreator(prompt_type=PromptCreator.TEACHER_REASONED)
     trainer = QwenTrainer(
@@ -63,8 +66,9 @@ def setup_model_and_trainer(
             task_type="CAUSAL_LM",
         ),
     )
-    
+
     return model_handler, trainer
+
 
 def train(
     model_name: str,
@@ -81,36 +85,36 @@ def train(
 ) -> dict:
     """
     Train a model with comprehensive validation, checkpointing, and monitoring capabilities.
-    
+
     This function provides a complete training pipeline with the following features:
     1. Flexible Validation:
        - Configure validation frequency with 'validation_strategy'
        - Options: "epoch" (validate after each epoch), "steps" (validate every N steps), "no" (no validation)
        - For steps-based validation, use TrainingArguments.eval_steps to set frequency
-    
+
     2. Checkpoint Management:
        - 'checkpoint_strategy' determines how checkpoints are saved:
          * "best": Save only the best performing checkpoint based on validation metrics
          * "last": Save only the final checkpoint
          * "all": Save both best and last checkpoints
        - Automatically loads the best checkpoint after training if load_best_model_at_end=True
-    
+
     3. HuggingFace Hub Integration:
        - Automatically pushes checkpoints to Hub when improvements are detected
        - Controlled through model_handler's hub_model_id and hub_token
        - Set hub_model_id=None to disable pushing to Hub
-    
+
     4. Early Stopping:
        - Monitors validation metrics and stops training if no improvement
        - Configure patience through EarlyStoppingCallback
        - Default patience is 3 validations without improvement
-    
+
     5. Metric Monitoring:
        - Tracks and logs multiple metrics during training
        - Configurable through TrainingArguments.metric_for_best_model
        - Supports both minimization (e.g., loss) and maximization (e.g., accuracy) metrics
        - Set greater_is_better in TrainingArguments to specify metric direction
-    
+
     Args:
         model_name (str): Name/path of the model to train (from HuggingFace or Unsloth)
         train_path (str): Path to the training dataset directory
@@ -129,13 +133,13 @@ def train(
         train_on_response_only (bool): Whether to train only on assistant responses
         verbose (bool): Whether to print detailed training information
         model_source (str): Source of the model (ModelSource.HUGGINGFACE or ModelSource.UNSLOTH)
-    
+
     Returns:
         dict: Training results containing:
             - training_stats: Dictionary of training metrics
             - best_val_metric: Best validation metric achieved
             - best_checkpoint_path: Path to the best checkpoint
-    
+
     Examples:
         # Basic training with default settings
         results = train(
@@ -144,7 +148,7 @@ def train(
             val_path="./data/val",
             output_dir="./output"
         )
-        
+
         # Training with custom validation and early stopping
         results = train(
             model_name="Qwen/Qwen1.5-7B",
@@ -153,14 +157,14 @@ def train(
             checkpoint_strategy="all",    # Save all checkpoints
             verbose=True
         )
-        
+
         # Training with Unsloth optimization
         results = train(
             model_name="unsloth/Qwen2.5-7B",
             train_path="./data/train",
             model_source=ModelSource.UNSLOTH
         )
-    
+
     Raises:
         ValueError: If input paths don't exist or strategies are invalid
         RuntimeError: If model preparation or training fails
@@ -176,14 +180,14 @@ def train(
         raise ValueError("Invalid checkpoint strategy")
     if model_source not in [ModelSource.HUGGINGFACE, ModelSource.UNSLOTH]:
         raise ValueError("Invalid model source")
-        
+
     # Setup authentication
     setup_authentication()
-    
+
     # Load datasets
     train_dataset = load_from_disk(train_path)
     val_dataset = load_from_disk(val_path) if val_path else None
-    
+
     # Setup model and trainer
     model_handler, trainer = setup_model_and_trainer(
         model_name=model_name,
@@ -193,19 +197,19 @@ def train(
         verbose=verbose,
         model_source=model_source,
     )
-    
+
     # Setup callbacks
     callbacks = []
-    
+
     # Add validation callback if needed
     if validation_strategy != "no" and val_dataset:
         validation_callback = ValidationCallback(trainer_instance=trainer)
         callbacks.append(validation_callback)
-        
+
     # Add early stopping callback
     early_stopping_callback = EarlyStoppingCallback(patience=3)
     callbacks.append(early_stopping_callback)
-    
+
     # Add wandb callback
     wandb_logger = setup_wandb_logging(
         project_name=f"train_{model_name}",
@@ -214,7 +218,7 @@ def train(
     )
     wandb_callback = WandBCallback(logger=wandb_logger)
     callbacks.append(wandb_callback)
-    
+
     # Train model
     if train_on_response_only:
         trainer = train_on_responses_only(
@@ -222,7 +226,7 @@ def train(
             instruction_part="<|im_start|>user\n",
             response_part="<|im_start|>assistant\n",
         )
-        
+
     results = trainer.train(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
@@ -236,7 +240,7 @@ def train(
         greater_is_better=False,
         callbacks=callbacks,
     )
-    
+
     # Save checkpoints based on strategy
     if checkpoint_strategy in ["best", "all"]:
         trainer.save_checkpoint(
@@ -249,19 +253,33 @@ def train(
             os.path.join(output_dir, "checkpoints"),
             is_best=False,
         )
-        
+
     return results
 
+
 if __name__ == "__main__":
-    # Example usage
-    results = train(
+    # Example usage with validation dataset
+    results_with_val = train(
         model_name="Qwen/Qwen1.5-7B",  # or "unsloth/Qwen2.5-7B" for Unsloth model
         train_path="./data/train_dataset",
-        val_path="./data/val_dataset",
+        val_path="./data/val_dataset",  # Validation dataset provided
         output_dir="./model_output",
         num_train_epochs=2,
         per_device_train_batch_size=16,
         verbose=True,
         model_source=ModelSource.HUGGINGFACE,  # or ModelSource.UNSLOTH
     )
-    print(results) 
+    print("Training results with validation:", results_with_val)
+
+    # Example usage without validation dataset
+    results_without_val = train(
+        model_name="Qwen/Qwen1.5-7B",
+        train_path="./data/train_dataset",
+        # val_path not provided - will train without validation
+        output_dir="./model_output_no_val",
+        num_train_epochs=2,
+        per_device_train_batch_size=16,
+        verbose=True,
+        model_source=ModelSource.HUGGINGFACE,
+    )
+    print("Training results without validation:", results_without_val)

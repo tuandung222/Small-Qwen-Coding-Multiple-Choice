@@ -39,12 +39,12 @@ The project provides several key classes for working with the model:
 ```python
 class QwenModelHandler:
     """Handler for Qwen models with inference and saving capabilities using Unsloth"""
-    
-    def __init__(self, model_name="unsloth/Qwen2.5-7B", max_seq_length=768, 
+
+    def __init__(self, model_name="unsloth/Qwen2.5-7B", max_seq_length=768,
                  quantization=None, device_map="auto", cache_dir=None):
         """
         Initialize model and tokenizer using Unsloth
-        
+
         Args:
             model_name: Name or path of the model (preferably an unsloth model)
             max_seq_length: Maximum sequence length for the model
@@ -64,7 +64,7 @@ This class handles the core model operations:
 ```python
 class PromptCreator:
     """Creates and formats prompts for multiple choice questions"""
-    
+
     # Prompt types
     BASIC = "basic"  # Simple answer-only format
     YAML_REASONING = "yaml"  # YAML formatted reasoning
@@ -80,7 +80,7 @@ This class manages prompt creation with three modes:
 ```python
 class ResponseParser:
     """Parser for model responses with support for different formats"""
-    
+
     # Parser modes
     BASIC = "basic"  # Extract single letter answer
     YAML = "yaml"    # Parse YAML formatted response with reasoning
@@ -95,11 +95,11 @@ This class handles response parsing:
 ```python
 class MultipleChoiceTester:
     """Framework for testing Qwen models on multiple choice questions"""
-    
+
     def __init__(self, model_handler, prompt_creator=None):
         """
         Initialize with model handler and prompt configuration
-        
+
         Args:
             model_handler: The QwenModelHandler instance
             prompt_creator: Optional PromptCreator instance
@@ -122,32 +122,32 @@ This class provides a complete testing framework:
 ```python
 class QwenModelHandler:
     """Handler for Qwen models with inference and saving capabilities using Unsloth"""
-    
-    def __init__(self, model_name="unsloth/Qwen2.5-7B", max_seq_length=768, 
+
+    def __init__(self, model_name="unsloth/Qwen2.5-7B", max_seq_length=768,
                  quantization=None, device_map="auto", cache_dir=None):
         self.model_name = model_name
         self.max_seq_length = max_seq_length
         self.device_map = device_map
         self.quantization = quantization
         self.cache_dir = cache_dir
-        
+
         # Convert quantization parameter to load_in_4bit parameter for Unsloth
         self.load_in_4bit = quantization == "4bit"
-        
+
         # Load tokenizer and model
         self.tokenizer, self.model = self._load_model()
         self.response_parser = ResponseParser()
-        
+
     def _load_model(self):
         """Load model and tokenizer with Unsloth for optimization"""
         from unsloth import FastLanguageModel
         import torch
-        
+
         print(f"Loading {self.model_name} with Unsloth, max_seq_length={self.max_seq_length}")
-        
+
         # Set dtype based on hardware
         dtype = None  # None for auto detection
-        
+
         # Load model and tokenizer with Unsloth
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.model_name,
@@ -156,38 +156,38 @@ class QwenModelHandler:
             load_in_4bit=self.load_in_4bit,
             cache_dir=self.cache_dir,
         )
-        
+
         return tokenizer, model
-      
+
     def generate_with_streaming(self, prompt, temperature=0.7, max_tokens=1024, stream=True):
         """Generate completion with optional streaming using Unsloth's optimized inference"""
         # Enable faster inference
         from unsloth import FastLanguageModel
         FastLanguageModel.for_inference(self.model)
-        
+
         # Format as chat
         messages = [{"role": "user", "content": prompt}]
         chat_text = self.tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
+            messages,
+            tokenize=False,
             add_generation_prompt=True
         )
-        
+
         # Tokenize input
         model_inputs = self.tokenizer([chat_text], return_tensors="pt").to(self.model.device)
-        
+
         # Generate with streaming if requested
         if stream:
             from transformers import TextIteratorStreamer
             import threading
-            
+
             # Set up streamer
             streamer = TextIteratorStreamer(
                 self.tokenizer,
                 skip_prompt=True,
                 skip_special_tokens=True
             )
-            
+
             # Start generation in a thread
             generation_kwargs = {
                 "input_ids": model_inputs.input_ids,
@@ -199,10 +199,10 @@ class QwenModelHandler:
                 "use_cache": True,
                 "min_p": 0.1 if temperature > 0.0 else None,
             }
-            
+
             thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
             thread.start()
-            
+
             return streamer
         else:
             # Generate without streaming
@@ -215,48 +215,48 @@ class QwenModelHandler:
                 use_cache=True,
                 min_p=0.1 if temperature > 0.0 else None,
             )
-            
+
             # Decode the generated text
             generated_text = self.tokenizer.decode(
                 generated_ids[0][model_inputs.input_ids.shape[1]:],
                 skip_special_tokens=True
             )
-            
+
             return generated_text
-            
+
     def calculate_perplexity(self, prompt, answer, temperature=0.0):
         """Calculate perplexity for a prompt and answer pair"""
         import torch
-        
+
         # Format chat for perplexity calculation
         messages = [
             {"role": "user", "content": prompt},
             {"role": "assistant", "content": answer}
         ]
         chat_text = self.tokenizer.apply_chat_template(
-            messages, 
+            messages,
             tokenize=False
         )
-        
+
         # Tokenize the text
         encodings = self.tokenizer(chat_text, return_tensors="pt").to(self.model.device)
-        
+
         # Calculate loss
         with torch.no_grad():
             outputs = self.model(**encodings, labels=encodings.input_ids)
-            
+
         # Get loss and calculate perplexity
         neg_log_likelihood = outputs.loss.item()
         perplexity = torch.exp(torch.tensor(neg_log_likelihood)).item()
-        
+
         return perplexity
-      
+
     def save_model(self, output_dir, save_method="lora"):
         """Save model to disk using Unsloth's optimized methods"""
         import os
-        
+
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Use Unsloth's saving methods
         if save_method == "lora":
             self.model.save_pretrained(output_dir)
@@ -269,10 +269,10 @@ class QwenModelHandler:
             self.model.save_pretrained_gguf(output_dir, self.tokenizer, quantization_method="q4_k_m")
         else:
             raise ValueError(f"Unknown save method: {save_method}")
-            
+
         print(f"Model saved to {output_dir} using method {save_method}")
         return output_dir
-        
+
     def push_to_hub(self, repo_id, token=None, save_method="lora", private=False):
         """Push model to Hugging Face Hub using Unsloth's optimized methods"""
         if save_method == "lora":
@@ -283,14 +283,14 @@ class QwenModelHandler:
             self.model.push_to_hub_merged(repo_id, self.tokenizer, save_method="merged_4bit", token=token)
         elif save_method == "gguf":
             self.model.push_to_hub_gguf(
-                repo_id, 
-                self.tokenizer, 
-                quantization_method=["q4_k_m", "q5_k_m"], 
+                repo_id,
+                self.tokenizer,
+                quantization_method=["q4_k_m", "q5_k_m"],
                 token=token
             )
         else:
             raise ValueError(f"Unknown save method: {save_method}")
-        
+
         print(f"Model successfully pushed to: https://huggingface.co/{repo_id}")
         return f"https://huggingface.co/{repo_id}"
 ```
@@ -299,7 +299,7 @@ class QwenModelHandler:
 ```python
 class PromptCreator:
     """Creates and formats prompts for multiple choice questions"""
-    
+
     # Prompt types
     BASIC = "basic"  # Simple answer-only format
     YAML_REASONING = "yaml"  # YAML formatted reasoning
@@ -424,7 +424,7 @@ answer: <single letter A through {max_letter}>
             pass
         self.prompt_type = prompt_type
         return self
-        
+
     def is_teacher_mode(self):
         """Check if we're using teacher mode"""
         return self.original_type == self.TEACHER_REASONED
@@ -434,25 +434,25 @@ answer: <single letter A through {max_letter}>
 ```python
 class ResponseParser:
     """Parser for model responses with support for different formats"""
-    
+
     # Parser modes
     BASIC = "basic"  # Extract single letter answer
     YAML = "yaml"    # Parse YAML formatted response with reasoning
-    
+
     def __init__(self, parser_mode=BASIC):
         self.parser_mode = parser_mode
-    
+
     def parse(self, response_text):
         """Parse the model's response according to the current mode"""
         if self.parser_mode == self.YAML:
             return self._parse_yaml_response(response_text)
         else:
             return self._parse_basic_response(response_text)
-    
+
     def _parse_basic_response(self, response_text):
         """Parse basic response looking for a letter answer"""
         import re
-        
+
         # Try to extract a single letter answer (A-Z)
         answer_match = re.search(r"(?:^|\s)([A-Z])(?:\s|$|\.)", response_text)
         if answer_match:
@@ -463,17 +463,17 @@ class ResponseParser:
                 answer = response_text[0].upper()
             else:
                 answer = None
-        
+
         # For basic mode, we don't extract detailed reasoning
         reasoning = ""
-        
+
         return answer, reasoning
-    
+
     def _parse_yaml_response(self, response_text):
         """Parse YAML formatted response extracting answer and reasoning"""
         import re
         import yaml
-        
+
         # First try to find answer in YAML format
         yaml_match = re.search(r"answer:\s*([A-Z])", response_text)
         if yaml_match:
@@ -487,14 +487,14 @@ class ResponseParser:
                 answer = response_text[0].upper()
             else:
                 answer = None
-        
+
         # Try to parse reasoning from YAML format
         reasoning = ""
         if "reasoning:" in response_text:
             yaml_content = yaml.safe_load("---\n" + response_text)
             if isinstance(yaml_content, dict) and "reasoning" in yaml_content:
                 reasoning = yaml_content["reasoning"]
-                
+
                 # Add other YAML fields if available
                 if "understanding" in yaml_content:
                     reasoning = f"Understanding: {yaml_content['understanding']}\n\n{reasoning}"
@@ -503,14 +503,14 @@ class ResponseParser:
         else:
             # Use the full response as reasoning if not in YAML format
             reasoning = response_text
-        
+
         return answer, reasoning
-    
+
     def set_parser_mode(self, parser_mode):
         """Set the parser mode"""
         self.parser_mode = parser_mode
         return self
-    
+
     @classmethod
     def from_prompt_type(cls, prompt_type):
         """Create a parser instance with mode matching the prompt type"""
@@ -538,10 +538,10 @@ class MultipleChoiceTester:
             original_prompt_type = self.prompt_creator.prompt_type
             self.prompt_creator.set_prompt_type(prompt_type)
             self.response_parser = ResponseParser.from_prompt_type(prompt_type)
-        
+
         # Prepare data
         question = example["question"]
-        
+
         # Handle different formats of choices
         if isinstance(example["choices"], list):
             choices = example["choices"]
@@ -550,13 +550,13 @@ class MultipleChoiceTester:
             choices = ast.literal_eval(example["choices"]) if "[" in example["choices"] else example["choices"].split(",")
         else:
             choices = str(example["choices"]).split(",")
-        
+
         # Generate the prompt using prompt creator
         prompt = self.prompt_creator.create_inference_prompt(question, choices)
-        
+
         # Start timing
         start_time = time.time()
-        
+
         if stream:
             # Use streaming generation
             streamer = self.model_handler.generate_with_streaming(
@@ -565,7 +565,7 @@ class MultipleChoiceTester:
                 max_tokens=max_tokens,
                 stream=True
             )
-            
+
             # Collect output from streamer
             raw_response = ""
             print("Model response:")
@@ -581,12 +581,12 @@ class MultipleChoiceTester:
                 max_tokens=max_tokens,
                 stream=False
             )
-        
+
         response_time = time.time() - start_time
-        
+
         # Parse the response using the response parser
         predicted_answer, reasoning = self.response_parser.parse(raw_response)
-        
+
         # Prepare results
         result = {
             "question": question,
@@ -597,27 +597,27 @@ class MultipleChoiceTester:
             "raw_response": raw_response,
             "prompt_type": self.prompt_creator.prompt_type,
         }
-        
+
         # Add task_id if available
         if "task_id" in example:
             result["task_id"] = example["task_id"]
-            
+
         # Calculate metrics if label is provided
         if "answer" in example:
             label = example["answer"]
             result["correct_answer"] = label
             result["is_correct"] = predicted_answer == label
-            
+
             # Calculate perplexity if requested
             if hasattr(self.model_handler, "calculate_perplexity"):
                 perplexity = self.model_handler.calculate_perplexity(prompt, raw_response)
                 result["perplexity"] = perplexity
-        
+
         # Restore original prompt type if it was overridden
         if original_prompt_type is not None:
             self.prompt_creator.set_prompt_type(original_prompt_type)
             self.response_parser = ResponseParser.from_prompt_type(original_prompt_type)
-            
+
         return result
 
     def infer_batch(self, examples, temperature=0.7, max_tokens=1024, prompt_type=None, batch_size=4):
@@ -628,15 +628,15 @@ class MultipleChoiceTester:
             original_prompt_type = self.prompt_creator.prompt_type
             self.prompt_creator.set_prompt_type(prompt_type)
             self.response_parser = ResponseParser.from_prompt_type(prompt_type)
-        
+
         # Prepare all prompts
         prompts = []
         metadata = []
-        
+
         for i, example in enumerate(examples):
             # Extract data
             question = example["question"]
-            
+
             # Handle different formats of choices
             if isinstance(example["choices"], list):
                 choices = example["choices"]
@@ -645,41 +645,41 @@ class MultipleChoiceTester:
                 choices = ast.literal_eval(example["choices"]) if "[" in example["choices"] else example["choices"].split(",")
             else:
                 choices = str(example["choices"]).split(",")
-            
+
             # Generate the prompt using prompt creator
             prompt = self.prompt_creator.create_inference_prompt(question, choices)
             prompts.append(prompt)
-            
+
             # Store metadata for later
             meta = {
                 "question": question,
                 "choices": choices,
                 "index": i,
             }
-            
+
             # Add label if available
             if "answer" in example:
                 meta["label"] = example["answer"]
-                
+
             if "task_id" in example:
                 meta["task_id"] = example["task_id"]
-            
+
             metadata.append(meta)
-        
+
         # Process in batches
         results = []
         correct_count = 0
         total_count = 0
         perplexities = []
-        
+
         for i in range(0, len(prompts), batch_size):
             batch_prompts = prompts[i:i+batch_size]
             batch_meta = metadata[i:i+batch_size]
-            
+
             # Process batch
             start_time = time.time()
             batch_responses = []
-            
+
             for prompt in batch_prompts:
                 response = self.model_handler.generate_with_streaming(
                     prompt=prompt,
@@ -688,14 +688,14 @@ class MultipleChoiceTester:
                     stream=False
                 )
                 batch_responses.append(response)
-            
+
             batch_time = time.time() - start_time
-            
+
             # Process each response in the batch
             for j, (response, meta) in enumerate(zip(batch_responses, batch_meta)):
                 # Parse response
                 predicted_answer, reasoning = self.response_parser.parse(response)
-                
+
                 # Create result
                 result = {
                     "question": meta["question"],
@@ -706,51 +706,51 @@ class MultipleChoiceTester:
                     "prompt_type": self.prompt_creator.prompt_type,
                     "response_time": batch_time / len(batch_prompts),
                 }
-                
+
                 # Add task_id if available
                 if "task_id" in meta:
                     result["task_id"] = meta["task_id"]
-                
+
                 # Add metrics if label available
                 if "label" in meta:
                     label = meta["label"]
                     result["correct_answer"] = label
                     result["is_correct"] = predicted_answer == label
-                    
+
                     # Update counts for accuracy
                     total_count += 1
                     if result["is_correct"]:
                         correct_count += 1
-                        
+
                     # Calculate perplexity if possible
                     if hasattr(self.model_handler, "calculate_perplexity"):
                         prompt = batch_prompts[j]
                         perplexity = self.model_handler.calculate_perplexity(prompt, response)
                         result["perplexity"] = perplexity
                         perplexities.append(perplexity)
-                        
+
                 results.append(result)
-        
+
         # Calculate aggregate metrics
         summary_metrics = {}
         if total_count > 0:
             summary_metrics["accuracy"] = correct_count / total_count
             summary_metrics["correct_count"] = correct_count
             summary_metrics["total_count"] = total_count
-            
+
             if perplexities:
                 summary_metrics["avg_perplexity"] = sum(perplexities) / len(perplexities)
                 summary_metrics["min_perplexity"] = min(perplexities)
                 summary_metrics["max_perplexity"] = max(perplexities)
-        
+
         # Restore original prompt type if it was overridden
         if original_prompt_type is not None:
             self.prompt_creator.set_prompt_type(original_prompt_type)
             self.response_parser = ResponseParser.from_prompt_type(original_prompt_type)
-            
+
         return results, summary_metrics
 
-    def evaluate_dataset(self, dataset, temperature=0.7, max_tokens=1024, num_examples=None, 
+    def evaluate_dataset(self, dataset, temperature=0.7, max_tokens=1024, num_examples=None,
                         verbose=True, prompt_type=None, batch_size=4, log_to_wandb=False):
         """Inference on a whole dataset with metrics calculation"""
         # Allow overriding the prompt type for this evaluation
@@ -758,7 +758,7 @@ class MultipleChoiceTester:
         if prompt_type is not None:
             self.prompt_creator.set_prompt_type(prompt_type)
             self.response_parser = ResponseParser.from_prompt_type(prompt_type)
-            
+
         # Select subset if specified
         if num_examples is not None:
             dataset = dataset.select(range(min(num_examples, len(dataset))))
@@ -767,15 +767,15 @@ class MultipleChoiceTester:
         correct_count = 0
         total_count = 0
         perplexities = []
-        
+
         # Process examples in batches
         for i in range(0, len(dataset), batch_size):
             batch_examples = dataset[i:i+batch_size]
-            
+
             if verbose:
                 batch_desc = f"Batch {i//batch_size + 1}/{(len(dataset) + batch_size - 1) // batch_size}"
                 print(f"\nProcessing {batch_desc} with {len(batch_examples)} examples...")
-            
+
             # Infer batch
             batch_results, batch_metrics = self.infer_batch(
                 examples=batch_examples,
@@ -783,34 +783,34 @@ class MultipleChoiceTester:
                 max_tokens=max_tokens,
                 batch_size=batch_size
             )
-            
+
             # Update metrics
             results.extend(batch_results)
             if "correct_count" in batch_metrics:
                 correct_count += batch_metrics["correct_count"]
                 total_count += batch_metrics["total_count"]
-                
+
                 if verbose:
                     batch_accuracy = batch_metrics["accuracy"]
                     overall_accuracy = correct_count / total_count
                     print(f"Batch accuracy: {batch_accuracy:.2%}, Overall: {overall_accuracy:.2%} ({correct_count}/{total_count})")
-                    
+
             # Collect perplexities
             if "avg_perplexity" in batch_metrics:
                 for result in batch_results:
                     if "perplexity" in result:
                         perplexities.append(result["perplexity"])
-                        
+
         # Calculate final accuracy
         accuracy = correct_count / total_count if total_count > 0 else 0.0
-        
+
         if verbose:
             prompt_type_str = self.prompt_creator.prompt_type
             print(f"\nFinal accuracy with {prompt_type_str} prompts: {accuracy:.2%} ({correct_count}/{total_count})")
             if perplexities:
                 avg_perplexity = sum(perplexities) / len(perplexities)
                 print(f"Average perplexity: {avg_perplexity:.4f}")
-        
+
         # Prepare comprehensive summary
         summary = {
             "accuracy": accuracy,
@@ -819,13 +819,13 @@ class MultipleChoiceTester:
             "prompt_type": self.prompt_creator.prompt_type,
             "results": results,
         }
-        
+
         # Add perplexity metrics if available
         if perplexities:
             summary["avg_perplexity"] = sum(perplexities) / len(perplexities)
             summary["min_perplexity"] = min(perplexities)
             summary["max_perplexity"] = max(perplexities)
-            
+
         # Log results to wandb if requested
         if log_to_wandb and wandb.run is not None:
             metrics = {
@@ -837,14 +837,14 @@ class MultipleChoiceTester:
                 metrics["test/avg_perplexity"] = summary["avg_perplexity"]
                 metrics["test/min_perplexity"] = summary["min_perplexity"]
                 metrics["test/max_perplexity"] = summary["max_perplexity"]
-            
+
             wandb.log(metrics)
-            
+
             # Create a table of results for visualization if task_id exists
             if "task_id" in dataset.features:
                 columns = ["task_id", "question", "correct_answer", "predicted_answer", "is_correct"]
                 table = wandb.Table(columns=columns)
-                
+
                 for res in results[:min(100, len(results))]:
                     table.add_data(
                         res.get("task_id", "unknown"),
@@ -853,13 +853,13 @@ class MultipleChoiceTester:
                         res.get("predicted_answer", ""),
                         res.get("is_correct", False)
                     )
-                
+
                 wandb.log({"test_samples": table})
-        
+
         # Restore original prompt type
         self.prompt_creator.set_prompt_type(original_prompt_type)
         self.response_parser = ResponseParser.from_prompt_type(original_prompt_type)
-            
+
         return summary
 
     def save_results(self, results, output_dir="./results"):
@@ -1151,12 +1151,12 @@ def stream_with_progress(streamer):
     """Stream with progress tracking"""
     start_time = time.time()
     tokens_generated = 0
-    
+
     for chunk in streamer:
         tokens_generated += len(chunk.split())
         elapsed = time.time() - start_time
         tokens_per_second = tokens_generated / elapsed if elapsed > 0 else 0
-        
+
         yield {
             'chunk': chunk,
             'tokens': tokens_generated,

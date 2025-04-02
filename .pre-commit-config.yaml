@@ -1,0 +1,36 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+    -   id: trailing-whitespace  # Removes trailing whitespace
+    -   id: end-of-file-fixer   # Ensures files end with a newline
+    -   id: check-yaml          # Validates yaml files
+    -   id: check-json          # Validates json files
+    -   id: check-added-large-files  # Prevents giant files from being committed
+    -   id: check-case-conflict  # Checks for files that would conflict in case-insensitive filesystems
+    -   id: check-merge-conflict  # Checks for files that contain merge conflict strings
+    -   id: debug-statements  # Checks for debugger imports and py37+ `breakpoint()` calls
+    -   id: detect-private-key  # Detects the presence of private keys
+
+-   repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+    -   id: black
+        language_version: python3
+        args: [--line-length=100]  # Matches our project style
+        exclude: |
+            (?x)^(
+                .*unsloth_compiled_cache/.*|
+                .*full\.py$
+            )
+
+-   repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+    -   id: isort
+        args: ["--profile", "black", "--filter-files"]
+        exclude: |
+            (?x)^(
+                .*unsloth_compiled_cache/.*|
+                .*full\.py$
+            )
