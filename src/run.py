@@ -52,7 +52,7 @@ def setup_environment():
 
 
 def setup_hub_configs(
-    hf_token, source_model_id=None, destination_repo_id=None, private=True, save_method="lora"
+    hf_token, source_model_id=None, destination_repo_id=None, private=False, save_method="lora"
 ):
     """
     Setup source and destination hub configurations
@@ -75,18 +75,9 @@ def setup_hub_configs(
 
     # Set default destination repo if not provided
     if not destination_repo_id:
-        # Get username from HF API
-        api = HfApi(token=hf_token)
-        try:
-            user_info = api.whoami()
-            username = user_info.get("name", "user")
-            # Create a default repo name based on source model
-            model_name = source_model_id.split("/")[-1]
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            destination_repo_id = f"{username}/{model_name}_finetuned_{timestamp}"
-        except Exception as e:
-            logger.warning(f"Could not get username from HF API: {str(e)}")
-            destination_repo_id = f"user/qwen_finetuned_{time.strftime('%Y%m%d_%H%M%S')}"
+        # Use the default repository name
+        destination_repo_id = "tuandunghcmut/Qwen25_Coder_MultipleChoice_v2"
+        logger.info(f"Using default destination repository: {destination_repo_id}")
 
     # Check if the repository exists
     api = HfApi(token=hf_token)
@@ -136,24 +127,56 @@ def parse_args():
         help="Source model ID on Hugging Face Hub",
     )
     parser.add_argument(
-        "--destination-repo", type=str, help="Destination repository ID on Hugging Face Hub"
+        "--destination-repo",
+        type=str,
+        default="tuandunghcmut/Qwen25_Coder_MultipleChoice_v2",
+        help="Destination repository ID on Hugging Face Hub",
     )
     parser.add_argument(
         "--max-seq-length", type=int, default=2048, help="Maximum sequence length for the model"
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default="4bit",
+        choices=["4bit", "8bit", "none"],
+        help="Quantization level for the model",
     )
 
     # Training configuration
     parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument(
-        "--batch-size", type=int, default=32, help="Per device batch size for training"
+        "--batch-size", type=int, default=16, help="Per device batch size for training"
     )
-    parser.add_argument("--grad-accum", type=int, default=2, help="Gradient accumulation steps")
-    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
     parser.add_argument(
-        "--output-dir", type=str, default="./model_output", help="Directory to save model outputs"
+        "--warmup-ratio", type=float, default=0.1, help="Proportion of steps for warmup"
     )
     parser.add_argument(
-        "--early-stopping-patience", type=int, default=5, help="Patience for early stopping"
+        "--weight-decay", type=float, default=0.01, help="Weight decay for optimizer"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="model_output",
+        help="Directory to save model outputs (will be created inside the 'outputs' folder)",
+    )
+    parser.add_argument(
+        "--early-stopping-patience", type=int, default=3, help="Patience for early stopping"
+    )
+    parser.add_argument(
+        "--early-stopping-delta",
+        type=float,
+        default=0.01,
+        help="Minimum change to qualify as improvement for early stopping",
+    )
+    parser.add_argument(
+        "--prompt-template",
+        type=str,
+        default="yaml_reasoning",
+        choices=["yaml_reasoning", "basic", "teacher_reasoned", "options"],
+        help="Prompt template to use for formatting",
     )
     parser.add_argument(
         "--test-mode", action="store_true", help="Use only 2 dataset instances for quick testing"
@@ -163,12 +186,53 @@ def parse_args():
         action="store_true",
         help="Use only enough examples to fill one batch (batch_size) for minimal training testing",
     )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default="",
+        help="Name for this experiment (used for WandB and checkpoint naming)",
+    )
+    parser.add_argument(
+        "--debug-samples",
+        type=int,
+        default=3,
+        help="Number of samples to log for debugging (0 to disable)",
+    )
+    parser.add_argument(
+        "--logging-steps",
+        type=int,
+        default=100,
+        help="Number of steps between logging updates (non-test mode)",
+    )
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=500,
+        help="Number of steps between model checkpoints (non-test mode)",
+    )
+    parser.add_argument(
+        "--test-logging-steps",
+        type=int,
+        default=10,
+        help="Number of steps between logging updates (test modes)",
+    )
+    parser.add_argument(
+        "--test-save-steps",
+        type=int,
+        default=20,
+        help="Number of steps between model checkpoints (test modes)",
+    )
+
+    # LoRA configuration
+    parser.add_argument("--lora-r", type=int, default=8, help="LoRA attention dimension")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter")
+    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout rate")
 
     # Repository configuration
     parser.add_argument(
         "--private",
         action="store_true",
-        default=True,
+        default=False,
         help="Make the destination repository private",
     )
     parser.add_argument(
@@ -177,6 +241,19 @@ def parse_args():
         default="lora",
         choices=["lora", "merged_16bit", "merged_4bit", "gguf"],
         help="Method to use for saving the model",
+    )
+    parser.add_argument(
+        "--push-strategy",
+        type=str,
+        default="best",
+        choices=["best", "end", "all", "no"],
+        help="When to push to hub: 'best'=best checkpoint, 'end'=end of training, 'all'=each save, 'no'=don't push",
+    )
+    parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=3,
+        help="Maximum number of checkpoints to keep",
     )
 
     # Dataset configuration
@@ -189,19 +266,25 @@ def parse_args():
     parser.add_argument(
         "--val-split", type=float, default=0.1, help="Fraction of data to use for validation"
     )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
+    )
 
     return parser.parse_args()
 
 
-def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
+def setup_model_and_trainer(source_hub, destination_hub, args):
     """Initialize model handler and trainer"""
     try:
         # Initialize model handler
         logger.info("Initializing model handler...")
         model_handler = QwenModelHandler(
             model_name=source_hub.model_id,
-            max_seq_length=max_seq_length,
-            quantization="4bit",
+            max_seq_length=args.max_seq_length,
+            quantization=args.quantization,
             model_source=ModelSource.UNSLOTH,
             device_map="auto",
             source_hub_config=source_hub,
@@ -210,8 +293,8 @@ def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
         # Configure LoRA
         logger.info("Setting up LoRA configuration...")
         lora_config = LoraConfig(
-            r=8,
-            lora_alpha=32,
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
             target_modules=[
                 "q_proj",
                 "k_proj",
@@ -221,20 +304,23 @@ def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
                 "up_proj",
                 "down_proj",  # FFN modules
             ],
-            lora_dropout=0.05,
+            lora_dropout=args.lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
         )
+
+        # Get prompt template based on arg
+        prompt_type = get_prompt_template(args.prompt_template)
 
         # Initialize trainer
         logger.info("Initializing trainer...")
         trainer = QwenTrainer(
             model=model_handler.model,
             tokenizer=model_handler.tokenizer,
-            prompt_creator=PromptCreator(PromptCreator.YAML_REASONING),
+            prompt_creator=PromptCreator(prompt_type),
             lora_config=lora_config,
             destination_hub_config=destination_hub,
-            debug_samples=3,  # Log 3 samples per epoch for debugging
+            debug_samples=args.debug_samples,
         )
 
         return trainer
@@ -242,6 +328,17 @@ def setup_model_and_trainer(source_hub, destination_hub, max_seq_length=2048):
     except Exception as e:
         logger.error(f"Error in setup: {str(e)}")
         raise
+
+
+def get_prompt_template(template_name):
+    """Get prompt template constant from name"""
+    templates = {
+        "yaml_reasoning": PromptCreator.YAML_REASONING,
+        "basic": PromptCreator.BASIC,
+        "teacher_reasoned": PromptCreator.TEACHER_REASONED,
+        "options": PromptCreator.OPTIONS,
+    }
+    return templates.get(template_name, PromptCreator.YAML_REASONING)
 
 
 def load_datasets(hf_token, dataset_id, test_mode=False, test_training_mode=False, batch_size=4):
@@ -299,6 +396,18 @@ def main():
         # Setup environment
         hf_token = setup_environment()
 
+        # Generate experiment name if not provided
+        if not args.experiment_name:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if args.test_mode:
+                args.experiment_name = f"test_{timestamp}"
+            elif args.test_training_mode:
+                args.experiment_name = f"test_train_{timestamp}"
+            else:
+                args.experiment_name = f"experiment_{timestamp}"
+
+        logger.info(f"Using experiment name: {args.experiment_name}")
+
         # Setup hub configurations
         source_hub, destination_hub = setup_hub_configs(
             hf_token=hf_token,
@@ -309,9 +418,7 @@ def main():
         )
 
         # Initialize model and trainer
-        trainer = setup_model_and_trainer(
-            source_hub, destination_hub, max_seq_length=args.max_seq_length
-        )
+        trainer = setup_model_and_trainer(source_hub, destination_hub, args)
 
         # Load dataset from HuggingFace Hub
         train_dataset = load_datasets(
@@ -322,20 +429,38 @@ def main():
             batch_size=args.batch_size,
         )
 
-        # Training configuration
-        output_dir = args.output_dir
+        # Ensure output directory is inside the 'outputs' folder
+        outputs_root = os.path.join(os.getcwd(), "outputs")
+        os.makedirs(outputs_root, exist_ok=True)
+
+        # Create full output path with experiment name
+        output_dir = os.path.join(outputs_root, args.experiment_name)
         os.makedirs(output_dir, exist_ok=True)
+
         logger.info(f"Training outputs will be saved to: {output_dir}")
+
+        # Create a symlink to the latest output
+        latest_link = os.path.join(outputs_root, "latest")
+        if os.path.exists(latest_link) and os.path.islink(latest_link):
+            os.remove(latest_link)
+
+        try:
+            os.symlink(output_dir, latest_link, target_is_directory=True)
+            logger.info(f"Created symlink: {latest_link} -> {output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to create symlink: {e}")
 
         # Setup callbacks
         callbacks = []
 
         # Early stopping callback
         early_stopping = EarlyStoppingCallback(
-            patience=args.early_stopping_patience, min_delta=0.01
+            patience=args.early_stopping_patience, min_delta=args.early_stopping_delta
         )
         callbacks.append(early_stopping)
-        logger.info(f"Added early stopping callback with patience={args.early_stopping_patience}")
+        logger.info(
+            f"Added early stopping callback with patience={args.early_stopping_patience}, min_delta={args.early_stopping_delta}"
+        )
 
         # Validation callback
         validation_callback = ValidationCallback(trainer_instance=trainer)
@@ -355,7 +480,7 @@ def main():
             elif args.test_training_mode:
                 run_prefix = "TEST-TRAIN_"
 
-            run_name = f"{run_prefix}batch{args.batch_size}_lr{args.learning_rate}_e{args.epochs}_{int(time.time())}"
+            run_name = f"{run_prefix}{args.experiment_name}_b{args.batch_size}_lr{args.learning_rate}_e{args.epochs}"
 
             # Add test mode tag if enabled
             tags = ["qwen", "coding", "lora", "multiple-choice", "callbacks"]
@@ -396,13 +521,22 @@ def main():
 
         # Set logging and save frequency based on test mode
         if args.test_mode or args.test_training_mode:
-            logging_steps = 10
-            save_steps = 20
+            logging_steps = args.test_logging_steps
+            save_steps = args.test_save_steps
         else:
-            logging_steps = 100
-            save_steps = 500
+            logging_steps = args.logging_steps
+            save_steps = args.save_steps
 
         logger.info(f"Using logging_steps={logging_steps}, save_steps={save_steps}")
+
+        # Map push strategy to trainer terms
+        push_strategy_map = {
+            "best": "checkpoint",
+            "end": "end",
+            "all": "every_save",
+            "no": "no",
+        }
+        push_to_hub_strategy = push_strategy_map.get(args.push_strategy, "best")
 
         # Start training
         logger.info("Starting training with all callbacks enabled...")
@@ -415,7 +549,8 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             learning_rate=args.learning_rate,
-            warmup_ratio=0.1,
+            warmup_ratio=args.warmup_ratio,
+            weight_decay=args.weight_decay,
             # Validation and checkpointing
             save_strategy="steps",
             save_steps=save_steps,
@@ -425,10 +560,10 @@ def main():
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             # Hub integration
-            push_to_hub_strategy="best",
+            push_to_hub_strategy=push_to_hub_strategy,
             # Other settings
-            save_total_limit=3,
-            random_seed=42,
+            save_total_limit=args.save_total_limit,
+            random_seed=args.random_seed,
             # Pass the callbacks
             callbacks=callbacks,
         )

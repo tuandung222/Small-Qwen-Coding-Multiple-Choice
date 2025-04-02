@@ -11,6 +11,8 @@ This project provides a framework for fine-tuning Qwen2.5 Coder models on multip
 - **HuggingFace Hub integration** for model sharing
 - **Flexible configuration** via command line arguments
 - **Automatic repository creation**
+- **Test modes** for rapid iteration and debugging
+- **Callbacks** for validation, early stopping, and WandB logging
 
 ## Setup
 
@@ -54,45 +56,53 @@ The environment variables required are:
 
 This project provides several scripts for easy model training:
 
-1. **Basic Training Script**: Run training with standard parameters
+1. **Standard Training** with full customization:
    ```bash
-   ./scripts/train_experiment.sh my_experiment
+   python src/run.py --experiment-name full_training --epochs 3 --batch-size 16
    ```
 
-2. **Batch-32 Training Script**: Train with batch size 32 for faster convergence
+2. **Test Training Mode** for validating with minimal data (one batch):
    ```bash
-   ./scripts/train_batch32.sh
+   python src/run.py --test-training-mode --epochs 1 --experiment-name test_batch
    ```
 
-3. **Comprehensive Training with All Callbacks**: Train with validation, early stopping and WandB integration
+3. **Shell Script Training** with all callbacks enabled:
    ```bash
-   ./scripts/train_with_callbacks.sh full_experiment
+   ./scripts/train_with_callbacks.sh comprehensive_training --batch-size 16
    ```
 
-4. **Quick Test Mode**: Train on just 2 dataset instances for rapid testing and debugging
+4. **Ultra-Fast Test Mode** with just 2 examples:
    ```bash
-   ./scripts/train_with_callbacks.sh quick_test --test-mode --epochs 2
+   ./scripts/train_with_callbacks.sh quick_test --test-mode --epochs 1
    ```
 
-All training scripts support various command-line arguments to customize the training process. Use the `--help` flag to see all available options:
+All training methods support extensive configuration. View options with:
 
 ```bash
-./scripts/train_with_callbacks.sh --help
+python src/run.py --help
 ```
 
 ### Training Output Structure
 
-All experiment outputs are organized in the `experiment_output` directory by default. Each run creates a timestamped subdirectory with:
+All experiment outputs are organized in the `outputs` folder. Each experiment creates its own subdirectory:
 
-- Training logs
-- Model checkpoints
-- Experiment configuration
-- Training metrics
-- Status markers
+```
+outputs/
+├── experiment_name/           # Your experiment output
+│   ├── checkpoint-XXX/        # Model checkpoints
+│   ├── best_model/            # Best model checkpoint
+│   ├── training.log           # Detailed logs
+│   ├── experiment_config.txt  # Configuration used
+│   └── training_metrics.txt   # Final metrics
+├── another_experiment/        # Another experiment
+└── latest -> experiment_name  # Symlink to latest run
+```
+
+You can always access your most recent experiment using the `outputs/latest` symlink.
 
 ### Using Weights & Biases for Experiment Tracking
 
-The comprehensive training script automatically integrates with Weights & Biases (WandB). Ensure you have logged in with your WandB credentials:
+All training modes automatically integrate with Weights & Biases (WandB):
 
 ```bash
 wandb login
@@ -107,37 +117,42 @@ This enables real-time tracking of:
 
 ### Advanced Configuration
 
-You can customize the training with various command-line arguments:
+The training script provides extensive configuration options for experimentation:
 
 ```bash
 python src/run.py \
+  --experiment-name lora_config_test \
   --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
-  --destination-repo "username/model-name" \
-  --max-seq-length 2048 \
-  --epochs 3 \
-  --batch-size 4 \
-  --grad-accum 4 \
-  --learning-rate 2e-4 \
-  --dataset "tuandunghcmut/coding-mcq-reasoning" \
-  --val-split 0.1 \
-  --save-method "lora"
+  --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v2" \
+  --batch-size 16 \
+  --lora-r 16 \
+  --lora-alpha 64 \
+  --prompt-template "teacher_reasoned" \
+  --push-strategy "best"
 ```
 
 #### Key Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `--experiment-name` | Name for this experiment | auto-generated timestamp |
 | `--source-model` | Base model to fine-tune | unsloth/Qwen2.5-Coder-1.5B-Instruct |
-| `--destination-repo` | HF Hub repo for the trained model | auto-generated |
-| `--max-seq-length` | Maximum sequence length | 2048 |
-| `--epochs` | Number of training epochs | 3 |
-| `--batch-size` | Per device batch size | 4 |
+| `--destination-repo` | HF Hub repo for the model | tuandunghcmut/Qwen25_Coder_MultipleChoice_v2 |
+| `--batch-size` | Per device batch size | 16 |
 | `--grad-accum` | Gradient accumulation steps | 4 |
 | `--learning-rate` | Learning rate | 2e-4 |
-| `--dataset` | Dataset ID on HuggingFace Hub | tuandunghcmut/coding-mcq-reasoning |
-| `--val-split` | Validation split ratio | 0.1 |
-| `--save-method` | Model saving method (lora, merged_16bit, merged_4bit, gguf) | lora |
-| `--private` | Make the repository private | True |
+| `--warmup-ratio` | Proportion of steps for warmup | 0.1 |
+| `--weight-decay` | Weight decay for optimizer | 0.01 |
+| `--prompt-template` | Prompt format to use | yaml_reasoning |
+| `--lora-r` | LoRA attention dimension | 8 |
+| `--lora-alpha` | LoRA alpha parameter | 32 |
+| `--quantization` | Model quantization level | 4bit |
+| `--push-strategy` | When to push to HF Hub | best |
+| `--private` | Make the repository private | False |
+| `--test-mode` | Use only 2 examples | False |
+| `--test-training-mode` | Use only one batch of data | False |
+
+For the complete list of parameters, run `python src/run.py --help`.
 
 ### Inference
 
@@ -150,7 +165,7 @@ from data.response_parser import ResponseParser
 
 # Initialize model handler
 model_handler = QwenModelHandler(
-    model_name="username/model-name",  # Your trained model
+    model_name="tuandunghcmut/Qwen25_Coder_MultipleChoice_v2",  # Default trained model
     max_seq_length=2048,
     quantization="4bit"  # For efficient inference
 )
@@ -191,11 +206,12 @@ print(f"Reasoning: {result['reasoning']}")
 │   ├── testing/
 │   │   └── tester.py          # Framework for model evaluation
 │   ├── utils/
-│   │   └── auth.py            # Authentication utilities
+│   │   ├── auth.py            # Authentication utilities
+│   │   └── wandb_logger.py    # Weights & Biases integration
 │   └── run.py                 # Main training script
-├── configs/                   # Configuration files
 ├── scripts/                   # Utility scripts
-├── tests/                     # Unit tests
+├── outputs/                   # Training outputs folder
+│   └── latest                 # Symlink to latest run
 ├── .env.example               # Example environment variables
 ├── requirements.txt           # Project dependencies
 └── README.md                  # This file

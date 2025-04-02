@@ -13,7 +13,7 @@ function show_help {
     echo ""
     echo "Options:"
     echo "  -m, --model NAME        Source model name (default: unsloth/Qwen2.5-Coder-1.5B-Instruct)"
-    echo "  -r, --repo NAME         Destination repo name (default: auto-generated)"
+    echo "  -r, --repo NAME         Destination repo name (default: tuandunghcmut/Qwen25_Coder_MultipleChoice_v2)"
     echo "  -e, --epochs NUM        Number of training epochs (default: 5)"
     echo "  -b, --batch-size NUM    Batch size for training (default: 16)"
     echo "  -l, --lr RATE           Learning rate (default: 2e-4)"
@@ -22,8 +22,9 @@ function show_help {
     echo "  -s, --seq-len NUM       Maximum sequence length (default: 2048)"
     echo "  -p, --patience NUM      Early stopping patience (default: 3)"
     echo "  -v, --val-split NUM     Validation split ratio (default: 0.15)"
-    echo "  -o, --output-root DIR   Root directory for experiment outputs (default: ./experiment_output)"
+    echo "  -o, --output-root DIR   Root directory for experiment outputs (default: ./outputs)"
     echo "  -t, --test-mode         Enable test mode (uses only 2 dataset instances)"
+    echo "  --private               Make the destination repo private (default: public)"
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Example:"
@@ -44,7 +45,7 @@ shift
 
 # Default values
 MODEL="unsloth/Qwen2.5-Coder-1.5B-Instruct"
-REPO=""
+REPO="tuandunghcmut/Qwen25_Coder_MultipleChoice_v2"
 EPOCHS=5
 BATCH_SIZE=16
 LEARNING_RATE=2e-4
@@ -53,8 +54,9 @@ DATASET="tuandunghcmut/coding-mcq-reasoning"
 SEQ_LEN=2048
 PATIENCE=3
 VAL_SPLIT=0.15
-OUTPUT_ROOT="./experiment_output"
+OUTPUT_ROOT="./outputs"
 TEST_MODE=false
+PRIVATE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -107,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             TEST_MODE=true
             shift
             ;;
+        --private)
+            PRIVATE=true
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -118,6 +124,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Ensure output root directory exists
+mkdir -p "$OUTPUT_ROOT"
 
 # Generate timestamp for unique experiment directory
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -131,7 +140,7 @@ cat > "${OUTPUT_DIR}/experiment_config.txt" << EOL
 Experiment: ${EXP_NAME}
 Timestamp: ${TIMESTAMP}
 Model: ${MODEL}
-Repository: ${REPO:-auto-generated}
+Repository: ${REPO}
 Epochs: ${EPOCHS}
 Batch size: ${BATCH_SIZE}
 Learning rate: ${LEARNING_RATE}
@@ -142,6 +151,7 @@ Sequence length: ${SEQ_LEN}
 Early stopping patience: ${PATIENCE}
 Validation split: ${VAL_SPLIT}
 Test mode: ${TEST_MODE}
+Private repository: ${PRIVATE}
 EOL
 
 echo "=========================================================="
@@ -149,7 +159,7 @@ echo "Starting comprehensive training with all callbacks enabled"
 echo "=========================================================="
 echo "Experiment name:   $EXP_NAME"
 echo "Model:             $MODEL"
-echo "Repository:        ${REPO:-auto-generated}"
+echo "Repository:        ${REPO}"
 echo "Epochs:            $EPOCHS"
 echo "Batch size:        $BATCH_SIZE"
 echo "Learning rate:     $LEARNING_RATE"
@@ -160,6 +170,7 @@ echo "Sequence length:   $SEQ_LEN"
 echo "Early stopping:    Patience=$PATIENCE"
 echo "Validation split:  $VAL_SPLIT (15%)"
 echo "Output directory:  $OUTPUT_DIR"
+echo "Private repo:      ${PRIVATE}"
 if [ "$TEST_MODE" = true ]; then
     echo "TEST MODE:         Enabled (using only 2 dataset instances)"
 fi
@@ -216,6 +227,7 @@ PATIENCE = ${PATIENCE}
 VAL_SPLIT = ${VAL_SPLIT}
 TEST_MODE = ${TEST_MODE}
 EXP_NAME = "${EXP_NAME}"
+PRIVATE = ${PRIVATE}
 
 def main():
     # Setup environment
@@ -242,20 +254,7 @@ def main():
     source_hub = HubConfig(model_id=model_id, token=hf_token)
 
     # Handle destination repo
-    if repo_id:
-        destination_repo_id = repo_id
-    else:
-        # Get username from HF API
-        api = HfApi(token=hf_token)
-        try:
-            user_info = api.whoami()
-            username = user_info.get("name", "user")
-            model_name = model_id.split("/")[-1]
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            destination_repo_id = "{}/{}_{}_{}".format(username, model_name, "finetuned", timestamp)
-        except Exception as e:
-            logger.warning("Could not get username from HF API: {}".format(str(e)))
-            destination_repo_id = "user/qwen_finetuned_{}".format(time.strftime('%Y%m%d_%H%M%S'))
+    destination_repo_id = repo_id
 
     # Check if the repository exists
     api = HfApi(token=hf_token)
@@ -269,7 +268,7 @@ def main():
             create_repo(
                 repo_id=destination_repo_id,
                 token=hf_token,
-                private=True,
+                private=PRIVATE,
                 repo_type="model",
             )
             logger.info("Repository {} created successfully".format(destination_repo_id))
@@ -281,7 +280,7 @@ def main():
     destination_hub = HubConfig(
         model_id=destination_repo_id,
         token=hf_token,
-        private=True,
+        private=PRIVATE,
         save_method="lora",
     )
 
@@ -368,8 +367,10 @@ def main():
         model_name = MODEL_NAME.split("/")[-1]
         project_name = "{}-Coding-MCQ-Training".format(model_name)
         exp_name = EXP_NAME
-        run_name = "{}_batch{}_lr{}_e{}_{}".format(
-            exp_name, BATCH_SIZE, LEARNING_RATE, EPOCHS, int(time.time())
+
+        # Use experiment name for run name
+        run_name = "{}_b{}_lr{}_e{}".format(
+            exp_name, BATCH_SIZE, LEARNING_RATE, EPOCHS
         )
 
         if TEST_MODE:
@@ -454,7 +455,8 @@ def main():
         with open(os.path.join(OUTPUT_DIR, "training_metrics.txt"), "w") as f:
             f.write("Experiment: {}\n".format(EXP_NAME))
             f.write("Timestamp: {}\n".format(time.strftime('%Y-%m-%d %H:%M:%S')))
-            f.write("Test mode: {}\n\n".format(str(TEST_MODE).lower()))
+            f.write("Test mode: {}\n".format(str(TEST_MODE).lower()))
+            f.write("Private repo: {}\n\n".format(str(PRIVATE).lower()))
             f.write("Training Metrics:\n")
             for key, value in results.items():
                 f.write("{}: {}\n".format(key, value))
