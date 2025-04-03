@@ -29,7 +29,7 @@ python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
     --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
-    --epochs 5 \
+    --epochs 3 \
     --batch-size 32 \
     --learning-rate 1e-4 \
     --grad-accum 1 \
@@ -57,14 +57,14 @@ python src/run.py \
     \
     --early-stopping-patience 7 \
     --early-stopping-delta 0.01 \
-    --validation-steps 50 \
+    --validation-steps 30 \
     --metric-for-best "eval_loss" \
     --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
-    --logging-steps 2 \
-    --save-steps 500 \
-    --save-total-limit 3 \
+    --logging-steps 30 \
+    --save-steps 90 \
+    --save-total-limit 5 \
     --push-strategy "best" \
     --push-to-hub \
     \

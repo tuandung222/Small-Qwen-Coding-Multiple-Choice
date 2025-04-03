@@ -561,7 +561,7 @@ class QwenTrainer:
         self,
         train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
-        val_split: float = 0.04,
+        val_split: float = 0.1,
         output_dir: str = "./model_output",
         num_train_epochs: int = 3,
         per_device_train_batch_size: int = 4,
@@ -900,28 +900,8 @@ class QwenTrainer:
                 logger.info("Falling back to standard training")
                 self.trainer = original_trainer
 
-        # Add the learning rate monitor if not already in callbacks
-        lr_monitor = LRMonitorCallback(trainer=self.trainer)
-
-        # Add the prompt monitor
-        prompt_monitor = PromptMonitorCallback(
-            dataset=formatted_train_dataset, tokenizer=self.tokenizer, logging_steps=logging_steps
-        )
-
-        # Add the model loading alert callback
-        model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
-
-        # Add callbacks to trainer
-        self.trainer.add_callback(lr_monitor)
-        self.trainer.add_callback(prompt_monitor)
-        self.trainer.add_callback(model_loading_alert)
-
-        # Set trainer attribute for callbacks that need it
-        lr_monitor.trainer = self.trainer
-        prompt_monitor.trainer = self.trainer
-        model_loading_alert.trainer = self.trainer
-
-        logger.info("Added monitoring callbacks: learning rate, prompts, and model loading alerts")
+        # Log the final trainer configuration to verify settings
+        logger.info(f"Final evaluation_strategy: {self.trainer.args.evaluation_strategy}")
 
         # Run training
         logger.info("Starting training process...")

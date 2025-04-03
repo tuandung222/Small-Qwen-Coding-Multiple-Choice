@@ -835,7 +835,7 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to create symlink: {e}")
 
-        # Setup callbacks
+        # --- Refactored Callback Initialization ---
         callbacks = []
 
         # Early stopping callback
@@ -847,9 +847,9 @@ def main():
             f"Added early stopping callback with patience={args.early_stopping_patience}, min_delta={args.early_stopping_delta}"
         )
 
-        # Validation callback
+        # Validation callback (Pass the QwenTrainer instance)
         validation_callback = ValidationCallback(
-            trainer_instance=trainer,
+            trainer_instance=trainer,  # Pass QwenTrainer instance
             validation_steps=args.validation_steps if hasattr(args, "validation_steps") else 50,
             push_to_hub=args.push_to_hub if hasattr(args, "push_to_hub") else True,
             metric_for_best=args.metric_for_best
@@ -865,12 +865,12 @@ def main():
         callbacks.append(validation_callback)
         logger.info("Added validation callback for model monitoring")
 
-        # Learning rate monitor callback
-        lr_monitor = LRMonitorCallback()
+        # Learning rate monitor callback (Pass the QwenTrainer instance)
+        lr_monitor = LRMonitorCallback(trainer=trainer)  # Pass QwenTrainer instance
         callbacks.append(lr_monitor)
         logger.info("Added learning rate monitoring callback")
 
-        # Prompt monitor callback
+        # Prompt monitor callback (Pass the QwenTrainer instance)
         prompt_monitor = PromptMonitorCallback(
             dataset=train_dataset,
             tokenizer=trainer.tokenizer,
@@ -883,17 +883,19 @@ def main():
             output_dir=output_dir,
             track_diversity=True,
             track_quality=True,
-            enable_interactive=False,  # Interactive mode disabled by default in training runs
+            enable_interactive=False,
             categorize_prompts=True,
             enable_comparison=True,
         )
+        prompt_monitor.trainer = trainer  # Explicitly set trainer for PromptMonitor
         callbacks.append(prompt_monitor)
         logger.info(
             "Added prompt monitoring callback with enhanced visualization features and wandb integration"
         )
 
-        # Model loading alert callback
+        # Model loading alert callback (Pass the QwenTrainer instance)
         model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
+        model_loading_alert.trainer = trainer  # Explicitly set trainer
         callbacks.append(model_loading_alert)
         logger.info("Added model loading alert callback")
 
@@ -948,6 +950,8 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to initialize WandB logging: {e}")
             logger.warning("Continuing without WandB callbacks")
+
+        # --- End Refactored Callback Initialization ---
 
         # Set logging and save frequency based on test mode
         if args.test_mode or args.test_training_mode:
