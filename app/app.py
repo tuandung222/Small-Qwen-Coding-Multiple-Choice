@@ -70,12 +70,16 @@ class MCQGradioApp:
 
         full_response += f"## Raw Model Output:\n```\n{response_text}\n```"
 
-        return full_response
+        return prompt, full_response
 
     def process_example(self, example_idx):
         """Process an example from the preset list"""
         print(f"Debug - example_idx type: {type(example_idx)}")
         print(f"Debug - example_idx value: {example_idx}")
+
+        # Handle None value
+        if example_idx is None:
+            return "Please select an example.", ""
 
         # Handle case where example_idx is a list
         if isinstance(example_idx, list):
@@ -96,6 +100,10 @@ class MCQGradioApp:
             except (ValueError, IndexError) as e:
                 print(f"Debug - error during conversion: {e}")
                 return "Invalid example index.", ""
+
+        # Ensure example_idx is an integer
+        if not isinstance(example_idx, int):
+            return "Invalid example format.", ""
 
         if example_idx < 0 or example_idx >= len(CODING_EXAMPLES):
             print(f"Debug - index out of range: {example_idx}")
@@ -134,7 +142,14 @@ class MCQGradioApp:
             gr.Markdown("# Coding Multiple Choice Q&A with YAML Reasoning")
             gr.Markdown(
                 """
-            This demo showcases a fine-tuned Qwen2.5-Coder-1.5B model answering multiple-choice coding questions with structured YAML reasoning.
+            This demo showcases a fine-tuned Qwen2.5-Coder-1.5B model answering multiple-choice coding questions with structured reasoning.
+
+            The model supports various reasoning paradigms:
+
+            Basic Formats:
+            - Simple answer-only format
+            - YAML-formatted reasoning with understanding, analysis, reasoning, and conclusion
+            - Options-focused format with brief explanations
 
             The model breaks down its thought process in a structured way, providing:
             - Understanding of the question
@@ -156,13 +171,14 @@ class MCQGradioApp:
                         interactive=True,
                     )
 
-                    # Example selector
+                    # Example selector with initial value
+                    initial_choices = [
+                        f"Example {i+1}: {q['question']}" for i, q in enumerate(CODING_EXAMPLES)
+                    ]
                     example_dropdown = gr.Dropdown(
-                        choices=[
-                            f"Example {i+1}: {q['question']}" for i, q in enumerate(CODING_EXAMPLES)
-                        ],
+                        choices=initial_choices,
                         label="Select an example question",
-                        value=None,
+                        value=initial_choices[0] if initial_choices else None,  # Set initial value
                         interactive=True,
                         show_label=True,
                         container=True,
@@ -194,6 +210,16 @@ class MCQGradioApp:
 
                 with gr.Column(scale=1):
                     gr.Markdown("### Model Response")
+
+                    # Add prompt display box
+                    prompt_display = gr.Textbox(
+                        label="Prompt Sent to Model",
+                        lines=8,
+                        interactive=False,
+                        show_label=True,
+                        container=True,
+                    )
+
                     output = gr.Markdown(label="Response")
 
             # Set up category selection
@@ -214,7 +240,7 @@ class MCQGradioApp:
             submit_btn.click(
                 fn=self.inference,
                 inputs=[question_input, choices_input, temperature_slider],
-                outputs=[output],
+                outputs=[prompt_display, output],
             )
 
         return interface
