@@ -325,6 +325,126 @@ class ValidationCallback(TrainerCallback):
             dataset_size = len(val_dataset) if hasattr(val_dataset, "__len__") else "unknown"
             logger.info(f"Starting validation on dataset with {dataset_size} examples...")
 
+            # Generate completion for a random example
+            try:
+                # Select random example
+                import random
+
+                random_idx = random.randint(0, len(val_dataset) - 1)
+                example = val_dataset[random_idx]
+
+                # Get question and choices
+                if isinstance(example, dict):
+                    # Try to extract original question and choices
+                    input_ids = example.get("input_ids", None)
+                    if input_ids is not None:
+                        full_text = self.trainer.tokenizer.decode(input_ids)
+                        # Try to parse the question and choices from the text
+                        try:
+                            # Assuming format: "Question: ... Choices: A. ... B. ... C. ..."
+                            parts = full_text.split("Question: ")
+                            if len(parts) > 1:
+                                question_part = parts[1].split("Choices:")[0].strip()
+                                choices_part = parts[1].split("Choices:")[1].strip()
+                            else:
+                                question_part = "Could not parse question"
+                                choices_part = "Could not parse choices"
+                        except:
+                            question_part = "Error parsing question"
+                            choices_part = "Error parsing choices"
+                    else:
+                        question_part = example.get("question", "No question found")
+                        choices_part = example.get("choices", "No choices found")
+                else:
+                    question_part = "Could not extract question"
+                    choices_part = "Could not extract choices"
+
+                # Generate completion
+                model = self.trainer.model
+                tokenizer = self.trainer.tokenizer
+
+                # Create prompt using the same format as training
+                prompt = f"Question: {question_part}\n\nChoices:\n{choices_part}"
+
+                # Tokenize
+                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+                # Generate with standard parameters
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        temperature=0.7,
+                        top_p=0.9,
+                        top_k=50,
+                        repetition_penalty=1.1,
+                        do_sample=True,
+                        pad_token_id=tokenizer.eos_token_id,
+                    )
+
+                # Decode completion
+                completion = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+                # Remove the prompt from completion
+                if completion.startswith(prompt):
+                    completion = completion[len(prompt) :].strip()
+
+                # Save completion to file
+                validation_dir = os.path.join(self.trainer.args.output_dir, "validation_examples")
+                os.makedirs(validation_dir, exist_ok=True)
+
+                example_data = {
+                    "step": self.trainer.state.global_step,
+                    "example_index": random_idx,
+                    "question": question_part,
+                    "choices": choices_part,
+                    "model_completion": completion,
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+                # Save to JSON file
+                example_file = os.path.join(
+                    validation_dir, f"validation_example_step_{self.trainer.state.global_step}.json"
+                )
+                with open(example_file, "w") as f:
+                    json.dump(example_data, f, indent=2)
+
+                # Log to wandb
+                try:
+                    import wandb
+
+                    if wandb.run:
+                        wandb.log(
+                            {
+                                "validation/example/step": self.trainer.state.global_step,
+                                "validation/example/question": question_part,
+                                "validation/example/choices": choices_part,
+                                "validation/example/completion": completion,
+                                "validation/example": wandb.Table(
+                                    columns=["Field", "Content"],
+                                    data=[
+                                        ["Question", question_part],
+                                        ["Choices", choices_part],
+                                        ["Model Completion", completion],
+                                    ],
+                                ),
+                            }
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to log example to wandb: {e}")
+
+                logger.info("\n=== Random Validation Example ===")
+                logger.info(f"Question: {question_part}")
+                logger.info(f"Choices: {choices_part}")
+                logger.info(f"Model Completion: {completion}")
+                logger.info("===============================")
+
+            except Exception as e:
+                logger.warning(f"Failed to generate validation example: {e}")
+                import traceback
+
+                logger.debug(f"Generation error details: {traceback.format_exc()}")
+
             # Run evaluation with response-only loss calculation
             logger.info("Running evaluation on validation dataset...")
 
