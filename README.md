@@ -97,6 +97,63 @@ python src/run.py \
   --learning-rate 1e-4
 ```
 
+### Using train.sh Script
+
+The `train.sh` script provides a convenient way to start training with optimized default settings and proper environment configuration. Here's how to use it:
+
+1. **Make the script executable**:
+```bash
+chmod +x train.sh
+```
+
+2. **Configure training parameters** (optional):
+Edit the following variables in `train.sh` to customize your training:
+```bash
+# Model configuration
+SOURCE_MODEL="unsloth/Qwen2.5-Coder-1.5B-Instruct"
+DESTINATION_REPO="your-username/your-model-name"
+
+# Training hyperparameters
+BATCH_SIZE=16
+GRAD_ACCUM=2
+LEARNING_RATE=5e-5
+EPOCHS=3
+WARMUP_STEPS=20
+VALIDATION_STEPS=30
+DEBUG_SAMPLES=3
+
+# Validation settings
+MINIMAL_VALIDATING=true
+MAX_VALIDATION_SAMPLES=90
+SAVE_STEPS=60
+SAVE_TOTAL_LIMIT=5
+```
+
+3. **Start training**:
+```bash
+./train.sh
+```
+
+The script includes several optimizations and features:
+- Proper environment variable setup for stability
+- Automatic PYTHONPATH configuration
+- Process cleanup before starting
+- Logging to `train.log`
+- Lion 8-bit optimizer settings
+- Flash Attention 2 integration
+- Gradient checkpointing
+- WandB logging integration
+- Automatic model pushing to Hub
+
+4. **Monitor training**:
+```bash
+# View live training logs
+tail -f train.log
+
+# Monitor GPU usage
+watch -n 1 nvidia-smi
+```
+
 2. **Generating Synthetic Explanations**:
 ```bash
 # Basic synthesis

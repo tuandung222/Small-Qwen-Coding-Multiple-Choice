@@ -26,7 +26,7 @@ DESTINATION_REPO="tuandunghcmut/Qwen25_Coder_MultipleChoice_v4"
 BATCH_SIZE=16
 GRAD_ACCUM=2
 LEARNING_RATE=5e-5
-EPOCHS=3
+EPOCHS=7
 WARMUP_STEPS=20
 VALIDATION_STEPS=30
 DEBUG_SAMPLES=3
@@ -87,7 +87,7 @@ nohup python3 src/run.py \
     --max-validation-samples "$MAX_VALIDATION_SAMPLES" \
     --validate-at-start \
     --metric-for-best "eval_loss" \
-    --early-stopping-patience 5 \
+    --early-stopping-patience 7 \
     --early-stopping-delta 0.01 \
     --save-steps "$SAVE_STEPS" \
     --save-total-limit "$SAVE_TOTAL_LIMIT" \
