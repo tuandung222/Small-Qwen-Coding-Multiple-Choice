@@ -1,12 +1,19 @@
 import logging
 import os
+import shutil
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
-from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers import (
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
@@ -376,6 +383,7 @@ class QwenTrainer:
     def _prepare_dataset_for_training(self, dataset: Dataset) -> Dataset:
         """
         Prepare dataset for training with optimized processing and caching.
+        Filters out examples that exceed maximum sequence length.
         """
         logger.info("Preparing dataset for training...")
         initial_size = len(dataset)
@@ -385,6 +393,8 @@ class QwenTrainer:
         os.makedirs(cache_dir, exist_ok=True)
 
         # Create cache key based on dataset and processing parameters
+        import hashlib
+
         cache_key = hashlib.md5(
             f"{dataset._fingerprint}_{self.max_seq_length}_{self.prompt_creator.prompt_type}".encode()
         ).hexdigest()
@@ -402,43 +412,68 @@ class QwenTrainer:
         def format_example(examples):
             # Process multiple examples at once for efficiency
             batch_size = len(examples["question"])
-            prompts = []
-            completions = []
+            formatted_examples = []
+            skipped_indices = []
 
             for i in range(batch_size):
-                prompt = self.prompt_creator.create_training_prompt(
-                    question=examples["question"][i], choices=examples["choices"][i]
-                )
-                assert (
-                    "yml_str" in examples
-                ), "yml_str is not in the dataset"  # Must have yml_str column
-                completion = (
-                    examples["yml_str"][i]
-                    if examples["yml_str"][i]
-                    else f"The answer is {examples['answer'][i]}."
-                )
-                prompts.append(prompt)
-                completions.append(completion)
+                try:
+                    # Create prompt and completion
+                    prompt = self.prompt_creator.create_training_prompt(
+                        question=examples["question"][i], choices=examples["choices"][i]
+                    )
 
-            # Batch process conversations
-            conversations = [
-                [{"role": "user", "content": p}, {"role": "assistant", "content": c}]
-                for p, c in zip(prompts, completions)
-            ]
+                    # Correctly access the yml_str and answer columns
+                    yml_str = examples["yml_str"][i] if "yml_str" in examples else None
+                    answer = examples["answer"][i] if "answer" in examples else None
 
-            # Batch tokenization
-            texts = [
-                self.tokenizer.apply_chat_template(
-                    conv, tokenize=False, add_generation_prompt=False
-                )
-                for conv in conversations
-            ]
+                    # Create completion based on available data
+                    completion = (
+                        yml_str if yml_str else f"The answer is {answer}." if answer else ""
+                    )
 
-            # Efficient tokenization with padding
+                    if not completion:
+                        logger.warning(f"Example {i} has no completion data (yml_str or answer)")
+                        skipped_indices.append(i)
+                        continue
+
+                    # Create conversation format
+                    conversation = [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": completion},
+                    ]
+
+                    # Apply chat template without tokenization first
+                    full_text = self.tokenizer.apply_chat_template(
+                        conversation, tokenize=False, add_generation_prompt=False
+                    )
+
+                    # Check sequence length
+                    tokens = self.tokenizer.encode(full_text)
+                    if len(tokens) > self.max_seq_length:
+                        skipped_indices.append(i)
+                        logger.warning(
+                            f"Skipping example {i}: length {len(tokens)} exceeds maximum {self.max_seq_length}"
+                        )
+                        continue
+
+                    # If length is okay, add to formatted examples
+                    formatted_examples.append(
+                        {"text": full_text, "original_index": i, "token_length": len(tokens)}
+                    )
+
+                except Exception as e:
+                    logger.warning(f"Error processing example {i}: {e}")
+                    skipped_indices.append(i)
+
+            if not formatted_examples:
+                return {"input_ids": [], "attention_mask": [], "labels": [], "skipped": True}
+
+            # Batch tokenize valid examples
+            texts = [ex["text"] for ex in formatted_examples]
             tokenized = self.tokenizer(
                 texts,
                 max_length=self.max_seq_length,
-                truncation=True,
+                truncation=False,  # No truncation needed since we already filtered
                 padding="max_length",
                 return_tensors="pt",
             )
@@ -447,9 +482,13 @@ class QwenTrainer:
                 "input_ids": tokenized.input_ids,
                 "attention_mask": tokenized.attention_mask,
                 "labels": tokenized.input_ids.clone(),
+                "skipped": False,
+                "original_indices": [ex["original_index"] for ex in formatted_examples],
+                "token_lengths": [ex["token_length"] for ex in formatted_examples],
             }
 
         # Process dataset with optimized batch processing
+        logger.info("Processing dataset and filtering long sequences...")
         formatted_dataset = dataset.map(
             format_example,
             batched=True,
@@ -460,12 +499,69 @@ class QwenTrainer:
             desc="Processing dataset",
         )
 
+        # Filter out examples that were skipped
+        formatted_dataset = formatted_dataset.filter(
+            lambda x: not x.get("skipped", False), desc="Removing skipped examples"
+        )
+
+        # Log statistics
+        final_size = len(formatted_dataset)
+        filtered_count = initial_size - final_size
+        logger.info(
+            f"\nDataset preparation complete:"
+            f"\n- Initial size: {initial_size}"
+            f"\n- Final size: {final_size}"
+            f"\n- Filtered out: {filtered_count} examples ({(filtered_count/initial_size)*100:.2f}%)"
+            f"\n- Reason: Exceeded maximum sequence length of {self.max_seq_length}"
+        )
+
+        # Calculate and log length statistics
+        if "token_lengths" in formatted_dataset.features:
+            lengths = formatted_dataset["token_lengths"]
+            length_stats = {
+                "min": min(lengths),
+                "max": max(lengths),
+                "mean": sum(lengths) / len(lengths),
+                "median": sorted(lengths)[len(lengths) // 2],
+            }
+            logger.info(
+                f"\nSequence length statistics:"
+                f"\n- Minimum: {length_stats['min']}"
+                f"\n- Maximum: {length_stats['max']}"
+                f"\n- Mean: {length_stats['mean']:.1f}"
+                f"\n- Median: {length_stats['median']}"
+            )
+
         # Save processed dataset to cache
         try:
             formatted_dataset.save_to_disk(cache_path)
             logger.info(f"Saved processed dataset to {cache_path}")
         except Exception as e:
             logger.warning(f"Failed to save dataset cache: {e}")
+
+        # Log to wandb if available
+        try:
+            import wandb
+
+            if wandb.run:
+                wandb.log(
+                    {
+                        "dataset/initial_size": initial_size,
+                        "dataset/final_size": final_size,
+                        "dataset/filtered_count": filtered_count,
+                        "dataset/filtered_percentage": (filtered_count / initial_size) * 100,
+                        "dataset/max_sequence_length": self.max_seq_length,
+                    }
+                )
+                if "token_lengths" in formatted_dataset.features:
+                    wandb.log(
+                        {
+                            "dataset/length_stats": length_stats,
+                            "dataset/length_histogram": wandb.Histogram(lengths),
+                        }
+                    )
+        except ImportError:
+            pass
 
         return formatted_dataset
 
@@ -600,7 +696,6 @@ class QwenTrainer:
     def train(
         self,
         train_dataset: Dataset,
-        val_dataset: Optional[Dataset] = None,
         val_split: float = 0.1,
         output_dir: str = "./model_output",
         num_train_epochs: int = 3,
@@ -608,95 +703,22 @@ class QwenTrainer:
         gradient_accumulation_steps: int = 4,
         learning_rate: float = 2e-4,
         warmup_ratio: float = 0.1,
-        warmup_steps: int = -1,
         max_steps: Optional[int] = None,
         logging_steps: int = 10,
-        save_steps: int = 100,
-        save_strategy: str = "epoch",
-        save_total_limit: int = 1,
+        save_steps: int = 30,  # Changed default to 30 for safety
+        save_strategy: str = "steps",
+        save_total_limit: int = 5,  # Changed default to 5
         load_best_model_at_end: bool = True,
         metric_for_best_model: str = "eval_loss",
         greater_is_better: bool = False,
         callbacks: Optional[List[Any]] = None,
         random_seed: int = 42,
         push_to_hub_strategy: str = "end",
-        wandb_config: Optional[Dict[str, Any]] = None,
         optimizer_config: Optional[Dict[str, Any]] = None,
         lr_scheduler_config: Optional[Dict[str, Any]] = None,
-        responses_only_config: Optional[Dict[str, Any]] = None,
-        attention_config: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
-        """
-        Train the model with comprehensive configuration and monitoring.
-
-        Learning Rate Schedule:
-        - Configurable LR schedulers: linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup, inverse_sqrt
-        - Warmup phase: Linear increase from 0 to learning_rate for warmup_steps
-        - Decay phase: Follows the selected scheduler pattern
-        - warmup_ratio determines warmup_steps as a fraction of total training steps
-
-        Data Processing:
-        - Uses DataCollatorForLanguageModeling for efficient batching
-        - Handles padding and attention masks automatically
-        - Ensures inputs are properly formatted for the model
-
-        Response-Only Training (Unsloth feature):
-        - Option to train only on model responses using Unsloth's train_on_responses_only
-        - Identifies instruction and response segments using configurable tokens
-        - Enables more focused training on generated responses rather than instructions
-
-        Validation Strategy:
-        - If val_dataset is None, splits train_dataset using val_split ratio
-        - Evaluates model according to save_strategy
-        - Uses metric_for_best_model to track best checkpoint
-
-        Checkpointing:
-        - Saves checkpoints according to save_strategy
-        - Keeps save_total_limit number of checkpoints
-        - Optionally loads best model at end of training
-
-        Hub Integration:
-        - Can push to hub based on push_to_hub_strategy:
-          * "end": Push only at end of training
-          * "best": Push when new best model is found
-          * "all": Push after each save
-          * "no": Don't push to hub
-
-        Optimizer Configuration:
-        - Configurable optimizer type: adamw_torch, adamw_hf, adam8bit, pagedadam, lion, adafactor
-        - Customizable optimizer parameters (beta1, beta2, epsilon, etc.)
-        - Support for 8-bit optimizers for memory efficiency
-
-        Args:
-            train_dataset: Dataset for training
-            val_dataset: Optional dataset for validation
-            val_split: Fraction of training data to use for validation if val_dataset is None
-            output_dir: Directory to save model checkpoints
-            num_train_epochs: Number of training epochs
-            per_device_train_batch_size: Batch size per GPU/CPU
-            gradient_accumulation_steps: Number of steps to accumulate gradients
-            learning_rate: Learning rate for training
-            warmup_ratio: Ratio of total steps to use for warmup (default: 0.1)
-            max_steps: Maximum number of training steps (overrides num_train_epochs)
-            logging_steps: Number of steps between logging updates
-            save_steps: Number of steps between model saves
-            save_strategy: When to save checkpoints ("steps", "epoch", or "no")
-            save_total_limit: Maximum number of checkpoints to keep
-            load_best_model_at_end: Whether to load the best model after training
-            metric_for_best_model: Metric to use for best model selection
-            greater_is_better: Whether higher metric values are better
-            callbacks: Optional list of training callbacks
-            random_seed: Random seed for dataset splitting and shuffling
-            push_to_hub_strategy: When to push to hub ("end", "best", "all", "no")
-            wandb_config: Optional configuration for Weights & Biases logging
-            optimizer_config: Optional configuration for optimizer selection and parameters
-            lr_scheduler_config: Optional configuration for learning rate scheduler selection and parameters
-            responses_only_config: Optional configuration for training only on responses with Unsloth
-            attention_config: Optional configuration for attention implementation
-
-        Returns:
-            Dict containing training metrics and results
-        """
+        """Train the model with proper validation handling and safety checkpoints."""
         # Use stored configs if not explicitly provided
         if responses_only_config is None:
             responses_only_config = self.responses_only_config
@@ -752,9 +774,7 @@ class QwenTrainer:
         # Format datasets for training
         formatted_train_dataset = self._prepare_dataset_for_training(train_dataset)
         formatted_val_dataset = None
-        if val_dataset is not None:
-            formatted_val_dataset = self._prepare_dataset_for_training(val_dataset)
-        elif val_split > 0:
+        if val_split > 0:
             # Split train dataset if no validation dataset is provided
             logger.info(f"Splitting train dataset with val_split={val_split}")
             split_datasets = formatted_train_dataset.train_test_split(
@@ -829,7 +849,7 @@ class QwenTrainer:
             f"Using {warmup_steps} warmup steps ({warmup_ratio*100:.1f}% of {total_steps} total steps)"
         )
 
-        # Setup training arguments with Lion 8-bit specific settings and gradient clipping
+        # Configure validation strategy
         training_args_dict = {
             # Basic training configuration
             "output_dir": output_dir,
@@ -883,29 +903,16 @@ class QwenTrainer:
             "ddp_find_unused_parameters": False,
             "use_cpu": False,
             "use_mps_device": False,
+            # Validation configuration
+            "evaluation_strategy": "no",  # We handle validation through callback
+            "eval_steps": None,  # Not used since we handle validation in callback
+            "eval_delay": 0,  # Start validation immediately if validate_at_start is True
         }
 
         # Handle max_steps
         if max_steps is not None and max_steps > 0:
             training_args_dict["max_steps"] = max_steps
             training_args_dict.pop("num_train_epochs", None)
-
-        # Set evaluation strategy
-        if load_best_model_at_end:
-            if formatted_val_dataset is not None:
-                training_args_dict["evaluation_strategy"] = save_strategy
-            else:
-                print(
-                    "Warning: No validation dataset provided. Setting evaluation_strategy to 'no'."
-                )
-                training_args_dict["evaluation_strategy"] = "no"
-                training_args_dict[
-                    "load_best_model_at_end"
-                ] = False  # Can't load best model without validation
-        else:
-            training_args_dict["evaluation_strategy"] = (
-                save_strategy if formatted_val_dataset is not None else "no"
-            )
 
         # Create training arguments
         training_args = TrainingArguments(**training_args_dict)
@@ -918,13 +925,35 @@ class QwenTrainer:
             pad_to_multiple_of=8,  # For efficient tensor core utilization
         )
 
-        # Initialize Trainer with all components
-        logger.info("Initializing Trainer...")
+        # Initialize trainer with validation callback
+        validation_callback = None
+        if callbacks:
+            for callback in callbacks:
+                if isinstance(callback, ValidationCallback):
+                    validation_callback = callback
+                    break
+
+        if not validation_callback:
+            logger.warning(
+                "No ValidationCallback found in callbacks. Validation may not work properly."
+            )
+
+        # Initialize callbacks list if None
+        if callbacks is None:
+            callbacks = []
+
+        # Add safety checkpoint callback
+        safety_checkpoint = SafetyCheckpointCallback(
+            save_steps=save_steps, save_total_limit=save_total_limit
+        )
+        callbacks.append(safety_checkpoint)
+
+        # Initialize trainer
         self.trainer = Trainer(
             model=model_to_train,
             args=training_args,
             train_dataset=formatted_train_dataset,
-            eval_dataset=formatted_val_dataset,  # This can be None
+            eval_dataset=formatted_val_dataset,  # We handle validation through callback
             data_collator=data_collator,
             callbacks=callbacks,
             tokenizer=self.tokenizer,
@@ -945,7 +974,7 @@ class QwenTrainer:
             num_update_steps_per_epoch = len(formatted_train_dataset) // (
                 per_device_train_batch_size * gradient_accumulation_steps
             )
-            num_training_steps = num_training_epochs * num_update_steps_per_epoch
+            num_training_steps = num_train_epochs * num_update_steps_per_epoch
 
             # Create scheduler
             self.trainer.lr_scheduler = get_scheduler(
@@ -998,11 +1027,12 @@ class QwenTrainer:
 
         # Run training
         logger.info("Starting training process...")
-        train_result = self.trainer.train()
-
-        # Update model reference and return results
-        self.model = model_to_train
-        return train_result
+        try:
+            train_result = self.trainer.train()
+            return train_result
+        except Exception as e:
+            logger.error(f"Training failed: {str(e)}")
+            raise
 
     def push_to_hub(self):
         """Push model to HuggingFace Hub"""
@@ -1075,3 +1105,43 @@ class QwenTrainer:
 
         print(f"Results saved to {results_file}")
         return results_file
+
+
+class SafetyCheckpointCallback(TrainerCallback):
+    """Callback to save checkpoints at regular intervals for safety."""
+
+    def __init__(self, save_steps: int = 30, save_total_limit: int = 5):
+        self.save_steps = save_steps
+        self.save_total_limit = save_total_limit
+        self.saved_checkpoints = []
+
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        """Save checkpoint every save_steps."""
+        if state.global_step > 0 and state.global_step % self.save_steps == 0:
+            # Create checkpoint directory
+            checkpoint_dir = os.path.join(args.output_dir, f"safety-checkpoint-{state.global_step}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+            # Save model
+            kwargs["trainer"].save_model(checkpoint_dir)
+            logger.info(f"Saved safety checkpoint to {checkpoint_dir}")
+
+            # Add to saved checkpoints list
+            self.saved_checkpoints.append(checkpoint_dir)
+
+            # Remove old checkpoints if exceeding limit
+            while len(self.saved_checkpoints) > self.save_total_limit:
+                old_checkpoint = self.saved_checkpoints.pop(0)
+                try:
+                    shutil.rmtree(old_checkpoint)
+                    logger.info(f"Removed old safety checkpoint: {old_checkpoint}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove old checkpoint {old_checkpoint}: {e}")
+
+        return control

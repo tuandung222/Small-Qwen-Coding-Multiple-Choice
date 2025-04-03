@@ -822,6 +822,28 @@ def parse_args():
         help="Save model in safetensors format",
     )
 
+    # Training configuration
+    training = parser.add_argument_group("training")
+    training.add_argument(
+        "--save-steps",
+        type=int,
+        default=30,
+        help="Number of steps between safety checkpoints (default: 30)",
+    )
+    training.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=5,
+        help="Maximum number of safety checkpoints to keep (default: 5)",
+    )
+    training.add_argument(
+        "--save-strategy",
+        type=str,
+        default="steps",
+        choices=["steps", "epoch", "no"],
+        help="Strategy to save checkpoints (default: steps)",
+    )
+
     return parser.parse_args()
 
 
@@ -1266,7 +1288,7 @@ def main():
             max_steps=args.max_train_steps,
             logging_steps=args.logging_steps,
             save_steps=args.save_steps,
-            save_strategy="steps",
+            save_strategy=args.save_strategy,
             save_total_limit=args.save_total_limit,
             load_best_model_at_end=True,
             metric_for_best_model=args.metric_for_best,

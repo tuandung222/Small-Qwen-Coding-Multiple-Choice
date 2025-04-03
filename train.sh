@@ -76,10 +76,24 @@ GRAD_ACCUM=8               # Increased to maintain effective batch size
 LEARNING_RATE=5e-5         # Reduced for stability with Lion
 EPOCHS=3
 WARMUP_STEPS=200          # Increased warmup for stability
-VALIDATION_STEPS=50
+VALIDATION_STEPS=50       # Run validation every 50 steps
 DEBUG_SAMPLES=3
 MINIMAL_VALIDATING=true
 MAX_VALIDATION_SAMPLES=60
+
+# Safety checkpoint configuration
+SAVE_STEPS=30             # Save checkpoint every 30 steps for safety
+SAVE_TOTAL_LIMIT=5        # Keep last 5 checkpoints
+
+# Validation configuration explanation:
+# - validation-steps=50: Run full validation every 50 steps
+# - minimal-validating=true: Use smaller validation set for speed
+# - max-validation-samples=60: Limit validation set size
+# - validate-at-start=true: Run initial validation
+# Cache behavior:
+# - Results are cached between validation steps
+# - Cache expires after validation-steps interval
+# - Force validation at step 0 and every validation-steps
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -179,6 +193,9 @@ nohup python src/run.py \
     --metric-for-best "eval_loss" \
     --early-stopping-patience 5 \
     --early-stopping-delta 0.01 \
+    --save-steps "$SAVE_STEPS" \         # Add safety checkpoint interval
+    --save-total-limit "$SAVE_TOTAL_LIMIT" \  # Limit total checkpoints
+    --save-strategy "steps" \            # Save based on steps
     \
     --quantization "4bit" \
     --double-quant true \
@@ -198,8 +215,6 @@ nohup python src/run.py \
     --prompt-comparison \
     --max-prompts-to-save 100 \
     --logging-steps 3 \
-    --save-steps 60 \
-    --save-total-limit 2 \
     --max-seq-length 2048 \
     --prompt-template "teacher_reasoned" \
     --push-strategy "best" \

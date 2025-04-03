@@ -1,8 +1,8 @@
 #!/bin/bash
 # Script to add, commit, and push changes to git repository
 
-# Get commit message from command line argument, default to "Update" if not provided
-MESSAGE=${1:-"Update"}
+# Get the commit message from command line argument or use a default
+COMMIT_MESSAGE=${1:-"Update QLoRA training documentation with optimizations and troubleshooting"}
 
 # Run pre-commit hooks if installed
 if command -v pre-commit &> /dev/null; then
@@ -16,6 +16,15 @@ else
     echo "pre-commit not installed. Skipping pre-commit hooks."
 fi
 
+# Add all changes
 git add .
-git commit -m "$MESSAGE"
-git push
+
+# Commit with message
+git commit -m "$COMMIT_MESSAGE"
+
+# Push to remote
+git push origin main || git push origin master
+
+# Print status
+echo "Git add, commit, and push completed"
+echo "Commit message: $COMMIT_MESSAGE"

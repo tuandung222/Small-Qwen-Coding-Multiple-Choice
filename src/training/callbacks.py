@@ -83,10 +83,10 @@ class ValidationCallback(TrainerCallback):
         self.validation_history = []
         self.no_improvement_count = 0
 
-        # Cache for validation results
-        self.last_validation_step = 0
-        self.last_validation_results = {}
-        self.last_validation_metrics = {}
+        # Cache management
+        self.validation_cache = {}  # Store validation results by step
+        self.cache_valid_steps = validation_steps  # How long cache remains valid
+        self.last_validation_step = -1  # Last step where validation was performed
 
         # Ensure we have a directory for storing metrics
         self.metrics_dir = None
@@ -138,9 +138,11 @@ class ValidationCallback(TrainerCallback):
         if current_step == 0 and self.validate_at_start:
             return True
 
-        # Check if enough steps have passed since last validation
-        steps_since_last = current_step - self.last_validation_step
-        return steps_since_last >= self.validation_steps
+        # Run validation if current step is a multiple of validation_steps
+        if current_step % self.validation_steps == 0:
+            return True
+
+        return False
 
     def get_cached_or_validate(self, state: TrainerState) -> Dict[str, Any]:
         """
@@ -155,19 +157,46 @@ class ValidationCallback(TrainerCallback):
         current_step = state.global_step
 
         # Check if we should run validation
-        if not self.should_validate(current_step):
-            logger.info(f"Using cached validation results from step {self.last_validation_step}")
-            return self.last_validation_metrics
+        if self.should_validate(current_step):
+            # Run validation and update cache
+            logger.info(f"Running scheduled validation at step {current_step}")
+            metrics = self._run_validation()
+            self.validation_cache[current_step] = {
+                "metrics": metrics,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.last_validation_step = current_step
+            return metrics
 
-        # Run validation
-        logger.info(f"Running validation at step {current_step}")
+        # Try to use cached results from the most recent validation
+        if self.last_validation_step >= 0:
+            steps_since_last = current_step - self.last_validation_step
+            if steps_since_last < self.cache_valid_steps:
+                logger.info(
+                    f"Using cached validation results from step {self.last_validation_step} "
+                    f"({steps_since_last} steps ago)"
+                )
+                return self.validation_cache[self.last_validation_step]["metrics"]
+
+        # If cache is expired or no validation has been run yet, run validation
+        logger.info(
+            f"Cache expired or no validation yet, running validation at step {current_step}"
+        )
         metrics = self._run_validation()
-
-        # Update cache
+        self.validation_cache[current_step] = {
+            "metrics": metrics,
+            "timestamp": datetime.now().isoformat(),
+        }
         self.last_validation_step = current_step
-        self.last_validation_metrics = metrics
-
         return metrics
+
+    def _cleanup_old_cache(self, max_entries: int = 5):
+        """Clean up old cache entries to prevent memory bloat."""
+        if len(self.validation_cache) > max_entries:
+            # Keep only the most recent entries
+            sorted_steps = sorted(self.validation_cache.keys())
+            for step in sorted_steps[:-max_entries]:
+                del self.validation_cache[step]
 
     def on_train_begin(
         self,
@@ -368,6 +397,9 @@ class ValidationCallback(TrainerCallback):
         try:
             # Get validation results (from cache or new run)
             metrics = self.get_cached_or_validate(state)
+
+            # Clean up old cache entries
+            self._cleanup_old_cache()
 
             # If no metrics available, skip further processing
             if not metrics:
@@ -2071,4 +2103,36 @@ class ModelLoadingAlertCallback(TrainerCallback):
                         self.warning_count += 1
                 except Exception as e:
                     logger.warning(f"Error checking model during training: {e}")
+        return control
+
+
+class CheckpointCallback(TrainerCallback):
+    """Callback for managing checkpoints with safety considerations."""
+
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.best_metric = float("inf")
+        self.best_checkpoint = None
+
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        metrics: Dict[str, float],
+        **kwargs,
+    ):
+        """Save best checkpoint based on evaluation metrics."""
+        if "eval_loss" in metrics and metrics["eval_loss"] < self.best_metric:
+            self.best_metric = metrics["eval_loss"]
+            self.best_checkpoint = os.path.join(
+                self.output_dir, f"best-checkpoint-{state.global_step}"
+            )
+            # Save best model
+            kwargs["trainer"].save_model(self.best_checkpoint)
+            logger.info(
+                f"New best model saved at step {state.global_step} "
+                f"with eval_loss: {self.best_metric:.4f}"
+            )
+
         return control
