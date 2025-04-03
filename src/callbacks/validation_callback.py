@@ -128,6 +128,10 @@ class ValidationCallback(BaseCallback):
         # Get current step if available, otherwise default to 0
         current_step = state.global_step if state and hasattr(state, "global_step") else 0
 
+        # ADDITIONAL SAFETY CHECK: Only proceed if should_validate returns True
+        if not self.should_validate(current_step):
+            return {}
+
         # Check if validation dataset exists and contains examples
         if self._ensure_validation_dataset():
             # Always run validation without caching
@@ -640,6 +644,13 @@ class ValidationCallback(BaseCallback):
             # Ensure datasets are synced with the trainer before validation
             self._sync_datasets_with_trainer()
 
+            # Get current step
+            current_step = state.global_step if state and hasattr(state, "global_step") else 0
+
+            # FIX: Only run validation if should_validate returns True
+            if not self.should_validate(current_step):
+                return control
+
             # Get validation results without caching
             # This will call _handle_validation internally, so we don't need to handle metrics again here
             metrics = self.get_cached_or_validate(state)
@@ -783,227 +794,231 @@ class ValidationCallback(BaseCallback):
             )
 
     def _handle_validation(self, metrics: Dict[str, float], step: int):
-        """Handle validation results."""
-        # Log metrics
-        self._log_metrics(metrics, step)
+        """Handle validation results, including logging, pushing to hub, and updating best metrics."""
+        # Update best metric if needed
+        self._update_best_metric(metrics, step)
 
-        # Check if metrics have improved over the best so far
-        has_improved = self._check_improvement(metrics[self.metric_for_best], step)
+        # Log random example completions for tracing (with step parameter)
+        self._log_example_completions(step=step)
 
-        # If metrics have improved, handle the improvement
-        if has_improved:
-            self._handle_improvement(metrics, step)
+        # Handle saving best model to disk if needed
+        self._save_best_model_if_improved(metrics, step)
 
-        # Log random example completions for tracing
-        self._log_example_completions(step)
+        # Push best model to hub if needed
+        if self.push_to_hub and hasattr(self.trainer, "push_to_hub"):
+            self._push_best_model_to_hub_if_needed(metrics, step)
 
-        # Reset consecutive non-improvement counter or increment it
-        if has_improved:
-            self.consecutive_non_improvements = 0
-        else:
-            self.consecutive_non_improvements += 1
-            logger.info(
-                f"No improvement for {self.consecutive_non_improvements} validation rounds. "
-                f"Early stopping patience: {self.early_stopping_patience}"
-            )
+        # Store validation metrics to file
+        self._save_metrics_to_file(metrics, step)
 
-        # Check early stopping
-        if (
-            self.early_stopping_patience > 0
-            and self.consecutive_non_improvements >= self.early_stopping_patience
-        ):
-            logger.info(
-                f"Early stopping triggered after {self.consecutive_non_improvements} "
-                f"validation rounds without improvement."
-            )
-            return {"stop_training": True}
+        return metrics
 
-        return {"stop_training": False}
+    def _log_example_completions(self, step: int = None):
+        """Generate and log random example completions for debugging."""
+        if not hasattr(self.trainer, "tokenizer") or self.trainer.tokenizer is None:
+            logger.warning("Tokenizer not available. Cannot generate example completions.")
+            return
 
-    def _log_example_completions(self, step: int):
-        """Sample random examples from validation dataset and log full completions.
+        # Skip if no validation dataset is available
+        if not self._ensure_validation_dataset():
+            logger.warning("No validation dataset available for example completions.")
+            return
 
-        Args:
-            step: Current training step
-        """
         try:
-            # Only proceed if validation dataset is available
-            if not hasattr(self, "val_dataset") or self.val_dataset is None:
-                logger.warning("No validation dataset available for example completion logging")
+            # Get validation dataset - either from trainer or callback
+            val_dataset = None
+            if hasattr(self.trainer, "val_dataset") and self.trainer.val_dataset is not None:
+                val_dataset = self.trainer.val_dataset
+            elif hasattr(self, "val_dataset") and self.val_dataset is not None:
+                val_dataset = self.val_dataset
+            else:
+                logger.warning("No validation dataset for example completions.")
                 return
 
-            # Configure number of examples to sample
-            num_examples = min(3, len(self.val_dataset))
-            if num_examples == 0:
+            # Get device - either from trainer's model or default to 'cuda' if available
+            device = (
+                self.trainer.model.device
+                if hasattr(self.trainer.model, "device")
+                else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            )
+
+            # Get current step if not provided
+            current_step = step
+            if current_step is None and hasattr(self.trainer, "state"):
+                current_step = getattr(self.trainer.state, "global_step", 0)
+
+            # Get debug samples from trainer if available
+            debug_samples = getattr(self.trainer, "debug_samples", 3)
+
+            # Only generate examples if debug_samples > 0
+            if debug_samples <= 0:
                 return
 
-            # Sample random indices
-            import os
+            # Sample random examples from validation set
             import random
 
-            import torch
+            if len(val_dataset) == 0:
+                logger.warning("Validation dataset is empty. Cannot generate completions.")
+                return
 
-            indices = random.sample(range(len(self.val_dataset)), num_examples)
+            indices = random.sample(range(len(val_dataset)), min(debug_samples, len(val_dataset)))
+            completions = []
 
-            # Get the examples
-            examples = [self.val_dataset[idx] for idx in indices]
-
-            # Create directory for saving completions
-            log_dir = os.path.join(
-                self.trainer.output_dir if hasattr(self.trainer, "output_dir") else "outputs",
-                "example_completions",
+            # Setup output directory for example completions
+            output_dir = (
+                self.trainer.args.output_dir
+                if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "output_dir")
+                else "./outputs"
             )
-            os.makedirs(log_dir, exist_ok=True)
+            examples_dir = os.path.join(output_dir, "example_completions")
+            os.makedirs(examples_dir, exist_ok=True)
 
-            # Generate completions
-            model = self.trainer.model
-            tokenizer = self.trainer.tokenizer
+            # Generate and log completions for each example
+            for i, idx in enumerate(indices):
+                try:
+                    example = val_dataset[idx]
+                    raw_text = None
 
-            completion_logs = []
+                    # Try to extract text or input_ids based on what's available
+                    if "text" in example:
+                        raw_text = example["text"]
+                    elif "input_ids" in example:
+                        # Convert list to tensor if necessary
+                        input_ids = example["input_ids"]
+                        if isinstance(input_ids, list):
+                            input_ids = torch.tensor(input_ids)
+                        input_ids = input_ids.unsqueeze(0).to(device)
+                        raw_text = self.trainer.tokenizer.decode(input_ids[0])
 
-            # Log header
-            logger.info(f"\n{'='*40}\nGenerating example completions at step {step}\n{'='*40}")
+                    # Get attention mask if available or create a default one
+                    attention_mask = None
+                    if "attention_mask" in example:
+                        attention_mask = example["attention_mask"]
+                        if isinstance(attention_mask, list):
+                            attention_mask = torch.tensor(attention_mask)
+                        attention_mask = attention_mask.unsqueeze(0).to(device)
 
-            for i, example in enumerate(examples):
-                # Get input data
-                # Check if input_ids is already a tensor or needs conversion from list
-                if isinstance(example["input_ids"], list):
-                    input_ids = torch.tensor(example["input_ids"]).unsqueeze(0)
-                else:
-                    input_ids = example["input_ids"].unsqueeze(0)  # Add batch dimension
+                    if raw_text:
+                        # Log example to console
+                        logger.info(f"\nExample {i+1}/{len(indices)}:")
+                        logger.info(f"User Query: {raw_text[:500]}...")
 
-                # Check if attention_mask is already a tensor or needs conversion from list
-                if isinstance(example["attention_mask"], list):
-                    attention_mask = torch.tensor(example["attention_mask"]).unsqueeze(0)
-                else:
-                    attention_mask = example["attention_mask"].unsqueeze(0)
+                        # Generate completion if input_ids are available
+                        if "input_ids" in example or raw_text:
+                            try:
+                                # Convert to tensor if needed
+                                if "input_ids" in example:
+                                    input_ids = example["input_ids"]
+                                    if isinstance(input_ids, list):
+                                        input_ids = torch.tensor(input_ids)
+                                    input_ids = input_ids.unsqueeze(0).to(device)
+                                else:
+                                    inputs = self.trainer.tokenizer(
+                                        raw_text, return_tensors="pt"
+                                    ).to(device)
+                                    input_ids = inputs["input_ids"]
+                                    attention_mask = inputs["attention_mask"]
 
-                # Ensure tensors are on the right device
-                device = next(model.parameters()).device
-                input_ids = input_ids.to(device)
-                attention_mask = attention_mask.to(device)
+                                with torch.no_grad():
+                                    # Always generate at least 20 tokens
+                                    gen_inputs = {
+                                        "input_ids": input_ids,
+                                        "attention_mask": attention_mask,
+                                        "max_new_tokens": 30,
+                                        "temperature": 0.7,
+                                        "top_p": 0.9,
+                                    }
+                                    output = self.trainer.model.generate(**gen_inputs)
+                                    # Only get the newly generated tokens
+                                    new_tokens = output[0, input_ids.shape[1] :]
+                                    completion = self.trainer.tokenizer.decode(new_tokens)
+                                    logger.info(f"Generated: {completion}")
 
-                # Find response token position
-                if (
-                    hasattr(self.trainer, "responses_only_config")
-                    and self.trainer.responses_only_config
-                ):
-                    response_token = self.trainer.responses_only_config.get(
-                        "response_token", "<|im_start|>assistant\n"
-                    )
-                else:
-                    response_token = "<|im_start|>assistant\n"  # Default
+                                    # Add to completions list
+                                    completions.append(
+                                        {
+                                            "prompt": raw_text[:500] + "...",
+                                            "completion": completion,
+                                            "raw_text": raw_text,
+                                        }
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Error generating completion: {e}")
+                                logger.debug(f"Input shape: {input_ids.shape}")
+                                import traceback
 
-                # Decode input to find user query
-                input_text = tokenizer.decode(input_ids[0])
+                                logger.debug(f"Generation error: {traceback.format_exc()}")
+                    else:
+                        logger.warning(f"Could not extract text for example {i+1}")
+                except Exception as e:
+                    logger.warning(f"Error processing example {i+1}: {e}")
 
-                # Extract user query and model's expected completion
-                parts = input_text.split(response_token)
-                user_query = parts[0] if len(parts) > 0 else input_text
-                expected_completion = parts[1] if len(parts) > 1 else ""
-
-                # Generate completion with the model
-                with torch.inference_mode():
-                    try:
-                        outputs = model.generate(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            max_new_tokens=256,
-                            temperature=0.7,
-                            top_p=0.9,
-                            do_sample=True,
-                            pad_token_id=tokenizer.eos_token_id,
-                        )
-
-                        # Get only the new tokens (the completion)
-                        new_tokens = outputs[0][input_ids.shape[1] :]
-                        generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-                        # Log to console
-                        logger.info(f"\nExample {i+1}/{num_examples}:")
-                        logger.info(f"User Query: {user_query[:100]}...")
-                        logger.info(f"Generated: {generated_text[:100]}...")
-
-                        # Save to file
-                        example_log_path = os.path.join(log_dir, f"step_{step}_example_{i+1}.txt")
-                        with open(example_log_path, "w", encoding="utf-8") as f:
-                            f.write(f"STEP: {step}\n")
-                            f.write(f"USER QUERY:\n{user_query}\n\n")
-                            f.write(f"EXPECTED COMPLETION:\n{expected_completion}\n\n")
-                            f.write(f"GENERATED COMPLETION:\n{generated_text}\n")
-
-                        # Add to logs for wandb
-                        completion_logs.append(
-                            {
-                                "step": step,
-                                "example_idx": indices[i],
-                                "user_query": user_query,
-                                "expected_completion": expected_completion,
-                                "generated_completion": generated_text,
-                            }
-                        )
-                    except Exception as e:
-                        logger.error(f"Error generating completion for example {i}: {e}")
-
-            # Log to wandb if available
+            # Log completions to wandb
             try:
                 import wandb
 
-                if wandb.run:
-                    # Create table for easy viewing
-                    table_data = []
-                    for log in completion_logs:
-                        table_data.append(
-                            [
-                                log["step"],
-                                log["example_idx"],
-                                log["user_query"][:200] + "..."
-                                if len(log["user_query"]) > 200
-                                else log["user_query"],
-                                log["expected_completion"][:200] + "..."
-                                if len(log["expected_completion"]) > 200
-                                else log["expected_completion"],
-                                log["generated_completion"][:200] + "..."
-                                if len(log["generated_completion"]) > 200
-                                else log["generated_completion"],
-                            ]
-                        )
-
-                    columns = ["Step", "Example Index", "User Query", "Expected", "Generated"]
-                    wandb.log(
-                        {
-                            f"validation/example_completions_step_{step}": wandb.Table(
-                                data=table_data, columns=columns
-                            )
-                        },
-                        step=step,  # Add step parameter to ensure monotonically increasing steps
+                if wandb.run is not None and completions:
+                    # Create a wandb Table with the completions
+                    completion_table = wandb.Table(
+                        columns=["prompt", "completion"],
+                        data=[[c["prompt"], c["completion"]] for c in completions],
                     )
 
-                    # Also log as text for easier reading
-                    for i, log in enumerate(completion_logs):
-                        wandb.log(
-                            {
-                                f"validation/example_{i+1}/step_{step}": wandb.Html(
-                                    f"<h3>Example {i+1} at step {step}</h3>"
-                                    f"<h4>User Query:</h4><pre>{log['user_query']}</pre>"
-                                    f"<h4>Expected:</h4><pre>{log['expected_completion']}</pre>"
-                                    f"<h4>Generated:</h4><pre>{log['generated_completion']}</pre>"
-                                )
-                            },
-                            step=step,  # Add step parameter to ensure monotonically increasing steps
+                    # Create wandb.Html with formatted examples
+                    html_content = "<div style='font-family: monospace;'>"
+                    for i, comp in enumerate(completions):
+                        # Define replacement patterns outside of f-string
+                        prompt_safe = (
+                            comp["prompt"]
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;")
+                            .replace("\n", "<br>")
+                        )
+                        completion_safe = (
+                            comp["completion"]
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;")
+                            .replace("\n", "<br>")
                         )
 
-                    logger.info(f"Logged {len(completion_logs)} example completions to wandb")
-            except ImportError:
-                logger.info("wandb not available for logging example completions")
+                        html_content += f"<h3>Example {i+1}</h3>"
+                        html_content += f"<p><strong>Prompt:</strong><br>{prompt_safe}</p>"
+                        html_content += f"<p><strong>Completion:</strong><br>{completion_safe}</p>"
+                        html_content += "<hr>"
+                    html_content += "</div>"
 
-            logger.info(f"Example completions saved to {log_dir}")
+                    # Always pass step parameter to wandb.log
+                    log_dict = {
+                        "example_completions": completion_table,
+                        "example_completions_html": wandb.Html(html_content),
+                    }
+                    wandb.log(log_dict, step=current_step)
+                    logger.info(f"Logged {len(completions)} example completions to wandb")
+            except Exception as e:
+                logger.warning(f"Error logging completions to wandb: {e}")
+
+            # Save completions to disk
+            if completions:
+                completions_file = os.path.join(
+                    examples_dir, f"completions_step_{current_step or 0}.json"
+                )
+                with open(completions_file, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "step": current_step or 0,
+                            "timestamp": datetime.now().isoformat(),
+                            "completions": completions,
+                        },
+                        f,
+                        indent=2,
+                    )
+                logger.info(f"Example completions saved to {examples_dir}")
 
         except Exception as e:
-            logger.error(f"Error logging example completions: {e}")
+            logger.warning(f"Failed to generate example completions: {e}")
             import traceback
 
-            logger.error(traceback.format_exc())
+            logger.debug(f"Example completion error: {traceback.format_exc()}")
 
     def _ensure_validation_dataset(self):
         """Ensure that a valid, non-empty validation dataset exists."""
@@ -1082,3 +1097,80 @@ class ValidationCallback(BaseCallback):
             print(f"Prompt: {item['prompt']}")
             print(f"Completion: {item['completion']}")
             print("=" * 70 + "\n")
+
+    def _save_best_model_if_improved(self, metrics: Dict[str, float], step: int):
+        """Save the best model to disk if metrics have improved."""
+        # Check if the metric for best has improved
+        if self.metric_for_best not in metrics:
+            return
+
+        has_improved = self._check_improvement(metrics[self.metric_for_best], step)
+
+        if has_improved and hasattr(self.trainer, "save_checkpoint"):
+            # Get the output directory
+            output_dir = getattr(self.trainer, "output_dir", None)
+            if not output_dir and hasattr(self.trainer, "args"):
+                output_dir = getattr(self.trainer.args, "output_dir", "./outputs")
+
+            # Create the best model directory
+            best_model_dir = os.path.join(output_dir, "best_model")
+            os.makedirs(best_model_dir, exist_ok=True)
+
+            # Save the checkpoint
+            self.trainer.save_checkpoint(best_model_dir, metrics, is_best=True)
+            logger.info(
+                f"Saved best model with {self.metric_for_best}={metrics[self.metric_for_best]:.4f} to {best_model_dir}"
+            )
+
+            # Update best checkpoint path
+            self.best_checkpoint = best_model_dir
+
+    def _push_best_model_to_hub_if_needed(self, metrics: Dict[str, float], step: int):
+        """Push the best model to the hub if metrics have improved."""
+        # Only proceed if push_to_hub is enabled
+        if not self.push_to_hub:
+            return
+
+        # Check if the metric for best has improved
+        if self.metric_for_best not in metrics:
+            return
+
+        has_improved = self._check_improvement(metrics[self.metric_for_best], step)
+
+        if has_improved and hasattr(self.trainer, "push_to_hub"):
+            # Create commit message with metrics
+            commit_message = f"Best model at step {step} with {self.metric_for_best}={metrics[self.metric_for_best]:.4f}"
+
+            # Push to hub
+            try:
+                self.trainer.push_to_hub(commit_message=commit_message)
+                logger.info(f"Successfully pushed best model to hub at step {step}")
+            except Exception as e:
+                logger.error(f"Failed to push to hub: {e}")
+
+    def _save_metrics_to_file(self, metrics: Dict[str, float], step: int):
+        """Save validation metrics to a JSON file for later analysis."""
+        if not hasattr(self, "metrics_dir") or not self.metrics_dir:
+            # Create metrics directory if it doesn't exist
+            output_dir = getattr(self.trainer, "output_dir", None)
+            if not output_dir and hasattr(self.trainer, "args"):
+                output_dir = getattr(self.trainer.args, "output_dir", "./outputs")
+
+            self.metrics_dir = os.path.join(output_dir, "validation_metrics")
+            os.makedirs(self.metrics_dir, exist_ok=True)
+
+        # Create a metrics file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        metrics_file = os.path.join(self.metrics_dir, f"metrics_step_{step}_{timestamp}.json")
+
+        # Add metadata to metrics
+        metrics_with_meta = {
+            "step": step,
+            "timestamp": timestamp,
+            "is_best": self._check_improvement(metrics.get(self.metric_for_best, 0), step),
+            "metrics": metrics,
+        }
+
+        # Save to file
+        with open(metrics_file, "w", encoding="utf-8") as f:
+            json.dump(metrics_with_meta, f, indent=2)
