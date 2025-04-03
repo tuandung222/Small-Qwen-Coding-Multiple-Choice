@@ -23,11 +23,12 @@ echo "Setting PYTHONPATH to include: $(pwd)"
 # LoRA-optimized default values with Lion 8-bit settings
 SOURCE_MODEL="unsloth/Qwen2.5-Coder-1.5B-Instruct"
 DESTINATION_REPO="tuandunghcmut/Qwen25_Coder_MultipleChoice_v4"
-BATCH_SIZE=16
+BATCH_SIZE=12
 GRAD_ACCUM=2
 LEARNING_RATE=5e-5
 EPOCHS=7
-WARMUP_STEPS=20
+WARMUP_STEPS=30
+LOGGING_STEPS=30
 VALIDATION_STEPS=30
 DEBUG_SAMPLES=3
 MINIMAL_VALIDATING=true
@@ -36,7 +37,7 @@ SAVE_STEPS=60
 SAVE_TOTAL_LIMIT=5
 
 # Data loading configuration
-DATALOADER_NUM_WORKERS=2
+DATALOADER_NUM_WORKERS=4
 DATALOADER_PIN_MEMORY=true
 FULL_DETERMINISM=false
 TORCH_COMPILE=false
@@ -107,7 +108,7 @@ nohup python3 src/run.py \
     --report-to "$REPORT_TO" \
     --remove-unused-columns \
     --push-to-hub \
-    --logging-steps 1 \
+    --logging-steps "$LOGGING_STEPS" \
     --max-seq-length 2048 \
     --prompt-template "teacher_reasoned" \
     --push-strategy "best" \
