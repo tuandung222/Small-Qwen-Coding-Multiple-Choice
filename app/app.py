@@ -81,6 +81,7 @@ class MCQGradioApp:
         if isinstance(example_idx, list):
             if not example_idx:
                 return "No example selected.", ""
+            # Take the first example if it's a list
             example_idx = example_idx[0]
             print(f"Debug - after list handling, example_idx: {example_idx}")
 
@@ -88,7 +89,9 @@ class MCQGradioApp:
         if isinstance(example_idx, str):
             try:
                 # Extract the number from "Example X: ..." format
-                example_idx = int(example_idx.split(":")[0].split()[-1]) - 1
+                # Split by ':' and take the first part, then split by space and take the last part
+                example_num = example_idx.split(":")[0].split()[-1]
+                example_idx = int(example_num) - 1  # Convert to 0-based index
                 print(f"Debug - after string conversion, example_idx: {example_idx}")
             except (ValueError, IndexError) as e:
                 print(f"Debug - error during conversion: {e}")
@@ -107,7 +110,7 @@ class MCQGradioApp:
     def get_category_examples(self, category_name):
         """Get examples for a specific category"""
         if category_name == "All Categories":
-            return [f"Example {i+1}: {ex['question']}" for i, ex in enumerate(CODING_EXAMPLES)]
+            choices = [f"Example {i+1}: {ex['question']}" for i, ex in enumerate(CODING_EXAMPLES)]
         elif category_name in CODING_EXAMPLES_BY_CATEGORY:
             # Find the starting index for this category in the flattened list
             start_idx = 0
@@ -116,12 +119,14 @@ class MCQGradioApp:
                     break
                 start_idx += len(examples)
 
-            return [
+            choices = [
                 f"Example {start_idx+i+1}: {ex['question']}"
                 for i, ex in enumerate(CODING_EXAMPLES_BY_CATEGORY[category_name])
             ]
         else:
-            return []
+            choices = []
+
+        return gr.Dropdown(choices=choices, value=None, interactive=True)
 
     def create_interface(self):
         """Create the Gradio interface"""
@@ -148,6 +153,7 @@ class MCQGradioApp:
                         choices=["All Categories"] + list(CODING_EXAMPLES_BY_CATEGORY.keys()),
                         value="All Categories",
                         label="Select a category",
+                        interactive=True,
                     )
 
                     # Example selector
@@ -157,7 +163,9 @@ class MCQGradioApp:
                         ],
                         label="Select an example question",
                         value=None,
-                        allow_custom_value=True,  # Add this to prevent warnings
+                        interactive=True,
+                        show_label=True,
+                        container=True,
                     )
 
                     gr.Markdown("### Your Question")
