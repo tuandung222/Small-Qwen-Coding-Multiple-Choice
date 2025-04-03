@@ -74,15 +74,28 @@ class MCQGradioApp:
 
     def process_example(self, example_idx):
         """Process an example from the preset list"""
+        print(f"Debug - example_idx type: {type(example_idx)}")
+        print(f"Debug - example_idx value: {example_idx}")
+
+        # Handle case where example_idx is a list
+        if isinstance(example_idx, list):
+            if not example_idx:
+                return "No example selected.", ""
+            example_idx = example_idx[0]
+            print(f"Debug - after list handling, example_idx: {example_idx}")
+
         # Convert string index to integer if needed
         if isinstance(example_idx, str):
             try:
                 # Extract the number from "Example X: ..." format
                 example_idx = int(example_idx.split(":")[0].split()[-1]) - 1
-            except (ValueError, IndexError):
+                print(f"Debug - after string conversion, example_idx: {example_idx}")
+            except (ValueError, IndexError) as e:
+                print(f"Debug - error during conversion: {e}")
                 return "Invalid example index.", ""
 
         if example_idx < 0 or example_idx >= len(CODING_EXAMPLES):
+            print(f"Debug - index out of range: {example_idx}")
             return "Invalid example index.", ""
 
         example = CODING_EXAMPLES[example_idx]
