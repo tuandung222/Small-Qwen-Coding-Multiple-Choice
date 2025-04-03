@@ -7,7 +7,7 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 export TOKENIZERS_PARALLELISM=false
 
 # Install additional dependencies if needed
-pip install -q wandb tqdm numpy pandas prettytable scikit-learn
+pip install -q wandb tqdm numpy pandas prettytable scikit-learn lion-pytorch
 
 # Reset training log file if it exists
 if [ -f "training.log" ]; then
@@ -23,11 +23,11 @@ fi
 SOURCE_MODEL="unsloth/Qwen2.5-Coder-1.5B-Instruct"
 DESTINATION_REPO="tuandunghcmut/Qwen25_Coder_MultipleChoice_v3"
 BATCH_SIZE=4
-LEARNING_RATE=2e-4
+LEARNING_RATE=3e-5  # Adjusted for Lion
 EPOCHS=3
-WARMUP_STEPS=50  # New default warmup steps
-VALIDATION_STEPS=50  # Steps between validations
-DEBUG_SAMPLES=3  # Number of samples to log for debugging
+WARMUP_STEPS=30
+VALIDATION_STEPS=30
+DEBUG_SAMPLES=3
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -52,15 +52,15 @@ while [[ $# -gt 0 ]]; do
       EPOCHS="$2"
       shift 2
       ;;
-    --warmup-steps)  # New parameter
+    --warmup-steps)
       WARMUP_STEPS="$2"
       shift 2
       ;;
-    --validation-steps)  # New parameter
+    --validation-steps)
       VALIDATION_STEPS="$2"
       shift 2
       ;;
-    --debug-samples)  # New parameter
+    --debug-samples)
       DEBUG_SAMPLES="$2"
       shift 2
       ;;
@@ -76,7 +76,7 @@ echo "=== Training Configuration ==="
 echo "Source model: $SOURCE_MODEL"
 echo "Destination repo: $DESTINATION_REPO"
 echo "Batch size: $BATCH_SIZE"
-echo "Learning rate: $LEARNING_RATE"
+echo "Learning rate: $LEARNING_RATE (Lion optimizer)"
 echo "Epochs: $EPOCHS"
 echo "Warmup steps: $WARMUP_STEPS"
 echo "Validation steps: $VALIDATION_STEPS"
@@ -85,20 +85,39 @@ echo "==========================="
 
 # Add timestamp to experiment name for uniqueness
 TIMESTAMP=$(date +"%m%d_%H%M")
-EXPERIMENT_NAME="Qwen25_Coder_MCQ_5Epochs_${TIMESTAMP}"
+EXPERIMENT_NAME="Qwen25_Coder_MCQ_Lion_${TIMESTAMP}"
 
-# Run the training script with comprehensive features
+# Run the training script with Lion optimizer configuration
 python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "$SOURCE_MODEL" \
     --destination-repo "$DESTINATION_REPO" \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" \
-    --learning-rate "$LEARNING_RATE" \
+    \
+    # Lion optimizer configuration
+    --optimizer "lion" \
+    --learning-rate 3e-5 \
+    --weight-decay 0.1 \
+    --lion-beta1 0.95 \
+    --lion-beta2 0.98 \
+    --max-grad-norm 1.0 \
+    \
+    # Learning rate scheduler
     --warmup-steps "$WARMUP_STEPS" \
+    --lr-scheduler "cosine_with_warmup" \
+    --lr-scheduler-num-cycles 1 \
+    \
+    # LoRA configuration (adjusted for Lion)
+    --lora-r 32 \
+    --lora-alpha 64 \
+    --lora-dropout 0.1 \
+    --peft-type "lora" \
+    --target-modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
+    \
+    # Training monitoring
     --validation-steps "$VALIDATION_STEPS" \
     --debug-samples "$DEBUG_SAMPLES" \
-    --lr-scheduler "cosine_with_warmup" \
     --push-to-hub \
     --validate-at-start \
     --prompt-track-diversity \
@@ -112,40 +131,26 @@ python src/run.py \
     --metric-for-best "eval_loss" \
     --early-stopping-patience 3 \
     --early-stopping-delta 0.01 \
-    --grad-accum 1 \
-    --weight-decay 0.01 \
+    \
+    # Model configuration
     --max-seq-length 2048 \
     --quantization "4bit" \
-    \
-    --lora-r 32 \
-    --lora-alpha 64 \
-    --lora-dropout 0.05 \
-    --peft-type "lora" \
-    --target-modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
-    \
-    --optimizer "adamw_torch" \
-    --adam-beta1 0.9 \
-    --adam-beta2 0.999 \
-    --adam-epsilon 1e-8 \
-    --max-grad-norm 1.0 \
-    --optim-bits 8 \
-    \
-    --lr-scheduler-num-cycles 1 \
-    --lr-scheduler-power 1.0 \
-    \
     --prompt-template "teacher_reasoned" \
     --save-total-limit 5 \
     --push-strategy "best" \
     \
+    # Dataset configuration
     --dataset "tuandunghcmut/coding-mcq-reasoning" \
     --val-split 0.04 \
     --random-seed 42 \
     --output-dir "model_output" \
     \
+    # Attention configuration
     --use-flash-attention \
     --attention-implementation "flash_attention_2" \
     --force-attn-implementation \
     \
+    # Response-only training
     --train-on-responses-only \
     --instruction-token "<|im_start|>user\n" \
     --response-token "<|im_start|>assistant\n" \
