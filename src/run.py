@@ -13,16 +13,22 @@ from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-# Import wandb once at the top level
 import wandb
+
+try:
+    import src
+except:
+    sys.path.append("../")
+
+from src.callbacks.base_callback import BaseCallback
+from src.callbacks.early_stopping_callback import EarlyStoppingCallback
+from src.callbacks.lr_monitor_callback import LRMonitorCallback
+from src.callbacks.model_loading_alert_callback import ModelLoadingAlertCallback
+from src.callbacks.prompt_monitor_callback import PromptMonitorCallback
+from src.callbacks.safety_checkpoint_callback import SafetyCheckpointCallback
+from src.callbacks.validation_callback import ValidationCallback
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
-from src.training.callbacks.base_callback import BaseCallback
-from src.training.callbacks.early_stopping_callback import EarlyStoppingCallback
-from src.training.callbacks.lr_monitor_callback import LRMonitorCallback
-from src.training.callbacks.model_loading_alert_callback import ModelLoadingAlertCallback
-from src.training.callbacks.prompt_monitor_callback import PromptMonitorCallback
-from src.training.callbacks.validation_callback import ValidationCallback
 from src.training.trainer import QwenTrainer
 from src.utils.auth import setup_authentication
 from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
@@ -31,7 +37,7 @@ from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("training.log")],
+    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("outputs/training.log")],
 )
 logger = logging.getLogger(__name__)
 
@@ -165,7 +171,14 @@ def parse_args():
         type=str,
         default="4bit",
         choices=["4bit", "8bit", "none"],
-        help="Quantization level for the model",
+        help="Quantization method for model loading (4bit, 8bit, or none)",
+    )
+    parser.add_argument(
+        "--peft-type",
+        type=str,
+        default="lora",
+        choices=["lora", "prefix_tuning", "prompt_tuning", "p_tuning"],
+        help="Type of PEFT method to use",
     )
 
     # Training configuration
@@ -253,12 +266,6 @@ def parse_args():
         help="Number of steps between logging updates (non-test mode)",
     )
     parser.add_argument(
-        "--save-steps",
-        type=int,
-        default=500,
-        help="Number of steps between model checkpoints (non-test mode)",
-    )
-    parser.add_argument(
         "--test-logging-steps",
         type=int,
         default=10,
@@ -314,47 +321,42 @@ def parse_args():
     )
 
     # Prompt monitoring configuration
-    parser.add_argument(
-        "--prompt-track-diversity",
-        action="store_true",
-        default=True,
-        help="Track prompt diversity during training",
-    )
-    parser.add_argument(
-        "--prompt-track-quality",
-        action="store_true",
-        default=True,
-        help="Track prompt quality metrics during training",
-    )
-    parser.add_argument(
-        "--prompt-interactive",
-        action="store_true",
-        default=False,
-        help="Enable interactive prompt selection mode",
-    )
-    parser.add_argument(
-        "--prompt-categorize",
-        action="store_true",
-        default=True,
-        help="Automatically categorize prompts",
-    )
-    parser.add_argument(
-        "--prompt-comparison",
-        action="store_true",
-        default=True,
-        help="Enable prompt comparison features",
-    )
-    parser.add_argument(
-        "--max-prompts-to-save",
-        type=int,
-        default=100,
-        help="Maximum number of prompts to save for analysis",
-    )
-
-    # LoRA configuration
-    parser.add_argument("--lora-r", type=int, default=8, help="LoRA attention dimension")
-    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter")
-    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout rate")
+    # parser.add_argument(
+    #     "--prompt-track-diversity",
+    #     action="store_true",
+    #     default=True,
+    #     help="Track prompt diversity during training",
+    # )
+    # parser.add_argument(
+    #     "--prompt-track-quality",
+    #     action="store_true",
+    #     default=True,
+    #     help="Track prompt quality metrics during training",
+    # )
+    # parser.add_argument(
+    #     "--prompt-interactive",
+    #     action="store_true",
+    #     default=False,
+    #     help="Enable interactive prompt selection mode",
+    # )
+    # parser.add_argument(
+    #     "--prompt-categorize",
+    #     action="store_true",
+    #     default=True,
+    #     help="Automatically categorize prompts",
+    # )
+    # parser.add_argument(
+    #     "--prompt-comparison",
+    #     action="store_true",
+    #     default=True,
+    #     help="Enable prompt comparison features",
+    # )
+    # parser.add_argument(
+    #     "--max-prompts-to-save",
+    #     type=int,
+    #     default=100,
+    #     help="Maximum number of prompts to save for analysis",
+    # )
 
     # Repository configuration
     parser.add_argument(
@@ -376,12 +378,6 @@ def parse_args():
         default="best",
         choices=["best", "end", "all", "no"],
         help="When to push to hub: 'best'=best checkpoint, 'end'=end of training, 'all'=each save, 'no'=don't push",
-    )
-    parser.add_argument(
-        "--save-total-limit",
-        type=int,
-        default=3,
-        help="Maximum number of checkpoints to keep",
     )
 
     # Dataset configuration
@@ -507,65 +503,12 @@ def parse_args():
         help="Index of last epoch when resuming training",
     )
 
-    # PEFT configuration
-    parser.add_argument(
-        "--peft-type",
-        type=str,
-        default="lora",
-        choices=["lora", "adalora", "prefix", "prompt", "ia3", "lokr", "oft"],
-        help="PEFT method to use",
-    )
-
-    # AdaLoRA specific parameters
-    parser.add_argument(
-        "--adalora-target-r",
-        type=int,
-        default=8,
-        help="Target rank for AdaLoRA",
-    )
-    parser.add_argument(
-        "--adalora-init-r",
-        type=int,
-        default=12,
-        help="Initial rank for AdaLoRA",
-    )
-    parser.add_argument(
-        "--adalora-tinit",
-        type=int,
-        default=200,
-        help="Initial step before sparsification begins",
-    )
-    parser.add_argument(
-        "--adalora-tfinal",
-        type=int,
-        default=1000,
-        help="Final step when sparsification ends",
-    )
-    parser.add_argument(
-        "--adalora-delta-t",
-        type=int,
-        default=10,
-        help="Steps between rank updates",
-    )
-    parser.add_argument(
-        "--adalora-beta1",
-        type=float,
-        default=0.85,
-        help="EMA hyperparameter",
-    )
-    parser.add_argument(
-        "--adalora-beta2",
-        type=float,
-        default=0.85,
-        help="EMA hyperparameter",
-    )
-
     # Module targeting options
     parser.add_argument(
-        "--target-modules",
+        "--legacy-target-modules",
         type=str,
         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
-        help="Comma-separated list of target modules",
+        help="[Deprecated] Use --target-modules instead",
     )
     parser.add_argument(
         "--fan-in-fan-out",
@@ -574,10 +517,10 @@ def parse_args():
         help="Set fan_in_fan_out for Conv1D",
     )
     parser.add_argument(
-        "--use-grad-checkpoint",
+        "--legacy-gradient-checkpointing",
         type=bool,
         default=False,
-        help="Use gradient checkpointing (legacy option)",
+        help="Use gradient checkpointing (legacy boolean parameter)",
     )
     parser.add_argument(
         "--modules-to-save",
@@ -662,48 +605,33 @@ def parse_args():
         help="Maximum number of samples to use for validation when minimal-validating is enabled",
     )
 
-    # Add QLoRA configuration
+    # LoRA configuration
     parser.add_argument(
-        "--double-quant",
-        action="store_true",
-        default=True,
-        help="Enable double quantization for QLoRA",
-    )
-    parser.add_argument(
-        "--quant-type",
-        type=str,
-        default="nf4",
-        choices=["nf4", "fp4"],
-        help="Quantization data type for QLoRA",
-    )
-    parser.add_argument(
-        "--bits",
+        "--lora-r",
         type=int,
-        default=4,
-        choices=[4, 8],
-        help="Number of bits for quantization",
+        default=64,
+        help="LoRA attention dimension",
     )
     parser.add_argument(
-        "--compute-dtype",
-        type=str,
-        default="bf16",
-        choices=["bf16", "fp16", "fp32"],
-        help="Compute dtype for QLoRA",
+        "--lora-alpha",
+        type=int,
+        default=16,
+        help="LoRA alpha parameter",
     )
     parser.add_argument(
-        "--double-quant-threshold",
+        "--lora-dropout",
         type=float,
-        default=6.0,
-        help="Threshold for double quantization in QLoRA",
+        default=0.1,
+        help="LoRA dropout rate",
     )
     parser.add_argument(
-        "--memory-efficient-backward",
-        action="store_true",
-        default=True,
-        help="Enable memory efficient backward pass",
+        "--target-modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated list of target modules for LoRA",
     )
     parser.add_argument(
-        "--gradient-checkpointing",
+        "--use-gradient-checkpointing",
         action="store_true",
         default=True,
         help="Enable gradient checkpointing",
@@ -713,94 +641,6 @@ def parse_args():
         type=float,
         default=1.0,
         help="Ratio of layers to use gradient checkpointing",
-    )
-    parser.add_argument(
-        "--paged-adamw-64bit",
-        action="store_true",
-        default=False,
-        help="Use paged AdamW 64-bit optimizer",
-    )
-    parser.add_argument(
-        "--max-memory",
-        type=str,
-        default=None,
-        help='Maximum memory usage per device, e.g., {"cpu": "30GB", "gpu": "20GB"}',
-    )
-    parser.add_argument(
-        "--max-memory-per-gpu",
-        type=str,
-        default=None,
-        help="Maximum memory usage per GPU device",
-    )
-    parser.add_argument(
-        "--offload-folder",
-        type=str,
-        default="offload",
-        help="Folder for CPU offloading",
-    )
-    parser.add_argument(
-        "--use-flash-attention-2",
-        action="store_true",
-        default=True,
-        help="Use Flash Attention 2 with QLoRA",
-    )
-
-    # Update LoRA configuration for QLoRA
-    parser.add_argument(
-        "--lora-r",
-        type=int,
-        default=64,
-        help="LoRA attention dimension for QLoRA",
-    )
-    parser.add_argument(
-        "--lora-alpha",
-        type=int,
-        default=16,
-        help="LoRA alpha parameter for QLoRA",
-    )
-    parser.add_argument(
-        "--lora-dropout",
-        type=float,
-        default=0.1,
-        help="LoRA dropout rate for QLoRA",
-    )
-    parser.add_argument(
-        "--target-modules",
-        type=str,
-        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
-        help="Comma-separated list of target modules for QLoRA",
-    )
-
-    # Update training configuration for QLoRA
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="Per device batch size (optimized for QLoRA)",
-    )
-    parser.add_argument(
-        "--grad-accum",
-        type=int,
-        default=4,
-        help="Gradient accumulation steps for QLoRA",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=2e-4,
-        help="Learning rate (optimized for QLoRA)",
-    )
-    parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=0.01,
-        help="Weight decay for QLoRA",
-    )
-    parser.add_argument(
-        "--warmup-ratio",
-        type=float,
-        default=0.03,
-        help="Warmup ratio for QLoRA",
     )
     parser.add_argument(
         "--max-train-steps",
@@ -837,6 +677,84 @@ def parse_args():
         help="Strategy to save checkpoints (default: steps)",
     )
 
+    # New command line arguments
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        default=4,
+        help="Number of workers for data loading",
+    )
+    parser.add_argument(
+        "--dataloader-pin-memory",
+        action="store_true",
+        default=True,
+        help="Pin memory for data loading",
+    )
+    parser.add_argument(
+        "--full-determinism",
+        action="store_true",
+        default=False,
+        help="Enable full determinism in training",
+    )
+    parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        default=False,
+        help="Enable torch.compile for training",
+    )
+    parser.add_argument(
+        "--use-cpu",
+        action="store_true",
+        default=False,
+        help="Use CPU for training",
+    )
+    parser.add_argument(
+        "--evaluation-strategy",
+        type=str,
+        default="steps",
+        choices=["no", "steps", "epoch"],
+        help="Evaluation strategy for training",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=50,
+        help="Number of steps between evaluations",
+    )
+    parser.add_argument(
+        "--eval-delay",
+        type=int,
+        default=0,
+        help="Number of steps to delay evaluation",
+    )
+    parser.add_argument(
+        "--report-to",
+        type=str,
+        default="wandb",
+        choices=["wandb", "tensorboard", "none"],
+        help="Where to report training metrics",
+    )
+    parser.add_argument(
+        "--remove-unused-columns",
+        action="store_true",
+        default=False,
+        help="Remove unused columns from dataset",
+    )
+
+    # Add options for load_best_model_at_end
+    parser.add_argument(
+        "--load-best-model-at-end",
+        action="store_true",
+        default=True,
+        help="Load the best model at the end of training",
+    )
+    parser.add_argument(
+        "--no-load-best-model-at-end",
+        action="store_false",
+        dest="load_best_model_at_end",
+        help="Disable loading the best model at the end of training",
+    )
+
     return parser.parse_args()
 
 
@@ -845,75 +763,50 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
     try:
         # Initialize model handler
         logger.info("Initializing model handler...")
+
+        # Configure quantization
+        quantization_config = None
+        if args.quantization != "none":
+            from transformers import BitsAndBytesConfig
+
+            if args.quantization == "4bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                )
+            elif args.quantization == "8bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                )
+
         model_handler = QwenModelHandler(
             model_name=source_hub.model_id,
             max_seq_length=args.max_seq_length,
-            quantization=args.quantization,
+            quantization=args.quantization,  # Pass the quantization string
             model_source=ModelSource.UNSLOTH,
             device_map="auto",
             source_hub_config=source_hub,
         )
 
-        # Configure LoRA or other PEFT methods
+        # Configure PEFT method
         logger.info(f"Setting up {args.peft_type} configuration...")
 
-        # Parse target modules from string to list if provided
+        # Get target modules string using either new or legacy parameter
+        target_modules_str = getattr(args, "target_modules", None) or getattr(
+            args, "legacy_target_modules", ""
+        )
         target_modules = (
-            args.target_modules.split(",")
-            if args.target_modules
-            else [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",  # Attention modules
-                "gate_proj",
-                "up_proj",
-                "down_proj",  # FFN modules
-            ]
+            target_modules_str.split(",")
+            if target_modules_str
+            else ["q_proj", "k_proj", "v_proj", "o_proj"]
         )
 
-        # Set up appropriate PEFT configuration based on the type
+        # Set up PEFT configuration based on type
         if args.peft_type == "lora":
-            lora_config = LoraConfig(
-                r=args.lora_r,
-                lora_alpha=args.lora_alpha,
-                target_modules=target_modules,
-                lora_dropout=args.lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-                fan_in_fan_out=args.fan_in_fan_out,
-                modules_to_save=args.modules_to_save.split(",") if args.modules_to_save else None,
-            )
-            peft_config = lora_config
-        elif args.peft_type == "adalora":
-            # Import AdaLoraConfig if adalora is selected
-            from peft import AdaLoraConfig
+            from peft import LoraConfig
 
-            adalora_config = AdaLoraConfig(
-                r=args.lora_r,
-                lora_alpha=args.lora_alpha,
-                target_modules=target_modules,
-                lora_dropout=args.lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-                target_r=args.adalora_target_r,
-                init_r=args.adalora_init_r,
-                tinit=args.adalora_tinit,
-                tfinal=args.adalora_tfinal,
-                delta_t=args.adalora_delta_t,
-                beta1=args.adalora_beta1,
-                beta2=args.adalora_beta2,
-                fan_in_fan_out=args.fan_in_fan_out,
-                modules_to_save=args.modules_to_save.split(",") if args.modules_to_save else None,
-            )
-            peft_config = adalora_config
-        else:
-            # For other PEFT types, import as needed and create config
-            # This is a simplified version - for actual implementation,
-            # you would need to import and configure each PEFT type specifically
-            logger.warning(
-                f"PEFT type {args.peft_type} not fully implemented, falling back to LoRA"
-            )
             lora_config = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
@@ -921,14 +814,13 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
                 lora_dropout=args.lora_dropout,
                 bias="none",
                 task_type="CAUSAL_LM",
+                inference_mode=False,
             )
-            peft_config = lora_config
+        else:
+            raise ValueError(f"Only LoRA is currently supported. Got {args.peft_type}")
 
         # Get prompt template based on arg
         prompt_type = get_prompt_template(args.prompt_template)
-
-        # Initialize trainer
-        logger.info("Initializing trainer...")
 
         # Set response-only training configuration if enabled
         response_only_config = None
@@ -950,11 +842,13 @@ def setup_model_and_trainer(source_hub, destination_hub, args):
         if args.use_flash_attention:
             attention_config["implementation"] = "flash_attention_2"
 
+        # Initialize trainer
+        logger.info("Initializing QwenTrainer instance...")
         trainer = QwenTrainer(
             model=model_handler.model,
             tokenizer=model_handler.tokenizer,
             prompt_creator=PromptCreator(prompt_type),
-            lora_config=peft_config,
+            lora_config=lora_config,
             destination_hub_config=destination_hub,
             debug_samples=args.debug_samples,
             responses_only_config=response_only_config,
@@ -1038,11 +932,11 @@ def main():
         if not args.experiment_name:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             if args.test_mode:
-                args.experiment_name = f"test_qlora_{timestamp}"
+                args.experiment_name = f"test_lora_{timestamp}"
             elif args.test_training_mode:
-                args.experiment_name = f"test_train_qlora_{timestamp}"
+                args.experiment_name = f"test_train_lora_{timestamp}"
             else:
-                args.experiment_name = f"qlora_experiment_{timestamp}"
+                args.experiment_name = f"lora_experiment_{timestamp}"
 
         logger.info(f"Using experiment name: {args.experiment_name}")
 
@@ -1055,69 +949,27 @@ def main():
             save_method=args.save_method,
         )
 
-        # Configure QLoRA settings
-        import torch
-        from transformers import BitsAndBytesConfig
-
-        # Determine compute dtype
-        if args.compute_dtype == "bf16" and torch.cuda.is_bf16_supported():
-            compute_dtype = torch.bfloat16
-        elif args.compute_dtype == "fp16":
-            compute_dtype = torch.float16
-        else:
-            compute_dtype = torch.float32
-
-        # Configure quantization
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=(args.quantization == "4bit"),
-            load_in_8bit=(args.quantization == "8bit"),
-            bnb_4bit_use_double_quant=args.double_quant,
-            bnb_4bit_quant_type=args.quant_type,
-            bnb_4bit_compute_dtype=compute_dtype,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=True,
-        )
-
-        # Configure LoRA for QLoRA
-        from peft import LoraConfig
-
-        lora_config = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            target_modules=args.target_modules.split(","),
-            lora_dropout=args.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            inference_mode=False,
-        )
-
         # Initialize model and trainer
-        logger.info("Initializing QLoRA model and trainer...")
+        logger.info("Initializing LoRA model and trainer...")
 
         # Configure model loading
         model_kwargs = {
             "device_map": "auto",
-            "quantization_config": bnb_config,
-            "torch_dtype": compute_dtype,
         }
 
         # Add memory constraints if specified
-        if args.max_memory:
+        if hasattr(args, "max_memory") and args.max_memory:
             import json
 
             model_kwargs["max_memory"] = json.loads(args.max_memory)
-        if args.max_memory_per_gpu:
+        if hasattr(args, "max_memory_per_gpu") and args.max_memory_per_gpu:
             if "max_memory" not in model_kwargs:
                 model_kwargs["max_memory"] = {}
             for i in range(torch.cuda.device_count()):
                 model_kwargs["max_memory"][i] = args.max_memory_per_gpu
 
         trainer = setup_model_and_trainer(
-            source_hub=source_hub,
-            destination_hub=destination_hub,
-            args=args,
-            model_kwargs=model_kwargs,
-            lora_config=lora_config,
+            source_hub=source_hub, destination_hub=destination_hub, args=args
         )
 
         # Load dataset from HuggingFace Hub
@@ -1159,7 +1011,24 @@ def main():
         )
         callbacks.append(early_stopping)
 
-        # Validation callback
+        # Learning rate monitor
+        lr_monitor = LRMonitorCallback(trainer=trainer)
+        callbacks.append(lr_monitor)
+
+        # Model loading alert
+        model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
+        callbacks.append(model_loading_alert)
+
+        # Safety checkpoint callback
+        safety_checkpoint = SafetyCheckpointCallback(
+            save_steps=args.save_steps, save_total_limit=args.save_total_limit
+        )
+        # Set trainer attribute on safety checkpoint callback
+        safety_checkpoint.trainer = trainer
+        callbacks.append(safety_checkpoint)
+
+        # Validation callback - create this last so it has access to the validation dataset
+        # that will be created during the call to trainer.train()
         validation_callback = ValidationCallback(
             trainer_instance=trainer,
             validation_steps=args.validation_steps,
@@ -1172,34 +1041,8 @@ def main():
             minimal_validating=args.minimal_validating,
             max_validation_samples=args.max_validation_samples,
         )
+
         callbacks.append(validation_callback)
-
-        # Learning rate monitor
-        lr_monitor = LRMonitorCallback(trainer=trainer)
-        callbacks.append(lr_monitor)
-
-        # Prompt monitor
-        prompt_monitor = PromptMonitorCallback(
-            dataset=train_dataset,
-            tokenizer=trainer.tokenizer,
-            logging_steps=args.logging_steps,
-            save_to_file=True,
-            log_to_wandb=True,
-            max_prompts_to_save=args.max_prompts_to_save,
-            analyze_tokens=True,
-            show_token_stats=True,
-            output_dir=output_dir,
-            track_diversity=args.prompt_track_diversity,
-            track_quality=args.prompt_track_quality,
-            enable_interactive=args.prompt_interactive,
-            categorize_prompts=args.prompt_categorize,
-            enable_comparison=args.prompt_comparison,
-        )
-        callbacks.append(prompt_monitor)
-
-        # Model loading alert
-        model_loading_alert = ModelLoadingAlertCallback(use_unsloth=True)
-        callbacks.append(model_loading_alert)
 
         # Setup WandB logging
         try:
@@ -1207,20 +1050,20 @@ def main():
 
             # Create WandB configuration
             model_name = args.source_model.split("/")[-1]
-            project_name = f"{model_name}-QLoRA-Training"
+            project_name = f"{model_name}-LoRA-Training"
 
             run_prefix = (
                 "TEST_" if args.test_mode else "TEST-TRAIN_" if args.test_training_mode else ""
             )
             run_name = f"{run_prefix}{args.experiment_name}_b{args.batch_size}_lr{args.learning_rate}_e{args.epochs}"
 
-            tags = ["qwen", "qlora", "coding", "multiple-choice"]
+            tags = ["qwen", "lora", "coding", "multiple-choice"]
             if args.test_mode:
                 tags.append("test_mode")
             elif args.test_training_mode:
                 tags.append("test_training_mode")
 
-            notes = f"{run_prefix}QLoRA training with {args.bits}-bit quantization"
+            notes = f"{run_prefix}LoRA training"
 
             wandb_config = {
                 "project": project_name,
@@ -1230,16 +1073,13 @@ def main():
                 "config": {
                     "model": {
                         "name": args.source_model,
-                        "quantization": args.quantization,
-                        "compute_dtype": args.compute_dtype,
-                        "double_quant": args.double_quant,
-                        "quant_type": args.quant_type,
                     },
                     "lora": {
                         "r": args.lora_r,
                         "alpha": args.lora_alpha,
                         "dropout": args.lora_dropout,
-                        "target_modules": args.target_modules,
+                        "target_modules": getattr(args, "target_modules", None)
+                        or getattr(args, "legacy_target_modules", ""),
                     },
                     "training": {
                         "batch_size": args.batch_size,
@@ -1253,12 +1093,24 @@ def main():
             }
 
             # Initialize WandB
-            wandb.init(**wandb_config)
+            if wandb.run is None:
+                logger.info(f"Initializing WandB run: {run_name}")
+                wandb.init(**wandb_config)
+                logger.info(f"WandB run initialized: {wandb.run.name}")
+                logger.info(f"WandB run URL: {wandb.run.get_url()}")
 
             # Add WandB callback
-            from src.utils.wandb_logger import WandBCallback, WandBLogger
+            from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
 
-            wandb_logger = WandBLogger(config=wandb_config)
+            # Create a WandBConfig with the same settings
+            wandb_logger_config = WandBConfig(
+                project_name=project_name,
+                run_name=run_name,
+                tags=tags,
+                notes=notes,
+                config=wandb_config.get("config"),
+            )
+            wandb_logger = WandBLogger(config=wandb_logger_config)
             wandb_callback = WandBCallback(logger=wandb_logger)
             callbacks.append(wandb_callback)
 
@@ -1267,7 +1119,7 @@ def main():
             logger.warning("Continuing without WandB logging")
 
         # Start training
-        logger.info("Starting QLoRA training...")
+        logger.info("Starting LoRA training...")
 
         results = trainer.train(
             train_dataset=train_dataset,
@@ -1283,19 +1135,19 @@ def main():
             save_steps=args.save_steps,
             save_strategy=args.save_strategy,
             save_total_limit=args.save_total_limit,
-            load_best_model_at_end=True,
+            load_best_model_at_end=args.load_best_model_at_end,
             metric_for_best_model=args.metric_for_best,
             greater_is_better=args.greater_is_better,
             callbacks=callbacks,
             random_seed=args.random_seed,
             push_to_hub_strategy=args.push_strategy,
             optimizer_config={
-                "optimizer_type": "paged_adamw_32bit",
+                "optimizer_type": args.optimizer,
                 "weight_decay": args.weight_decay,
-                "beta1": 0.9,
-                "beta2": 0.999,
-                "epsilon": 1e-8,
-                "max_grad_norm": 1.0,
+                "beta1": args.lion_beta1 if args.optimizer.startswith("lion") else args.adam_beta1,
+                "beta2": args.lion_beta2 if args.optimizer.startswith("lion") else args.adam_beta2,
+                "epsilon": args.adam_epsilon,
+                "max_grad_norm": args.max_grad_norm,
             },
             lr_scheduler_config={
                 "lr_scheduler_type": "cosine",
@@ -1305,7 +1157,7 @@ def main():
         )
 
         # Log results
-        logger.info("QLoRA training completed!")
+        logger.info("LoRA training completed!")
         if isinstance(results, dict):
             logger.info("Training metrics:")
             for key, value in results.items():
@@ -1326,7 +1178,8 @@ def main():
         # Cleanup wandb
         try:
             import wandb
-            if wandb.run is not None:
+
+            if "wandb" in globals() and wandb.run is not None:
                 wandb.finish()
         except Exception as e:
             logger.warning(f"Failed to clean up wandb: {e}")

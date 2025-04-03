@@ -61,6 +61,11 @@ class WandBLogger:
 
     def init_run(self, model_name: str):
         """Initialize a new W&B run"""
+        # Skip if wandb is already initialized
+        if wandb.run is not None:
+            self.run = wandb.run
+            return
+
         # Set run name if not provided
         if not self.config.run_name:
             self.config.run_name = f"{model_name}_{wandb.util.generate_id()}"
@@ -70,14 +75,17 @@ class WandBLogger:
 
     def log_model_info(self, model):
         """Log model information to W&B"""
-        if not self.run:
-            raise RuntimeError("W&B run not initialized. Call init_run first.")
+        if not wandb.run:
+            # Auto-initialize with a default name if not initialized
+            self.init_run("unknown-model")
+
+        self.run = wandb.run
 
         # Log model parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        self.run.summary.update(
+        wandb.run.summary.update(
             {
                 "total_parameters": total_params,
                 "trainable_parameters": trainable_params,
@@ -100,8 +108,19 @@ class WandBCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         """Log model info at start of training"""
-        if model:
-            self.logger.log_model_info(model)
+        # Ensure wandb run is initialized
+        try:
+            if wandb.run is None:
+                # Initialize wandb run automatically
+                model_name = getattr(args, "hub_model_id", "unknown-model")
+                self.logger.init_run(model_name)
+                print(f"WandB run initialized: {wandb.run.name}")
+
+            if model:
+                self.logger.log_model_info(model)
+        except Exception as e:
+            print(f"Warning: WandB initialization in callback failed: {e}")
+            print("Training will continue without W&B logging")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         """Log metrics during training"""

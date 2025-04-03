@@ -8,10 +8,13 @@ from .lr_monitor_callback import LRMonitorCallback
 from .memory_profiling_callback import MemoryProfilingCallback
 from .model_loading_alert_callback import ModelLoadingAlertCallback
 from .prompt_monitor_callback import PromptMonitorCallback
+from .safety_checkpoint_callback import SafetyCheckpointCallback
 from .validation_callback import ValidationCallback
 from .wandb_callback import WandBCallback
 from .wandb_config import WandBConfig
 from .wandb_logger import WandBLogger
+
+
 
 # Also expose modules from callbacks.py if needed
 import sys
@@ -34,6 +37,7 @@ __all__ = [
     "LRMonitorCallback",
     "ModelLoadingAlertCallback",
     "PromptMonitorCallback",
+    "SafetyCheckpointCallback",
     "ValidationCallback",
     "MemoryProfilingCallback",
     "WandBCallback",

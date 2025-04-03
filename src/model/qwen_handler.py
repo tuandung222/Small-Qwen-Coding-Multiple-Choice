@@ -56,7 +56,7 @@ class QwenModelHandler:
         self,
         model_name: str,
         max_seq_length: int = 2048,
-        quantization: str = "4bit",
+        quantization: Union[str, BitsAndBytesConfig] = "4bit",
         model_source: str = ModelSource.HUGGINGFACE,
         device_map: str = "auto",
         source_hub_config: Optional[HubConfig] = None,
@@ -70,7 +70,7 @@ class QwenModelHandler:
         Args:
             model_name: Name or path of the model to load
             max_seq_length: Maximum sequence length for tokenizer and model
-            quantization: Quantization level (4bit, 8bit, or none)
+            quantization: Quantization level (4bit, 8bit, or none) or BitsAndBytesConfig object
             model_source: Source of the model (huggingface or unsloth)
             device_map: Device mapping strategy for the model
             source_hub_config: Configuration for the source model on Hugging Face Hub
@@ -230,15 +230,18 @@ class QwenModelHandler:
         """Load model from HuggingFace Hub"""
         # Configure quantization
         quantization_config = None
-        if self.quantization == "4bit":
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-            )
-        elif self.quantization == "8bit":
-            quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        if isinstance(self.quantization, str):
+            if self.quantization == "4bit":
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+            elif self.quantization == "8bit":
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        elif isinstance(self.quantization, BitsAndBytesConfig):
+            quantization_config = self.quantization
 
         # Check attention implementation
         attn_implementation = self._check_attention_support()
@@ -296,10 +299,16 @@ class QwenModelHandler:
             }
 
             # Add quantization config
-            if self.quantization == "4bit":
-                model_args["load_in_4bit"] = True
-            elif self.quantization == "8bit":
-                model_args["load_in_8bit"] = True
+            if isinstance(self.quantization, str):
+                if self.quantization == "4bit":
+                    model_args["load_in_4bit"] = True
+                elif self.quantization == "8bit":
+                    model_args["load_in_8bit"] = True
+            elif isinstance(self.quantization, BitsAndBytesConfig):
+                if self.quantization.load_in_4bit:
+                    model_args["load_in_4bit"] = True
+                elif self.quantization.load_in_8bit:
+                    model_args["load_in_8bit"] = True
 
             # Add attention implementation if not default
             if attn_implementation != "default":

@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 from datetime import datetime
+from sys import argv
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -19,18 +20,16 @@ from trl import SFTTrainer
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 
+from callbacks import (
+    EarlyStoppingCallback,
+    LRMonitorCallback,
+    ModelLoadingAlertCallback,
+    ValidationCallback,
+)
 from src.model.qwen_handler import HubConfig, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
 from src.utils.auth import setup_authentication
-
-from .callbacks import (
-    EarlyStoppingCallback,
-    LRMonitorCallback,
-    ModelLoadingAlertCallback,
-    PromptMonitorCallback,
-    ValidationCallback,
-)
 
 # define logger
 logger = logging.getLogger(__name__)
@@ -147,26 +146,80 @@ class QwenTrainer:
     def validate(
         self,
         val_dataset,
-        quality_val_dataset=None,
-        prompt_type=None,
-        batch_size=64,
-        temperature=0.0,
+        metric_key_prefix="eval",
     ):
-        """Validate the model on validation dataset"""
-        if prompt_type:
-            self.prompt_creator.set_prompt_type(prompt_type)
+        """
+        Run validation on the given dataset and return metrics.
 
-        validation_callback = ValidationCallback(
-            trainer_instance=self,
-            val_dataset=val_dataset,
-            quality_val_dataset=quality_val_dataset,
-            validation_strategy="steps",
-            validation_steps=100,
-            save_best_checkpoint=True,
-            early_stopper=EarlyStoppingCallback(patience=3),
+        Args:
+            val_dataset: The validation dataset
+            metric_key_prefix: Prefix for metric keys in the output dictionary
+
+        Returns:
+            Dictionary of metrics with values
+        """
+        logger.info(f"Running validation on dataset with {len(val_dataset)} examples")
+
+        # Use the trainer's evaluate method if available
+        if (
+            hasattr(self, "trainer")
+            and self.trainer is not None
+            and hasattr(self.trainer, "evaluate")
+        ):
+            logger.info("Using trainer's evaluate method for validation")
+            return self.trainer.evaluate(
+                eval_dataset=val_dataset, metric_key_prefix=metric_key_prefix
+            )
+
+        # If there's no trainer or it doesn't have evaluate, calculate metrics manually
+        logger.info("No trainer with evaluate method found. Using manual validation.")
+
+        # Create a simple data loader for validation
+        from torch.utils.data import DataLoader
+
+        val_dataloader = DataLoader(
+            val_dataset, batch_size=8, shuffle=False  # Use a reasonable batch size for validation
         )
 
-        return validation_callback
+        # Ensure model is in evaluation mode
+        model = self.model if self.peft_model is None else self.peft_model
+        model.eval()
+
+        import torch
+        import torch.nn.functional as F
+
+        total_loss = 0.0
+        total_samples = 0
+
+        # Evaluate in batches
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # Move batch to device
+                if torch.cuda.is_available():
+                    batch = {
+                        k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()
+                    }
+
+                # Forward pass
+                outputs = model(**batch)
+                loss = outputs.loss
+
+                # Update metrics
+                batch_size = batch["input_ids"].size(0)
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+
+        # Calculate final metrics
+        avg_loss = total_loss / total_samples if total_samples > 0 else float("inf")
+
+        # Create metrics dictionary
+        metrics = {
+            f"{metric_key_prefix}_loss": avg_loss,
+            f"{metric_key_prefix}_perplexity": torch.exp(torch.tensor(avg_loss)).item(),
+        }
+
+        logger.info(f"Validation results: {metrics}")
+        return metrics
 
     def _create_temp_model_handler(self):
         """Create a temporary model handler for validation"""
@@ -201,33 +254,13 @@ class QwenTrainer:
 
     def prepare_model_for_training(self) -> Any:
         """
-        Prepare model for training with QLoRA optimizations.
+        Prepare model for training with LoRA optimizations.
         """
         try:
-            print("\033[92mPreparing model with QLoRA optimizations...\033[0m")
+            print("\033[92mPreparing model with LoRA optimizations...\033[0m")
 
-            # Configure QLoRA settings
-            from peft import prepare_model_for_kbit_training
-            from transformers import BitsAndBytesConfig
-
-            # QLoRA quantization config
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16 if is_bf16_supported() else torch.float16,
-                bnb_4bit_compute_device="cuda",
-            )
-
-            # Load model with quantization config
-            self.model.config.quantization_config = bnb_config
-
-            # Prepare model for k-bit training
-            self.model = prepare_model_for_kbit_training(
-                self.model,
-                use_gradient_checkpointing=True,
-                gradient_checkpointing_kwargs={"use_reentrant": False},
-            )
+            # Configure LoRA settings
+            from peft import get_peft_model
 
             if self.lora_config:
                 # Extract LoRA parameters
@@ -236,39 +269,96 @@ class QwenTrainer:
                 lora_dropout = self.lora_config.lora_dropout
                 target_modules = self.lora_config.target_modules
 
-                # Apply QLoRA with Unsloth optimizations if available
+                # Apply LoRA with Unsloth optimizations if available
                 try:
+                    import inspect
+
                     from unsloth import FastLanguageModel
 
-                    print("\033[92mApplying Unsloth optimizations with QLoRA...\033[0m")
+                    print("\033[92mApplying Unsloth optimizations with LoRA...\033[0m")
 
-                    model_kwargs = {
-                        "device_map": "auto",
-                        "torch_dtype": torch.bfloat16 if is_bf16_supported() else torch.float16,
-                    }
+                    # Add debug information about the function signature
+                    print("\033[93mDebugging Function Parameters:\033[0m")
+                    signature = inspect.signature(FastLanguageModel.get_peft_model)
+                    print(f"Function signature: {signature}")
 
-                    self.peft_model = FastLanguageModel.get_peft_model(
-                        self.model,
-                        r=r,
-                        lora_alpha=lora_alpha,
-                        lora_dropout=lora_dropout,
-                        target_modules=target_modules,
-                        bias="none",
-                        use_gradient_checkpointing="unsloth",
-                        random_state=42,
-                        **model_kwargs,
-                    )
+                    # Print parameters we're trying to pass
+                    print(f"Parameters being used:")
+                    print(f"- r: {r}")
+                    print(f"- lora_alpha: {lora_alpha}")
+                    print(f"- lora_dropout: {lora_dropout}")
+                    print(f"- target_modules: {target_modules}")
+                    print(f"- use_gradient_checkpointing: unsloth")
+                    print(f"- random_state: 42")
+
+                    # Try to get the actual LoraConfig parameters
+                    from peft import LoraConfig
+
+                    print("\033[93mLoraConfig accepted parameters:\033[0m")
+                    lora_signature = inspect.signature(LoraConfig.__init__)
+                    print(f"LoraConfig signature: {lora_signature}")
+
+                    # Explicitly rewrite the whole try-except block to fix indentation errors
+                    try:
+                        # Try Unsloth's FastLanguageModel.get_peft_model first
+                        self.peft_model = FastLanguageModel.get_peft_model(
+                            self.model,
+                            r=r,
+                            lora_alpha=lora_alpha,
+                            lora_dropout=lora_dropout,
+                            target_modules=target_modules,
+                            bias="none",
+                            use_gradient_checkpointing="unsloth",
+                            random_state=42,
+                        )
+                        print("\033[92mSuccessfully created PEFT model!\033[0m")
+                    except TypeError as e:
+                        # Fall back to standard LoRA if FastLanguageModel.get_peft_model fails
+                        print(f"\033[91mDetailedError: {e}\033[0m")
+                        print("\033[93mAttempting minimal configuration...\033[0m")
+                        # Create a standard LoraConfig
+                        lora_config = LoraConfig(
+                            r=r,
+                            lora_alpha=lora_alpha,
+                            lora_dropout=lora_dropout,
+                            target_modules=target_modules,
+                            bias="none",
+                            task_type="CAUSAL_LM",
+                        )
+                        print("Created LoraConfig successfully")
+
+                        # Use standard get_peft_model
+                        self.peft_model = get_peft_model(self.model, lora_config)
+                        print(
+                            "\033[92mSuccessfully created PEFT model with fallback method!\033[0m"
+                        )
 
                     self.peft_model.is_unsloth_model = True
-                    self.peft_model.is_qlora_model = True
+                    self.peft_model.is_qlora_model = False
 
+                    # Enable memory efficient optimizations
+                    if hasattr(self.peft_model, "enable_input_require_grads"):
+                        self.peft_model.enable_input_require_grads()
+
+                    # Print model information
+                    total_params = sum(p.numel() for p in self.peft_model.parameters())
+                    trainable_params = sum(
+                        p.numel() for p in self.peft_model.parameters() if p.requires_grad
+                    )
+
+                    print(f"\033[92mLoRA model prepared:")
+                    print(f"- Trainable params: {trainable_params:,}")
+                    print(f"- Total params: {total_params:,}")
+                    print(f"- Trainable%: {100 * trainable_params / total_params:.4f}")
+                    print(f"- Using {'BF16' if is_bf16_supported() else 'FP16'} precision")
+                    print(f"- Gradient checkpointing: enabled\033[0m")
+
+                    return self.peft_model
                 except ImportError:
-                    print("\033[93mUnsloth not available, falling back to standard QLoRA...\033[0m")
-                    from peft import get_peft_model
-
+                    print("\033[93mUnsloth not available, falling back to standard LoRA...\033[0m")
                     self.peft_model = get_peft_model(self.model, self.lora_config)
                     self.peft_model.is_unsloth_model = False
-                    self.peft_model.is_qlora_model = True
+                    self.peft_model.is_qlora_model = False
 
                 # Enable memory efficient optimizations
                 if hasattr(self.peft_model, "enable_input_require_grads"):
@@ -280,13 +370,11 @@ class QwenTrainer:
                     p.numel() for p in self.peft_model.parameters() if p.requires_grad
                 )
 
-                print(f"\033[92mQLoRA model prepared:")
+                print(f"\033[92mLoRA model prepared:")
                 print(f"- Trainable params: {trainable_params:,}")
                 print(f"- Total params: {total_params:,}")
                 print(f"- Trainable%: {100 * trainable_params / total_params:.4f}")
                 print(f"- Using {'BF16' if is_bf16_supported() else 'FP16'} precision")
-                print(f"- 4-bit quantization with NF4")
-                print(f"- Double quantization: enabled")
                 print(f"- Gradient checkpointing: enabled\033[0m")
 
                 return self.peft_model
@@ -294,11 +382,11 @@ class QwenTrainer:
                 # Fallback to standard model preparation
                 self.model.train()
                 self.model.is_unsloth_model = False
-                self.model.is_qlora_model = True
+                self.model.is_qlora_model = False
                 return self.model
 
         except Exception as e:
-            print(f"\033[91mFailed to prepare model with QLoRA: {e}\033[0m")
+            print(f"\033[91mFailed to prepare model with LoRA: {e}\033[0m")
             import traceback
 
             print(f"\033[91mError details: {traceback.format_exc()}\033[0m")
@@ -466,7 +554,14 @@ class QwenTrainer:
                     skipped_indices.append(i)
 
             if not formatted_examples:
-                return {"input_ids": [], "attention_mask": [], "labels": [], "skipped": True}
+                return {
+                    "input_ids": [],
+                    "attention_mask": [],
+                    "labels": [],
+                    "skipped": [True],
+                    "original_indices": [],
+                    "token_lengths": [],
+                }
 
             # Batch tokenize valid examples
             texts = [ex["text"] for ex in formatted_examples]
@@ -482,7 +577,7 @@ class QwenTrainer:
                 "input_ids": tokenized.input_ids,
                 "attention_mask": tokenized.attention_mask,
                 "labels": tokenized.input_ids.clone(),
-                "skipped": False,
+                "skipped": [False] * len(formatted_examples),  # Return a list of booleans
                 "original_indices": [ex["original_index"] for ex in formatted_examples],
                 "token_lengths": [ex["token_length"] for ex in formatted_examples],
             }
@@ -493,7 +588,7 @@ class QwenTrainer:
             format_example,
             batched=True,
             batch_size=100,  # Process 100 examples at once
-            num_proc=4,  # Use 4 CPU cores
+            num_proc=1,  # Use 1 CPU core to avoid pickling issues
             remove_columns=dataset.column_names,
             load_from_cache_file=True,
             desc="Processing dataset",
@@ -693,95 +788,32 @@ class QwenTrainer:
 
         return default_config
 
-    def train(
-        self,
-        train_dataset: Dataset,
-        val_split: float = 0.1,
-        output_dir: str = "./model_output",
-        num_train_epochs: int = 3,
-        per_device_train_batch_size: int = 4,
-        gradient_accumulation_steps: int = 4,
-        learning_rate: float = 2e-4,
-        warmup_ratio: float = 0.1,
-        max_steps: Optional[int] = None,
-        logging_steps: int = 10,
-        save_steps: int = 30,  # Changed default to 30 for safety
-        save_strategy: str = "steps",
-        save_total_limit: int = 5,  # Changed default to 5
-        load_best_model_at_end: bool = True,
-        metric_for_best_model: str = "eval_loss",
-        greater_is_better: bool = False,
-        callbacks: Optional[List[Any]] = None,
-        random_seed: int = 42,
-        push_to_hub_strategy: str = "end",
-        optimizer_config: Optional[Dict[str, Any]] = None,
-        lr_scheduler_config: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Train the model with proper validation handling and safety checkpoints."""
-        # Use stored configs if not explicitly provided
-        if responses_only_config is None:
-            responses_only_config = self.responses_only_config
-
-        if attention_config is None:
-            attention_config = self.attention_config
-
-        # Initialize wandb if needed
-        try:
-            import wandb
-
-            if wandb.run is None:
-                # Calculate total steps for warmup
-                if max_steps is not None and max_steps > 0:
-                    total_steps = max_steps
-                else:
-                    total_steps = (
-                        len(train_dataset)
-                        // (per_device_train_batch_size * gradient_accumulation_steps)
-                        * num_train_epochs
-                    )
-                warmup_steps = int(total_steps * warmup_ratio)
-                print(
-                    f"Using {warmup_steps} warmup steps ({warmup_ratio:.1%} of {total_steps} total steps)"
-                )
-
-                # Setup wandb configuration
-                wandb_config = self._setup_wandb_config(
-                    num_train_epochs=num_train_epochs,
-                    learning_rate=learning_rate,
-                    batch_size=per_device_train_batch_size,
-                    gradient_accumulation_steps=gradient_accumulation_steps,
-                    max_steps=max_steps,
-                    warmup_steps=warmup_steps,
-                    warmup_ratio=warmup_ratio,
-                    user_config=wandb_config,
-                )
-
-                # Initialize wandb
-                wandb.init(**wandb_config)
-                print(f"Initialized wandb run: {wandb_config['name']}")
-                print(f"Project: {wandb_config['project']}")
-                print(f"Tags: {', '.join(wandb_config['tags'])}")
-        except Exception as e:
-            print(f"Warning: Failed to initialize wandb: {e}")
-            print("Continuing without wandb logging...")
+    def train(self, train_dataset, val_split=0.1, output_dir="./outputs", **kwargs):
+        """Train the model on the given dataset"""
+        logger.info("Preparing dataset for training...")
 
         # Prepare model
         model_to_train = self.prepare_model_for_training()
         if model_to_train is None:
             raise RuntimeError("Model preparation failed")
 
+        # Initialize formatted_val_dataset to avoid UnboundLocalError
+        formatted_val_dataset = None
+
         # Format datasets for training
         formatted_train_dataset = self._prepare_dataset_for_training(train_dataset)
-        formatted_val_dataset = None
+
+        # Create validation dataset if val_split is provided
         if val_split > 0:
-            # Split train dataset if no validation dataset is provided
+            # Split train dataset to create validation dataset
             logger.info(f"Splitting train dataset with val_split={val_split}")
             split_datasets = formatted_train_dataset.train_test_split(
-                test_size=val_split, seed=random_seed
+                test_size=val_split, seed=kwargs.get("random_seed", 42)
             )
             formatted_train_dataset = split_datasets["train"]
             formatted_val_dataset = split_datasets["test"]
+            # Save the validation dataset on the trainer instance
+            self.val_dataset = formatted_val_dataset
             logger.info(
                 f"Split dataset into {len(formatted_train_dataset)} train and {len(formatted_val_dataset)} validation examples"
             )
@@ -794,15 +826,16 @@ class QwenTrainer:
             "no": "end",
         }
 
-        if push_to_hub_strategy not in hub_strategy_mapping:
+        if kwargs.get("push_to_hub_strategy") not in hub_strategy_mapping:
             raise ValueError(
-                f"Invalid push_to_hub_strategy: {push_to_hub_strategy}. "
+                f"Invalid push_to_hub_strategy: {kwargs.get('push_to_hub_strategy')}. "
                 "Valid values are: 'end', 'best', 'all', 'no'"
             )
 
         # Default optimizer config if not provided
-        if optimizer_config is None:
-            optimizer_config = {
+        optimizer_config = kwargs.get(
+            "optimizer_config",
+            {
                 "optimizer_type": "lion_8bit",  # Changed default to Lion 8-bit
                 "weight_decay": 0.1,  # Increased for Lion optimizer
                 "beta1": 0.95,  # Recommended for Lion
@@ -810,108 +843,121 @@ class QwenTrainer:
                 "epsilon": 1e-8,
                 "max_grad_norm": 1.0,
                 "optim_bits": 8,
-            }
-
-        # Default LR scheduler config if not provided
-        if lr_scheduler_config is None:
-            lr_scheduler_config = {
-                "lr_scheduler_type": "cosine",  # Default to cosine scheduler
-                "num_cycles": 1,
-                "power": 1.0,
-                "last_epoch": -1,
-            }
+            },
+        )
 
         logger.info(
             f"Using optimizer: {optimizer_config['optimizer_type']} with weight decay {optimizer_config['weight_decay']}"
         )
+
+        # Default LR scheduler config if not provided
+        lr_scheduler_config = kwargs.get(
+            "lr_scheduler_config",
+            {
+                "lr_scheduler_type": "cosine",  # Default to cosine scheduler
+                "num_cycles": 1,
+                "power": 1.0,
+                "last_epoch": -1,
+            },
+        )
+
         logger.info(f"Using LR scheduler: {lr_scheduler_config['lr_scheduler_type']}")
 
         # Calculate warmup steps and ratio
-        if max_steps is not None and max_steps > 0:
-            total_steps = max_steps
+        if kwargs.get("max_steps") is not None and kwargs.get("max_steps") > 0:
+            total_steps = kwargs.get("max_steps")
         else:
             total_steps = (
                 len(formatted_train_dataset)
-                // (per_device_train_batch_size * gradient_accumulation_steps)
-                * num_train_epochs
+                // (
+                    kwargs.get("per_device_train_batch_size", 16)
+                    * kwargs.get("gradient_accumulation_steps", 1)
+                )
+                * kwargs.get("num_train_epochs", 1)
             )
 
         # Handle warmup steps calculation
-        if warmup_steps is None or warmup_steps < 0:
-            if warmup_ratio is None:
+        if kwargs.get("warmup_steps") is None or kwargs.get("warmup_steps") < 0:
+            if kwargs.get("warmup_ratio") is None:
                 warmup_ratio = 0.1  # Default warmup ratio
-            warmup_steps = int(total_steps * warmup_ratio)
+            kwargs["warmup_steps"] = int(total_steps * warmup_ratio)
         else:
             # Calculate effective ratio if warmup_steps is explicitly set
-            warmup_ratio = warmup_steps / total_steps if total_steps > 0 else 0.0
+            warmup_ratio = kwargs["warmup_steps"] / total_steps if total_steps > 0 else 0.0
 
         logger.info(
-            f"Using {warmup_steps} warmup steps ({warmup_ratio*100:.1f}% of {total_steps} total steps)"
+            f"Using {kwargs['warmup_steps']} warmup steps ({warmup_ratio*100:.1f}% of {total_steps} total steps)"
         )
 
         # Configure validation strategy
         training_args_dict = {
             # Basic training configuration
             "output_dir": output_dir,
-            "per_device_train_batch_size": per_device_train_batch_size,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "learning_rate": learning_rate,
-            "num_train_epochs": num_train_epochs,
-            "warmup_steps": warmup_steps,
+            "per_device_train_batch_size": kwargs.get("per_device_train_batch_size", 16),
+            "gradient_accumulation_steps": kwargs.get("gradient_accumulation_steps", 1),
+            "learning_rate": kwargs.get("learning_rate", 2e-4),
+            "num_train_epochs": kwargs.get("num_train_epochs", 1),
+            "warmup_steps": kwargs["warmup_steps"],
             # Learning rate schedule
             "lr_scheduler_type": lr_scheduler_config["lr_scheduler_type"],
             # Logging and saving configuration
-            "logging_steps": logging_steps,
-            "save_steps": save_steps,
-            "save_strategy": save_strategy,
-            "save_total_limit": save_total_limit,
+            "logging_steps": kwargs.get("logging_steps", 100),
+            "save_steps": kwargs.get("save_steps", 1000),
+            "save_strategy": kwargs.get("save_strategy", "steps"),
+            "save_total_limit": kwargs.get("save_total_limit", 1),
             # Model selection configuration
-            "load_best_model_at_end": load_best_model_at_end,
-            "metric_for_best_model": metric_for_best_model,
-            "greater_is_better": greater_is_better,
+            "load_best_model_at_end": kwargs.get("load_best_model_at_end", True),
+            "metric_for_best_model": kwargs.get("metric_for_best_model", "loss"),
+            "greater_is_better": kwargs.get("greater_is_better", False),
             # Mixed precision training
             "fp16": not is_bf16_supported(),
             "bf16": is_bf16_supported(),
             # Lion 8-bit optimizer configuration
             "optim": optimizer_config["optimizer_type"],
             "weight_decay": optimizer_config["weight_decay"],
-            "optim_args": {
-                "betas": (optimizer_config["beta1"], optimizer_config["beta2"]),
-                "eps": optimizer_config["epsilon"],
-            },
+            "adam_beta1": optimizer_config["beta1"],
+            "adam_beta2": optimizer_config["beta2"],
+            "adam_epsilon": optimizer_config["epsilon"],
             # Gradient clipping and stability
             "max_grad_norm": optimizer_config["max_grad_norm"],
             "gradient_checkpointing": True,
             "gradient_checkpointing_kwargs": {"use_reentrant": False},
             # Integration configuration
-            "report_to": "wandb",
+            "report_to": kwargs.get("report_to", "wandb"),
             "push_to_hub": bool(self.destination_hub_config),
             "hub_model_id": self.destination_hub_config.model_id
             if self.destination_hub_config
             else None,
             "hub_token": self.destination_hub_config.token if self.destination_hub_config else None,
-            "hub_strategy": hub_strategy_mapping[push_to_hub_strategy],
+            "hub_strategy": hub_strategy_mapping[kwargs.get("push_to_hub_strategy", "end")],
             # Dataset configuration
-            "remove_unused_columns": False,  # Already formatted the dataset
-            "dataloader_num_workers": 4,
-            "dataloader_pin_memory": True,
+            "remove_unused_columns": kwargs.get("remove_unused_columns", False),
+            "dataloader_num_workers": kwargs.get("dataloader_num_workers", 4),
+            "dataloader_pin_memory": kwargs.get("dataloader_pin_memory", True),
             # Set random seed
-            "seed": random_seed,
+            "seed": kwargs.get("random_seed", 42),
             # Additional stability settings
-            "full_determinism": False,  # Allow some non-determinism for better performance
-            "torch_compile": False,  # Disable torch.compile for stability
-            "ddp_find_unused_parameters": False,
-            "use_cpu": False,
-            "use_mps_device": False,
-            # Validation configuration
-            "evaluation_strategy": "no",  # We handle validation through callback
-            "eval_steps": None,  # Not used since we handle validation in callback
-            "eval_delay": 0,  # Start validation immediately if validate_at_start is True
+            "full_determinism": kwargs.get("full_determinism", False),
+            "torch_compile": kwargs.get("torch_compile", False),
+            "use_cpu": kwargs.get("use_cpu", False),
         }
 
+        # Set evaluation strategy appropriately
+        # If load_best_model_at_end is True, we must use the same strategy as save_strategy
+        # Otherwise, we can use the user-specified strategy
+        if kwargs.get("load_best_model_at_end", True):
+            training_args_dict["evaluation_strategy"] = kwargs.get("save_strategy", "steps")
+            training_args_dict["eval_steps"] = kwargs.get(
+                "eval_steps", kwargs.get("save_steps", 1000)
+            )
+            training_args_dict["eval_delay"] = kwargs.get("eval_delay", 0)
+        else:
+            # When handling validation manually, we can set evaluation_strategy to "no"
+            training_args_dict["evaluation_strategy"] = "no"
+
         # Handle max_steps
-        if max_steps is not None and max_steps > 0:
-            training_args_dict["max_steps"] = max_steps
+        if kwargs.get("max_steps") is not None and kwargs.get("max_steps") > 0:
+            training_args_dict["max_steps"] = kwargs.get("max_steps")
             training_args_dict.pop("num_train_epochs", None)
 
         # Create training arguments
@@ -927,8 +973,8 @@ class QwenTrainer:
 
         # Initialize trainer with validation callback
         validation_callback = None
-        if callbacks:
-            for callback in callbacks:
+        if kwargs.get("callbacks"):
+            for callback in kwargs["callbacks"]:
                 if isinstance(callback, ValidationCallback):
                     validation_callback = callback
                     break
@@ -939,14 +985,17 @@ class QwenTrainer:
             )
 
         # Initialize callbacks list if None
-        if callbacks is None:
-            callbacks = []
+        if kwargs.get("callbacks") is None:
+            kwargs["callbacks"] = []
 
         # Add safety checkpoint callback
+        from src.callbacks import SafetyCheckpointCallback
+
         safety_checkpoint = SafetyCheckpointCallback(
-            save_steps=save_steps, save_total_limit=save_total_limit
+            save_steps=kwargs.get("save_steps", 1000),
+            save_total_limit=kwargs.get("save_total_limit", 1),
         )
-        callbacks.append(safety_checkpoint)
+        kwargs["callbacks"].append(safety_checkpoint)
 
         # Initialize trainer
         self.trainer = Trainer(
@@ -955,12 +1004,79 @@ class QwenTrainer:
             train_dataset=formatted_train_dataset,
             eval_dataset=formatted_val_dataset,  # We handle validation through callback
             data_collator=data_collator,
-            callbacks=callbacks,
+            callbacks=kwargs["callbacks"],
             tokenizer=self.tokenizer,
         )
 
+        # Store output_dir for validation callback
+        self.output_dir = output_dir
+
+        # Check if optimizer type is explicitly set to lion_8bit
+        if optimizer_config["optimizer_type"].startswith("lion"):
+            logger.info(f"Ensuring use of {optimizer_config['optimizer_type']} optimizer...")
+            # Make sure the trainer's args have the correct optimizer
+            self.trainer.args.optim = optimizer_config["optimizer_type"]
+            # Set other Lion optimizer parameters
+            self.trainer.args.adam_beta1 = optimizer_config["beta1"]  # Lion beta1
+            self.trainer.args.adam_beta2 = optimizer_config["beta2"]  # Lion beta2
+
         # Explicitly initialize optimizer and scheduler
-        self.trainer.create_optimizer_and_scheduler(num_training_steps=max_steps or -1)
+        self.trainer.create_optimizer_and_scheduler(
+            num_training_steps=kwargs.get("max_steps") or -1
+        )
+
+        # Double-check that we're using the right optimizer
+        if hasattr(self.trainer, "optimizer"):
+            optimizer_class = self.trainer.optimizer.__class__.__name__
+            logger.info(f"Confirmed optimizer: {optimizer_class}")
+
+            # If not using the intended optimizer, try to create it manually
+            if (
+                optimizer_config["optimizer_type"].startswith("lion")
+                and "Lion" not in optimizer_class
+            ):
+                try:
+                    logger.warning(
+                        f"Optimizer mismatch! Expected Lion but got {optimizer_class}. Trying to fix..."
+                    )
+                    # Import Lion optimizer
+                    from bitsandbytes.optim import Lion8bit
+
+                    # Get all parameter groups
+                    param_groups = self.trainer.optimizer.param_groups
+
+                    # Create Lion8bit optimizer
+                    new_optimizer = Lion8bit(
+                        param_groups,
+                        lr=kwargs.get("learning_rate", 2e-4),
+                        betas=(optimizer_config["beta1"], optimizer_config["beta2"]),
+                        weight_decay=optimizer_config["weight_decay"],
+                    )
+
+                    # Replace the optimizer
+                    self.trainer.optimizer = new_optimizer
+                    logger.info(
+                        f"Successfully replaced optimizer with {new_optimizer.__class__.__name__}"
+                    )
+
+                    # Recreate scheduler with new optimizer
+                    from transformers import get_scheduler
+
+                    self.trainer.lr_scheduler = get_scheduler(
+                        lr_scheduler_config["lr_scheduler_type"],
+                        optimizer=self.trainer.optimizer,
+                        num_warmup_steps=kwargs["warmup_steps"],
+                        num_training_steps=total_steps,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to manually create Lion optimizer: {e}")
+                    logger.warning(f"Continuing with original optimizer: {optimizer_class}")
+            elif not optimizer_config["optimizer_type"].startswith(
+                optimizer_class.lower().replace("8bit", "").replace("_", "")
+            ):
+                logger.warning(
+                    f"Using {optimizer_class} instead of requested {optimizer_config['optimizer_type']}. This may impact performance."
+                )
 
         if not hasattr(self.trainer, "lr_scheduler") or self.trainer.lr_scheduler is None:
             logger.warning("LR scheduler not initialized properly, creating manually...")
@@ -972,29 +1088,34 @@ class QwenTrainer:
 
             # Calculate num_training_steps
             num_update_steps_per_epoch = len(formatted_train_dataset) // (
-                per_device_train_batch_size * gradient_accumulation_steps
+                kwargs.get("per_device_train_batch_size", 16)
+                * kwargs.get("gradient_accumulation_steps", 1)
             )
-            num_training_steps = num_train_epochs * num_update_steps_per_epoch
+            num_training_steps = kwargs.get("num_train_epochs", 1) * num_update_steps_per_epoch
 
             # Create scheduler
             self.trainer.lr_scheduler = get_scheduler(
                 lr_scheduler_config["lr_scheduler_type"],
                 optimizer=self.trainer.optimizer,
-                num_warmup_steps=warmup_steps,
+                num_warmup_steps=kwargs["warmup_steps"],
                 num_training_steps=num_training_steps,
             )
             logger.info(
-                f"Created {lr_scheduler_config['lr_scheduler_type']} scheduler with {warmup_steps} warmup steps"
+                f"Created {lr_scheduler_config['lr_scheduler_type']} scheduler with {kwargs['warmup_steps']} warmup steps"
             )
 
         # Apply response-only training if configured
-        if responses_only_config and responses_only_config.get("enabled", False):
+        if self.responses_only_config and self.responses_only_config.get("enabled", False):
             logger.info("Applying Unsloth's train_on_responses_only feature")
 
-            instruction_token = responses_only_config.get("instruction_token", "<|im_start|>user\n")
-            response_token = responses_only_config.get("response_token", "<|im_start|>assistant\n")
-            instruction_token_id = responses_only_config.get("instruction_token_id", None)
-            response_token_id = responses_only_config.get("response_token_id", None)
+            instruction_token = self.responses_only_config.get(
+                "instruction_token", "<|im_start|>user\n"
+            )
+            response_token = self.responses_only_config.get(
+                "response_token", "<|im_start|>assistant\n"
+            )
+            instruction_token_id = self.responses_only_config.get("instruction_token_id", None)
+            response_token_id = self.responses_only_config.get("response_token_id", None)
 
             logger.info(f"Using instruction token: {instruction_token}")
             logger.info(f"Using response token: {response_token}")
@@ -1034,24 +1155,247 @@ class QwenTrainer:
             logger.error(f"Training failed: {str(e)}")
             raise
 
-    def push_to_hub(self):
+    def push_to_hub(self, commit_message=None):
         """Push model to HuggingFace Hub"""
         if not self.destination_hub_config:
             raise ValueError("destination_hub_config must be provided to push to hub")
 
-        if not self.trainer:
-            raise ValueError("Trainer not initialized. Call train() first.")
+        if not hasattr(self, "model") or self.model is None:
+            raise ValueError("Model not initialized or is None")
 
         try:
-            print(f"Pushing model to hub: {self.destination_hub_config.model_id}")
-            self.trainer.push_to_hub(
-                commit_message="Model trained with QwenTrainer",
-                private=self.destination_hub_config.private,
+            # Create a custom model card
+            model_card = self._create_model_card()
+
+            # Save model card to output directory
+            output_dir = getattr(self, "output_dir", "./outputs")
+            readme_path = os.path.join(output_dir, "README.md")
+            with open(readme_path, "w", encoding="utf-8") as f:
+                f.write(model_card)
+
+            logger.info(f"Created model card at {readme_path}")
+
+            message = commit_message or "Model trained with QwenTrainer"
+            try:
+                import wandb
+
+                if wandb.run is not None:
+                    wandb_link = wandb.run.get_url()
+                    message += f" | WandB Run: {wandb_link}"
+            except Exception as e:
+                pass
+
+            print(
+                f"Pushing model to hub: {self.destination_hub_config.model_id} with message: {message}"
             )
+
+            # If we have HF Trainer with push_to_hub method, use it
+            if hasattr(self, "trainer") and hasattr(self.trainer, "push_to_hub"):
+                self.trainer.push_to_hub(commit_message=message)
+            # Otherwise use the model's push_to_hub method
+            elif hasattr(self.model, "push_to_hub"):
+                self.model.push_to_hub(
+                    repo_id=self.destination_hub_config.model_id,
+                    token=self.destination_hub_config.token,
+                    commit_message=message,
+                )
+            else:
+                raise ValueError("Neither trainer nor model has push_to_hub method")
+
             print("Successfully pushed to hub!")
         except Exception as e:
             print(f"Failed to push to hub: {str(e)}")
             raise
+
+    def _create_model_card(self):
+        """Create a comprehensive model card with training details and validation results"""
+        # Get model name
+        model_name = self.destination_hub_config.model_id.split("/")[-1]
+        base_model = getattr(
+            self.model,
+            "name_or_path",
+            self.model.config.name_or_path if hasattr(self.model, "config") else "unknown",
+        )
+
+        # Get training parameters
+        training_params = {}
+        if hasattr(self, "trainer") and hasattr(self.trainer, "args"):
+            args = self.trainer.args
+            training_params = {
+                "learning_rate": getattr(args, "learning_rate", "N/A"),
+                "train_batch_size": getattr(args, "per_device_train_batch_size", "N/A"),
+                "eval_batch_size": getattr(args, "per_device_eval_batch_size", 8),
+                "seed": getattr(args, "seed", 42),
+                "gradient_accumulation_steps": getattr(args, "gradient_accumulation_steps", "N/A"),
+                "total_train_batch_size": getattr(args, "per_device_train_batch_size", 1)
+                * getattr(args, "gradient_accumulation_steps", 1),
+                "optimizer": f"Use {getattr(args, 'optim', 'N/A')} and the args are: No additional optimizer arguments",
+                "lr_scheduler_type": getattr(args, "lr_scheduler_type", "N/A"),
+                "lr_scheduler_warmup_steps": getattr(args, "warmup_steps", "N/A"),
+                "num_epochs": getattr(args, "num_train_epochs", "N/A"),
+                "mixed_precision_training": "Native AMP",
+            }
+
+        # Get framework versions
+        import datasets
+        import peft
+        import tokenizers
+        import torch
+        import transformers
+
+        framework_versions = {
+            "PEFT": getattr(peft, "__version__", "N/A"),
+            "Transformers": getattr(transformers, "__version__", "N/A"),
+            "Pytorch": getattr(torch, "__version__", "N/A"),
+            "Datasets": getattr(datasets, "__version__", "N/A"),
+            "Tokenizers": getattr(tokenizers, "__version__", "N/A"),
+        }
+
+        # Get validation metrics
+        metrics = {}
+        if hasattr(self, "validation_stats") and self.validation_stats:
+            metrics = self.validation_stats
+
+        # Get WandB URL
+        wandb_url = ""
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb_url = wandb.run.get_url()
+        except:
+            pass
+
+        # Get dataset information
+        dataset_info = ""
+        if hasattr(self, "train_dataset") and self.train_dataset is not None:
+            train_size = len(self.train_dataset)
+            dataset_info += f"Training dataset size: {train_size} examples\n"
+
+        if hasattr(self, "val_dataset") and self.val_dataset is not None:
+            val_size = len(self.val_dataset)
+            dataset_info += f"Validation dataset size: {val_size} examples\n"
+
+        # Check if we have any example completions
+        example_completions = []
+        if hasattr(self, "debug_examples") and self.debug_examples:
+            example_completions = self.debug_examples
+
+        # Create the model card content
+        model_card = f"""# {model_name}
+
+This model is a fine-tuned version of {base_model} on a coding multiple-choice dataset. It uses the LoRA method with {'Unsloth optimizations' if getattr(self.model, 'is_unsloth_model', False) else 'standard PEFT implementation'}.
+
+## Model Performance
+
+"""
+        if metrics:
+            model_card += "### Validation Metrics\n"
+            for key, value in metrics.items():
+                if isinstance(value, (int, float)):
+                    model_card += f"- {key}: {value:.4f}\n"
+                else:
+                    model_card += f"- {key}: {value}\n"
+            model_card += "\n"
+
+        model_card += """## Model Description
+
+This model is fine-tuned to excel at coding-related multiple-choice tasks. It demonstrates:
+- Strong reasoning capabilities for code understanding
+- Ability to evaluate and select the most appropriate answer from multiple choices
+- Code explanation and interpretation skills
+
+## Training and Evaluation Data
+
+"""
+        model_card += dataset_info
+        model_card += """
+The model was trained on the coding-mcq-reasoning dataset, which contains coding-related multiple choice questions with reasoning steps. Each example includes a question, multiple choices, and well-reasoned explanations.
+
+## Training Procedure
+
+"""
+        model_card += "### Training Hyperparameters\n\n"
+        model_card += "The following hyperparameters were used during training:\n\n"
+        for param, value in training_params.items():
+            model_card += f"- {param}: {value}\n"
+
+        model_card += "\n### Framework Versions\n\n"
+        for framework, version in framework_versions.items():
+            model_card += f"{framework} {version}\n"
+
+        if wandb_url:
+            model_card += f"\n## Experiment Tracking\n\nThis model's training process is tracked on Weights & Biases: [View the full experiment]({wandb_url})\n"
+
+        if example_completions:
+            model_card += "\n## Example Completions\n\n"
+            # Limited to 3 examples to keep the card readable
+            for i, example in enumerate(example_completions[:3]):
+                if "raw_text" in example:
+                    model_card += (
+                        f"### Example {i+1}\n\n```\n{example['raw_text'][:500]}...\n```\n\n"
+                    )
+
+        model_card += """
+## Usage
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+
+# Load the model and tokenizer
+tokenizer = AutoTokenizer.from_pretrained("REPO_ID")
+model = AutoModelForCausalLM.from_pretrained("REPO_ID")
+
+# Format a multiple choice question
+question = "What is the time complexity of the following algorithm: for(int i=0; i<n; i++) { for(int j=i; j<n; j++) { // O(1) operation } }?"
+choices = ["A. O(n)", "B. O(n^2)", "C. O(n log n)", "D. O(n(n+1)/2)"]
+
+prompt = f"Question: {question}\nChoices:\n" + "\n".join(choices) + "\nAnswer:"
+
+# Generate a response
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=100)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
+
+## Limitations
+
+- The model is specialized for coding multiple-choice questions and may not perform as well on open-ended coding tasks
+- Performance may vary based on the similarity of questions to the training data
+- The model is not a substitute for human judgment in complex coding scenarios
+"""
+
+        return model_card
+
+    def save_model(self, output_dir):
+        """Save model and tokenizer to the specified directory"""
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+
+        try:
+            logger.info(f"Saving model to {output_dir}")
+
+            # If we're using a PEFT/LoRA model, save it with its specific method
+            if hasattr(self, "peft_model") and self.peft_model is not None:
+                self.peft_model.save_pretrained(output_dir)
+                logger.info("Saved PEFT/LoRA model")
+            # Otherwise try to save the model directly if it has save_pretrained
+            elif hasattr(self, "model") and hasattr(self.model, "save_pretrained"):
+                self.model.save_pretrained(output_dir)
+                logger.info("Saved base model")
+            else:
+                raise ValueError("No suitable model found to save")
+
+            # Save the tokenizer if available
+            if hasattr(self, "tokenizer") and hasattr(self.tokenizer, "save_pretrained"):
+                self.tokenizer.save_pretrained(output_dir)
+                logger.info("Saved tokenizer")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error saving model: {e}")
+            return False
 
     def save_results(self, results: Dict[str, Any], output_dir: str = "./results") -> str:
         """Save evaluation results to file"""
@@ -1105,43 +1449,3 @@ class QwenTrainer:
 
         print(f"Results saved to {results_file}")
         return results_file
-
-
-class SafetyCheckpointCallback(TrainerCallback):
-    """Callback to save checkpoints at regular intervals for safety."""
-
-    def __init__(self, save_steps: int = 30, save_total_limit: int = 5):
-        self.save_steps = save_steps
-        self.save_total_limit = save_total_limit
-        self.saved_checkpoints = []
-
-    def on_step_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
-        """Save checkpoint every save_steps."""
-        if state.global_step > 0 and state.global_step % self.save_steps == 0:
-            # Create checkpoint directory
-            checkpoint_dir = os.path.join(args.output_dir, f"safety-checkpoint-{state.global_step}")
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-            # Save model
-            kwargs["trainer"].save_model(checkpoint_dir)
-            logger.info(f"Saved safety checkpoint to {checkpoint_dir}")
-
-            # Add to saved checkpoints list
-            self.saved_checkpoints.append(checkpoint_dir)
-
-            # Remove old checkpoints if exceeding limit
-            while len(self.saved_checkpoints) > self.save_total_limit:
-                old_checkpoint = self.saved_checkpoints.pop(0)
-                try:
-                    shutil.rmtree(old_checkpoint)
-                    logger.info(f"Removed old safety checkpoint: {old_checkpoint}")
-                except Exception as e:
-                    logger.warning(f"Failed to remove old checkpoint {old_checkpoint}: {e}")
-
-        return control

@@ -39,8 +39,19 @@ class SafetyCheckpointCallback(BaseCallback):
             checkpoint_dir = os.path.join(args.output_dir, f"safety-checkpoint-{state.global_step}")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
+            # Get trainer instance - try from kwargs or fallback to attribute
+            trainer = None
+            if 'trainer' in kwargs:
+                trainer = kwargs['trainer']
+            elif hasattr(self, 'trainer'):
+                trainer = self.trainer
+            
+            if trainer is None:
+                logger.warning(f"SafetyCheckpointCallback: No trainer found at step {state.global_step}. Cannot save checkpoint.")
+                return control
+                
             # Save model
-            kwargs["trainer"].save_model(checkpoint_dir)
+            trainer.save_model(checkpoint_dir)
             logger.info(f"Saved safety checkpoint to {checkpoint_dir}")
 
             # Add to saved checkpoints list

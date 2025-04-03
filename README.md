@@ -724,6 +724,41 @@ After running training with prompt monitoring enabled, you can view detailed pro
 
 This helps you better understand your training data and identify potential issues or biases during training.
 
+### Automatic Model Card Generation
+
+The framework includes a comprehensive model card generation system that creates detailed, informative model cards when pushing to Hugging Face Hub:
+
+```bash
+python src/run.py \
+    --push-to-hub \
+    --destination-repo "your-username/model-name"
+```
+
+#### Model Card Features
+
+- **Automatic Validation Metrics**: Includes detailed validation metrics (eval_loss, runtime, samples/second)
+- **WandB Integration**: Automatically embeds a direct link to the WandB experiment dashboard
+- **Example Completions**: Shows sample outputs generated during validation
+- **Training Details**: Lists comprehensive training hyperparameters and configuration
+- **Framework Versions**: Documents versions of key libraries (Transformers, PyTorch, PEFT)
+- **Dataset Information**: Includes details about the training and validation datasets
+- **Usage Examples**: Provides code snippets for easy model usage
+
+#### Model Card Sections
+
+The automatically generated model card includes:
+
+1. **Model Performance**: Key validation metrics with precise formatting
+2. **Model Description**: Details about model capabilities and architecture
+3. **Training Data**: Information about dataset size and characteristics
+4. **Training Procedure**: Complete hyperparameters and configuration
+5. **Experiment Tracking**: Direct link to WandB dashboard
+6. **Example Completions**: Sample model outputs during validation
+7. **Usage Guide**: Ready-to-use code snippets for inference
+8. **Limitations**: Documentation of potential model constraints
+
+This feature ensures that models pushed to Hugging Face Hub are well-documented, making them more accessible and easier to use for the community.
+
 ### Visualization with tqdm
 
 The training process includes progress bars using tqdm for better visibility:
@@ -1170,146 +1205,3 @@ graph LR
     style Callbacks fill:#f8f9fa,stroke:#343a40,stroke-width:2px
     style Visualization fill:#f8f9fa,stroke:#343a40,stroke-width:2px
 ```
-
-## 🔧 QLoRA Training Optimizations and Troubleshooting
-
-### Gradient and Learning Rate Stability
-
-#### Handling NaN Gradients
-If you encounter NaN gradients during training, implement these solutions:
-
-1. **Gradient Clipping Settings**:
-```bash
---max-grad-norm 0.3        # Tighter gradient clipping
---weight-decay 0.1         # Increased for Lion optimizer
-```
-
-2. **Batch Size and Accumulation**:
-```bash
---batch-size 4             # Reduced for stability
---grad-accum 8             # Increased to maintain effective batch size
-```
-
-3. **Learning Rate Configuration**:
-```bash
---learning-rate 5e-5       # Conservative learning rate
---warmup-steps 200        # Extended warmup period
---lr-scheduler "cosine"   # Stable scheduler choice
-```
-
-### Environment Variables for Stability
-
-Add these to your training script:
-```bash
-export CUDA_DEVICE_MAX_CONNECTIONS=1    # Prevent race conditions
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512  # Prevent fragmentation
-export NCCL_DEBUG=INFO                  # Better error messages
-```
-
-### Memory Management
-
-1. **Gradient Checkpointing**:
-```python
-gradient_checkpointing=True
-gradient_checkpointing_kwargs={"use_reentrant": False}
-```
-
-2. **Optimizer States**:
-```python
-optim="lion_8bit"         # Memory-efficient optimizer
-bf16=True                 # When supported by hardware
-```
-
-3. **Training Pipeline**:
-```python
-remove_unused_columns=False
-dataloader_num_workers=4
-dataloader_pin_memory=True
-```
-
-### Common Issues and Solutions
-
-1. **NaN Gradients**:
-   - Reduce learning rate
-   - Increase gradient clipping
-   - Check for data anomalies
-   - Monitor loss scaling with mixed precision
-
-2. **Memory Errors**:
-   - Enable gradient checkpointing
-   - Use 8-bit optimizers
-   - Reduce batch size
-   - Increase gradient accumulation
-
-3. **Learning Rate Scheduler Issues**:
-   - Verify scheduler initialization
-   - Check warmup steps calculation
-   - Monitor learning rate changes
-   - Validate optimizer configuration
-
-### Monitoring and Debugging
-
-1. **WandB Integration**:
-```python
-wandb.log({
-    "trainer/learning_rate": current_lr,
-    "trainer/grad_norm": grad_norm,
-    "trainer/loss": loss_value,
-    "memory/gpu_utilization": gpu_util
-})
-```
-
-2. **Gradient Tracking**:
-```python
-if torch.isnan(loss).any():
-    logger.warning(f"NaN loss detected at step {step}")
-    for name, param in model.named_parameters():
-        if param.grad is not None and torch.isnan(param.grad).any():
-            logger.warning(f"NaN gradient in {name}")
-```
-
-3. **Memory Profiling**:
-```python
-torch.cuda.memory_summary(device=None, abbreviated=False)
-```
-
-### Best Practices
-
-1. **Initialization**:
-   - Use proper weight initialization
-   - Initialize optimizer and scheduler explicitly
-   - Verify model preparation steps
-
-2. **Training Loop**:
-   - Monitor gradient norms
-   - Track learning rates
-   - Log memory usage
-   - Validate batch statistics
-
-3. **Validation**:
-   - Regular evaluation
-   - Early stopping implementation
-   - Model checkpointing
-   - Performance metrics tracking
-
-### Performance Optimization
-
-1. **Hardware Utilization**:
-   - Monitor GPU usage
-   - Track memory allocation
-   - Optimize data loading
-   - Balance CPU/GPU operations
-
-2. **Training Speed**:
-   - Efficient data preprocessing
-   - Proper batch size selection
-   - Optimized model configuration
-   - Resource allocation
-
-3. **Memory Efficiency**:
-   - Gradient accumulation
-   - Mixed precision training
-   - Memory-mapped datasets
-   - Efficient checkpointing
-
-For more detailed information about QLoRA training and optimization techniques, refer to the [official documentation](https://huggingface.co/docs/transformers/main/en/perf_train_gpu_one) and [research paper](https://arxiv.org/abs/2305.14314).

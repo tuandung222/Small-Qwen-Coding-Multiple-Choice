@@ -127,12 +127,4 @@ python src/run.py \
     --response-token "<|im_start|>assistant\n" \
     --dataloader-num-workers 4 \
     --dataloader-pin-memory true \
-    --bf16 true > training.log 2>&1 &
-
-# Save the process ID
-echo $! > $PID_FILE
-
-echo "QLoRA training started in background with PID: $(cat $PID_FILE)"
-echo "Logs are being written to training.log"
-echo "To monitor progress, use: tail -f training.log"
-echo "To stop training, run: kill $(cat $PID_FILE)"
+    --bf16 true > training.log 2>&1
