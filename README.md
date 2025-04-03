@@ -735,6 +735,228 @@ python src/run.py --validation-steps 50
 
 This provides real-time feedback on both training and validation progress, making it easier to monitor long-running training jobs.
 
+## 🔍 Memory Profiling and Monitoring
+
+### Memory Profiling Callback
+
+The training pipeline now includes comprehensive memory profiling through the `MemoryProfilingCallback`:
+
+```python
+from src.training.callbacks import MemoryProfilingCallback
+
+memory_callback = MemoryProfilingCallback(
+    log_every_n_steps=100,
+    detailed_profiling=True,
+    warning_threshold=0.90,
+    track_fragmentation=True,
+    log_to_file=True,
+    output_dir="your_output_dir"
+)
+
+trainer = Trainer(
+    model=model,
+    callbacks=[memory_callback],
+    # ... other trainer arguments
+)
+```
+
+#### Features
+
+1. **CUDA Memory Tracking**:
+   ```python
+   {
+       "cuda_allocated": 3.45,  # GB
+       "cuda_reserved": 4.12,   # GB
+       "cuda_max_allocated": 5.67,
+       "cuda_max_reserved": 6.01
+   }
+   ```
+
+2. **Memory Fragmentation Detection**:
+   ```python
+   {
+       "fragmentation_ratio": 0.15,  # 15% fragmentation
+       "warning_threshold": 0.90,    # 90% usage warning
+   }
+   ```
+
+3. **GPU Utilization Monitoring**:
+   ```python
+   {
+       "gpu_utilization": 85,       # Percentage
+       "gpu_memory_utilization": 78  # Percentage
+   }
+   ```
+
+4. **Memory Leak Detection**:
+   - Monitors garbage collector activity
+   - Alerts on suspicious memory patterns
+   - Tracks memory growth over time
+
+### Weights & Biases Integration
+
+Enhanced WandB integration with structured logging and visualization:
+
+```python
+from src.training.callbacks import WandBConfig, WandBLogger, WandBCallback
+
+# Configure WandB logging
+config = WandBConfig(
+    project_name="my_project",
+    run_name="experiment_1",
+    log_memory=True,
+    log_gradients=True,
+    log_training=True,
+    log_validation=True,
+    log_examples=True,
+    log_interval=100,
+    example_batch_size=5
+)
+
+# Initialize logger and callback
+logger = WandBLogger(config)
+wandb_callback = WandBCallback(logger)
+```
+
+#### Logging Features
+
+1. **Training Metrics**:
+   ```python
+   {
+       "training/loss": loss_value,
+       "training/learning_rate": current_lr,
+       "training/gradient_norm": grad_norm,
+       "training/parameter_norm": param_norm
+   }
+   ```
+
+2. **Memory Metrics**:
+   ```python
+   {
+       "memory/cuda/allocated_gb": allocated,
+       "memory/cuda/reserved_gb": reserved,
+       "memory/fragmentation_ratio": frag_ratio
+   }
+   ```
+
+3. **Model Information**:
+   ```python
+   {
+       "model/total_parameters": total_params,
+       "model/trainable_parameters": trainable_params,
+       "model/frozen_parameters": frozen_params
+   }
+   ```
+
+4. **Example Logging**:
+   ```python
+   wandb.log({
+       "examples/val_step": example_table,
+       "examples/correct_count": correct_count,
+       "examples/accuracy": accuracy
+   })
+   ```
+
+### Memory Optimization Tips
+
+1. **Gradient Checkpointing**:
+   ```python
+   training_args = TrainingArguments(
+       gradient_checkpointing=True,
+       gradient_checkpointing_kwargs={"use_reentrant": False}
+   )
+   ```
+
+2. **Memory-Efficient Training**:
+   ```python
+   # Use 8-bit optimizers
+   optimizer_config = {
+       "optimizer_type": "lion_8bit",
+       "weight_decay": 0.1,
+       "optim_bits": 8
+   }
+
+   # Enable gradient accumulation
+   training_args = TrainingArguments(
+       gradient_accumulation_steps=8,
+       per_device_train_batch_size=4
+   )
+   ```
+
+3. **Automatic Memory Management**:
+   - Regular cache clearing
+   - Fragmentation monitoring
+   - OOM prevention warnings
+   - Automatic batch size adjustment
+
+### Monitoring Dashboard
+
+The WandB dashboard includes:
+
+1. **Memory Usage Panels**:
+   - CUDA memory allocation
+   - Memory fragmentation
+   - GPU utilization
+   - Memory leak detection
+
+2. **Training Progress**:
+   - Loss curves
+   - Learning rate schedules
+   - Gradient statistics
+   - Parameter norms
+
+3. **Example Visualization**:
+   - Training samples
+   - Model predictions
+   - Accuracy metrics
+   - Quality analysis
+
+4. **System Metrics**:
+   - CPU usage
+   - Disk I/O
+   - Network traffic
+   - Process memory
+
+### Best Practices
+
+1. **Memory Management**:
+   ```python
+   # Clear cache at strategic points
+   torch.cuda.empty_cache()
+
+   # Monitor fragmentation
+   if fragmentation_ratio > 0.3:
+       logger.warning("High memory fragmentation detected")
+   ```
+
+2. **Gradient Handling**:
+   ```python
+   # Clip gradients for stability
+   training_args = TrainingArguments(
+       max_grad_norm=0.3,
+       max_grad_clip=1.0
+   )
+   ```
+
+3. **Batch Size Optimization**:
+   ```python
+   # Start with small batch size
+   training_args = TrainingArguments(
+       per_device_train_batch_size=4,
+       gradient_accumulation_steps=8
+   )
+   ```
+
+4. **Regular Checkpointing**:
+   ```python
+   training_args = TrainingArguments(
+       save_steps=30,
+       save_total_limit=5
+   )
+   ```
+
+For more detailed information about memory profiling and monitoring, refer to the [Memory Profiling Guide](docs/memory_profiling.md) and [WandB Integration Guide](docs/wandb_integration.md).
+
 ## 🏗️ Architecture
 
 ### Overall System Architecture
