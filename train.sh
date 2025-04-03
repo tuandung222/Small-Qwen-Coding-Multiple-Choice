@@ -19,6 +19,69 @@ else
     echo "$(date): Starting new training run" > training.log
 fi
 
+# Default values
+SOURCE_MODEL="unsloth/Qwen2.5-Coder-1.5B-Instruct"
+DESTINATION_REPO="tuandunghcmut/Qwen25_Coder_MultipleChoice_v3"
+BATCH_SIZE=4
+LEARNING_RATE=2e-4
+EPOCHS=3
+WARMUP_STEPS=50  # New default warmup steps
+VALIDATION_STEPS=50  # Steps between validations
+DEBUG_SAMPLES=3  # Number of samples to log for debugging
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --source-model)
+      SOURCE_MODEL="$2"
+      shift 2
+      ;;
+    --destination-repo)
+      DESTINATION_REPO="$2"
+      shift 2
+      ;;
+    --batch-size)
+      BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --learning-rate)
+      LEARNING_RATE="$2"
+      shift 2
+      ;;
+    --epochs)
+      EPOCHS="$2"
+      shift 2
+      ;;
+    --warmup-steps)  # New parameter
+      WARMUP_STEPS="$2"
+      shift 2
+      ;;
+    --validation-steps)  # New parameter
+      VALIDATION_STEPS="$2"
+      shift 2
+      ;;
+    --debug-samples)  # New parameter
+      DEBUG_SAMPLES="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown parameter: $1"
+      exit 1
+      ;;
+  esac
+done
+
+# Print configuration
+echo "=== Training Configuration ==="
+echo "Source model: $SOURCE_MODEL"
+echo "Destination repo: $DESTINATION_REPO"
+echo "Batch size: $BATCH_SIZE"
+echo "Learning rate: $LEARNING_RATE"
+echo "Epochs: $EPOCHS"
+echo "Warmup steps: $WARMUP_STEPS"
+echo "Validation steps: $VALIDATION_STEPS"
+echo "Debug samples: $DEBUG_SAMPLES"
+echo "==========================="
 
 # Add timestamp to experiment name for uniqueness
 TIMESTAMP=$(date +"%m%d_%H%M")
@@ -27,13 +90,29 @@ EXPERIMENT_NAME="Qwen25_Coder_MCQ_5Epochs_${TIMESTAMP}"
 # Run the training script with comprehensive features
 python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
-    --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
-    --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
-    --epochs 2 \
-    --batch-size 32 \
-    --learning-rate 2e-4 \
+    --source-model "$SOURCE_MODEL" \
+    --destination-repo "$DESTINATION_REPO" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --learning-rate "$LEARNING_RATE" \
+    --warmup-steps "$WARMUP_STEPS" \
+    --validation-steps "$VALIDATION_STEPS" \
+    --debug-samples "$DEBUG_SAMPLES" \
+    --lr-scheduler "cosine_with_warmup" \
+    --push-to-hub \
+    --validate-at-start \
+    --prompt-track-diversity \
+    --prompt-track-quality \
+    --prompt-categorize \
+    --prompt-comparison \
+    --max-prompts-to-save 100 \
+    --logging-steps 10 \
+    --save-steps 100 \
+    --save-total-limit 3 \
+    --metric-for-best "eval_loss" \
+    --early-stopping-patience 3 \
+    --early-stopping-delta 0.01 \
     --grad-accum 1 \
-    --warmup-ratio 0.15 \
     --weight-decay 0.01 \
     --max-seq-length 2048 \
     --quantization "4bit" \
@@ -51,22 +130,12 @@ python src/run.py \
     --max-grad-norm 1.0 \
     --optim-bits 8 \
     \
-    --lr-scheduler "cosine" \
     --lr-scheduler-num-cycles 1 \
     --lr-scheduler-power 1.0 \
     \
-    --early-stopping-patience 7 \
-    --early-stopping-delta 0.01 \
-    --validation-steps 10 \
-    --metric-for-best "eval_loss" \
-    --validate-at-start \
-    \
     --prompt-template "teacher_reasoned" \
-    --logging-steps 10 \
-    --save-steps 90 \
     --save-total-limit 5 \
     --push-strategy "best" \
-    --push-to-hub \
     \
     --dataset "tuandunghcmut/coding-mcq-reasoning" \
     --val-split 0.04 \
@@ -80,11 +149,4 @@ python src/run.py \
     --train-on-responses-only \
     --instruction-token "<|im_start|>user\n" \
     --response-token "<|im_start|>assistant\n" \
-    \
-    --prompt-track-diversity \
-    --prompt-track-quality \
-    --prompt-categorize \
-    --prompt-comparison \
-    --max-prompts-to-save 200 \
-    --debug-samples 3 \
     2>&1 | tee training.log &
