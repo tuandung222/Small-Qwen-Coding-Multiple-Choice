@@ -1,0 +1,38 @@
+# Core ML and Training
+torch
+transformers
+peft
+accelerate
+bitsandbytes
+unsloth
+lion-pytorch
+flash-attn
+xformers
+triton
+
+# Data Processing and Management
+datasets
+numpy
+pandas
+prettytable
+tqdm
+
+# Development and Monitoring
+wandb
+pre-commit
+
+# Code Quality - Simplified
+black
+isort
+flake8
+flake8-docstrings
+flake8-bugbear
+
+# Optional: Jupyter Support (if using notebooks)
+jupyter
+ipykernel
+dotenv
+# ...
+# flash_attn==2.7.4.post1
+# xformers==0.0.29.post3
+# triton==3.2.0

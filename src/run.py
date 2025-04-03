@@ -13,16 +13,16 @@ from huggingface_hub import HfApi, create_repo
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+# Import wandb once at the top level
 import wandb
 from src.model.qwen_handler import HubConfig, ModelSource, QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
-from src.training.callbacks import (
-    EarlyStoppingCallback,
-    LRMonitorCallback,
-    ModelLoadingAlertCallback,
-    PromptMonitorCallback,
-    ValidationCallback,
-)
+from src.training.callbacks.base_callback import BaseCallback
+from src.training.callbacks.early_stopping_callback import EarlyStoppingCallback
+from src.training.callbacks.lr_monitor_callback import LRMonitorCallback
+from src.training.callbacks.model_loading_alert_callback import ModelLoadingAlertCallback
+from src.training.callbacks.prompt_monitor_callback import PromptMonitorCallback
+from src.training.callbacks.validation_callback import ValidationCallback
 from src.training.trainer import QwenTrainer
 from src.utils.auth import setup_authentication
 from src.utils.wandb_logger import WandBCallback, WandBConfig, WandBLogger
@@ -574,10 +574,10 @@ def parse_args():
         help="Set fan_in_fan_out for Conv1D",
     )
     parser.add_argument(
-        "--use-gradient-checkpointing",
+        "--use-grad-checkpoint",
         type=bool,
         default=False,
-        help="Use gradient checkpointing",
+        help="Use gradient checkpointing (legacy option)",
     )
     parser.add_argument(
         "--modules-to-save",
@@ -664,13 +664,6 @@ def parse_args():
 
     # Add QLoRA configuration
     parser.add_argument(
-        "--quantization",
-        type=str,
-        default="4bit",
-        choices=["4bit", "8bit", "none"],
-        help="Quantization level for QLoRA",
-    )
-    parser.add_argument(
         "--double-quant",
         action="store_true",
         default=True,
@@ -710,7 +703,7 @@ def parse_args():
         help="Enable memory efficient backward pass",
     )
     parser.add_argument(
-        "--use-gradient-checkpointing",
+        "--gradient-checkpointing",
         action="store_true",
         default=True,
         help="Enable gradient checkpointing",
@@ -1331,8 +1324,13 @@ def main():
         return 1
     finally:
         # Cleanup wandb
-        if wandb.run is not None:
-            wandb.finish()
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.finish()
+        except Exception as e:
+            logger.warning(f"Failed to clean up wandb: {e}")
+            pass
 
 
 if __name__ == "__main__":
