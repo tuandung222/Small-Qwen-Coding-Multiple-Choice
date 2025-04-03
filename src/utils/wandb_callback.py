@@ -27,7 +27,7 @@ class WandBCallback(TrainerCallback):
                 model_name = getattr(args, "hub_model_id", "unknown-model")
                 self.logger.init_run(model_name)
                 print(f"WandB run initialized: {wandb.run.name}")
-            
+
             if model:
                 self.logger.log_model_info(model)
         except Exception as e:
@@ -39,7 +39,9 @@ class WandBCallback(TrainerCallback):
         if logs:
             try:
                 if wandb.run is None:
-                    print("Warning: WandB run not initialized during logging. Logging to wandb will be skipped.")
+                    print(
+                        "Warning: WandB run not initialized during logging. Logging to wandb will be skipped."
+                    )
                     return
                 wandb.log(logs)
             except Exception as e:
@@ -54,7 +56,11 @@ class WandBCallback(TrainerCallback):
         self, logs: Dict[str, Any], state: Any, model: Optional[torch.nn.Module] = None
     ):
         """Log training metrics including gradients and memory"""
-        if not hasattr(self.logger.config, "log_training") or not self.logger.config.log_training or not wandb.run:
+        if (
+            not hasattr(self.logger.config, "log_training")
+            or not self.logger.config.log_training
+            or not wandb.run
+        ):
             return
 
         # Log basic training metrics
@@ -66,7 +72,11 @@ class WandBCallback(TrainerCallback):
             logs["training/learning_rate"] = state.learning_rate
 
         # Log gradient statistics if enabled
-        if hasattr(self.logger.config, "log_gradients") and self.logger.config.log_gradients and model is not None:
+        if (
+            hasattr(self.logger.config, "log_gradients")
+            and self.logger.config.log_gradients
+            and model is not None
+        ):
             grad_norm = 0.0
             param_norm = 0.0
             total_params = 0
@@ -85,7 +95,11 @@ class WandBCallback(TrainerCallback):
                 logs["training/grad_param_ratio"] = grad_norm / param_norm if param_norm > 0 else 0
 
         # Log memory usage if enabled
-        if hasattr(self.logger.config, "log_memory") and self.logger.config.log_memory and torch.cuda.is_available():
+        if (
+            hasattr(self.logger.config, "log_memory")
+            and self.logger.config.log_memory
+            and torch.cuda.is_available()
+        ):
             logs["training/gpu_memory_allocated"] = torch.cuda.memory_allocated() / 1024**2  # MB
             logs["training/gpu_memory_reserved"] = torch.cuda.memory_reserved() / 1024**2  # MB
 
@@ -103,4 +117,4 @@ class WandBCallback(TrainerCallback):
         try:
             wandb.log(logs)
         except Exception as e:
-            print(f"Warning: Error logging training metrics to WandB: {e}") 
+            print(f"Warning: Error logging training metrics to WandB: {e}")

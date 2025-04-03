@@ -1,6 +1,6 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ class ModelConfig:
     """
     Configuration for model initialization
     """
+
     model_name_or_path: str
     model_revision: str = "main"
     use_auth_token: bool = False
@@ -35,20 +36,20 @@ def initialize_model(
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """
     Initialize a model and tokenizer
-    
+
     Args:
         config: Model configuration
-        
+
     Returns:
         Tuple[PreTrainedModel, PreTrainedTokenizer]: Initialized model and tokenizer
     """
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        
+
         # Set up device and dtype
         if config.device_map is None:
             config.device_map = "auto"
-            
+
         if config.torch_dtype is None:
             if config.use_bf16:
                 config.torch_dtype = torch.bfloat16
@@ -56,7 +57,7 @@ def initialize_model(
                 config.torch_dtype = torch.float16
             else:
                 config.torch_dtype = torch.float32
-                
+
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
             config.model_name_or_path,
@@ -64,7 +65,7 @@ def initialize_model(
             use_auth_token=config.use_auth_token,
             trust_remote_code=config.trust_remote_code,
         )
-        
+
         # Load model
         model = AutoModelForCausalLM.from_pretrained(
             config.model_name_or_path,
@@ -75,28 +76,31 @@ def initialize_model(
             low_cpu_mem_usage=config.low_cpu_mem_usage,
             trust_remote_code=config.trust_remote_code,
         )
-        
+
         # Apply optimizations
         if config.use_8bit:
             model = model.quantize(8)
         elif config.use_4bit:
             model = model.quantize(4)
-            
+
         if config.use_flash_attention_2:
             model = model.to_bettertransformer()
-            
+
         if config.use_xformers:
             from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+
             model.config.use_memory_efficient_attention = True
             model.config.attention_implementation = "xformers"
             model.config.attention_op = MemoryEfficientAttentionFlashAttentionOp
-            
+
         if config.use_gradient_checkpointing:
             model.gradient_checkpointing_enable()
-            
-        logger.info(f"Initialized model {config.model_name_or_path} with dtype {config.torch_dtype}")
+
+        logger.info(
+            f"Initialized model {config.model_name_or_path} with dtype {config.torch_dtype}"
+        )
         return model, tokenizer
-        
+
     except Exception as e:
         logger.error(f"Error initializing model: {str(e)}")
         raise
@@ -108,17 +112,17 @@ def initialize_lora(
 ) -> PreTrainedModel:
     """
     Initialize LoRA for a model
-    
+
     Args:
         model: Base model
         config: LoRA configuration
-        
+
     Returns:
         PreTrainedModel: Model with LoRA applied
     """
     try:
-        from peft import get_peft_model, LoraConfig, TaskType
-        
+        from peft import LoraConfig, TaskType, get_peft_model
+
         # Create LoRA config
         lora_config = LoraConfig(
             r=config["lora_r"],
@@ -128,13 +132,13 @@ def initialize_lora(
             bias=config["lora_bias"],
             task_type=TaskType[config["lora_task_type"]],
         )
-        
+
         # Apply LoRA
         model = get_peft_model(model, lora_config)
-        
+
         logger.info(f"Initialized LoRA with rank {config['lora_r']}")
         return model
-        
+
     except Exception as e:
         logger.error(f"Error initializing LoRA: {str(e)}")
         raise
@@ -146,11 +150,11 @@ def initialize_optimized_model(
 ) -> PreTrainedModel:
     """
     Initialize an optimized version of the model
-    
+
     Args:
         model: Base model
         config: Model configuration
-        
+
     Returns:
         PreTrainedModel: Optimized model
     """
@@ -158,6 +162,7 @@ def initialize_optimized_model(
         # Apply quantization
         if config.use_8bit:
             from bitsandbytes.nn import Linear8bitLt
+
             for name, module in model.named_modules():
                 if isinstance(module, nn.Linear):
                     module = Linear8bitLt(
@@ -169,6 +174,7 @@ def initialize_optimized_model(
                     )
         elif config.use_4bit:
             from bitsandbytes.nn import Linear4bit
+
             for name, module in model.named_modules():
                 if isinstance(module, nn.Linear):
                     module = Linear4bit(
@@ -178,24 +184,25 @@ def initialize_optimized_model(
                         compress_statistics=True,
                         quant_type="nf4",
                     )
-                    
+
         # Apply attention optimizations
         if config.use_flash_attention_2:
             model = model.to_bettertransformer()
-            
+
         if config.use_xformers:
             from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+
             model.config.use_memory_efficient_attention = True
             model.config.attention_implementation = "xformers"
             model.config.attention_op = MemoryEfficientAttentionFlashAttentionOp
-            
+
         # Apply gradient checkpointing
         if config.use_gradient_checkpointing:
             model.gradient_checkpointing_enable()
-            
+
         logger.info("Initialized optimized model")
         return model
-        
+
     except Exception as e:
         logger.error(f"Error initializing optimized model: {str(e)}")
         raise
@@ -207,11 +214,11 @@ def initialize_model_parallel(
 ) -> PreTrainedModel:
     """
     Initialize model parallel training
-    
+
     Args:
         model: Base model
         num_gpus: Number of GPUs to use
-        
+
     Returns:
         PreTrainedModel: Model parallel model
     """
@@ -220,7 +227,7 @@ def initialize_model_parallel(
             model = nn.DataParallel(model)
             logger.info(f"Initialized model parallel training with {num_gpus} GPUs")
         return model
-        
+
     except Exception as e:
         logger.error(f"Error initializing model parallel: {str(e)}")
         raise
@@ -232,24 +239,24 @@ def initialize_distributed_model(
 ) -> PreTrainedModel:
     """
     Initialize distributed training
-    
+
     Args:
         model: Base model
         local_rank: Local rank of the process
-        
+
     Returns:
         PreTrainedModel: Distributed model
     """
     try:
         import torch.distributed as dist
         from torch.nn.parallel import DistributedDataParallel
-        
+
         # Initialize process group
         dist.init_process_group(backend="nccl")
-        
+
         # Move model to GPU
         model = model.to(local_rank)
-        
+
         # Wrap model in DDP
         model = DistributedDataParallel(
             model,
@@ -257,10 +264,10 @@ def initialize_distributed_model(
             output_device=local_rank,
             find_unused_parameters=True,
         )
-        
+
         logger.info(f"Initialized distributed training on rank {local_rank}")
         return model
-        
+
     except Exception as e:
         logger.error(f"Error initializing distributed model: {str(e)}")
-        raise 
+        raise

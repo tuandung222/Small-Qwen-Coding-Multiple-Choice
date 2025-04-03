@@ -1,12 +1,12 @@
+import json
 import logging
 import os
-import json
-from typing import Dict, Any, Optional, Union, Tuple
 from datetime import datetime
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
-from transformers import PreTrainedModel, PreTrainedTokenizer
 from huggingface_hub import HfApi, Repository
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def save_model(
 ) -> str:
     """
     Save a model and its components
-    
+
     Args:
         model: Model to save
         tokenizer: Tokenizer to save
@@ -39,33 +39,34 @@ def save_model(
         save_config: Whether to save model config
         save_tokenizer: Whether to save tokenizer
         save_metadata: Whether to save metadata
-        
+
     Returns:
         str: Path to the saved model
     """
     try:
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Save model
         if save_format == "safetensors":
             from safetensors.torch import save_file
+
             state_dict = model.state_dict()
             save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
         else:
             model.save_pretrained(output_dir)
-            
+
         # Save tokenizer
         if save_tokenizer:
             tokenizer.save_pretrained(output_dir)
-            
+
         # Save optimizer state
         if save_optimizer and hasattr(model, "optimizer"):
             torch.save(model.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-            
+
         # Save scheduler state
         if save_scheduler and hasattr(model, "scheduler"):
             torch.save(model.scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-            
+
         # Save RNG state
         if save_rng:
             rng_states = {
@@ -75,7 +76,7 @@ def save_model(
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             }
             torch.save(rng_states, os.path.join(output_dir, "rng_state.pt"))
-            
+
         # Save metadata
         if save_metadata:
             metadata = {
@@ -86,10 +87,10 @@ def save_model(
             }
             with open(os.path.join(output_dir, "metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
-                
+
         logger.info(f"Saved model to {output_dir}")
         return output_dir
-        
+
     except Exception as e:
         logger.error(f"Error saving model: {str(e)}")
         raise
@@ -108,7 +109,7 @@ def load_model(
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizer, Dict[str, Any]]:
     """
     Load a model and its components
-    
+
     Args:
         model_path: Path to the model
         model_class: Class to use for loading the model
@@ -119,40 +120,42 @@ def load_model(
         load_config: Whether to load model config
         load_tokenizer: Whether to load tokenizer
         load_metadata: Whether to load metadata
-        
+
     Returns:
         Tuple[PreTrainedModel, PreTrainedTokenizer, Dict[str, Any]]: Model, tokenizer, and metadata
     """
     try:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
+
         # Load model
         if model_class is None:
             from transformers import AutoModelForCausalLM
+
             model_class = AutoModelForCausalLM
-            
+
         model = model_class.from_pretrained(model_path)
         model = model.to(device)
-        
+
         # Load tokenizer
         tokenizer = None
         if load_tokenizer:
             from transformers import AutoTokenizer
+
             tokenizer = AutoTokenizer.from_pretrained(model_path)
-            
+
         # Load optimizer state
         if load_optimizer and os.path.exists(os.path.join(model_path, "optimizer.pt")):
             optimizer_state = torch.load(os.path.join(model_path, "optimizer.pt"))
             if hasattr(model, "optimizer"):
                 model.optimizer.load_state_dict(optimizer_state)
-                
+
         # Load scheduler state
         if load_scheduler and os.path.exists(os.path.join(model_path, "scheduler.pt")):
             scheduler_state = torch.load(os.path.join(model_path, "scheduler.pt"))
             if hasattr(model, "scheduler"):
                 model.scheduler.load_state_dict(scheduler_state)
-                
+
         # Load RNG state
         if load_rng and os.path.exists(os.path.join(model_path, "rng_state.pt")):
             rng_states = torch.load(os.path.join(model_path, "rng_state.pt"))
@@ -161,16 +164,16 @@ def load_model(
             torch.set_rng_state(rng_states["torch"])
             if torch.cuda.is_available() and rng_states["cuda"] is not None:
                 torch.cuda.set_rng_state_all(rng_states["cuda"])
-                
+
         # Load metadata
         metadata = {}
         if load_metadata and os.path.exists(os.path.join(model_path, "metadata.json")):
             with open(os.path.join(model_path, "metadata.json"), "r") as f:
                 metadata = json.load(f)
-                
+
         logger.info(f"Loaded model from {model_path}")
         return model, tokenizer, metadata
-        
+
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
         raise
@@ -186,7 +189,7 @@ def push_to_hub(
 ) -> str:
     """
     Push a model to the Hugging Face Hub
-    
+
     Args:
         model: Model to push
         tokenizer: Tokenizer to push
@@ -194,7 +197,7 @@ def push_to_hub(
         commit_message: Commit message
         private: Whether the repository should be private
         token: Hugging Face token
-        
+
     Returns:
         str: Repository URL
     """
@@ -202,20 +205,20 @@ def push_to_hub(
         # Create repository
         api = HfApi()
         api.create_repo(repo_id, private=private, token=token, exist_ok=True)
-        
+
         # Save model and tokenizer
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save_pretrained(tmp_dir)
             tokenizer.save_pretrained(tmp_dir)
-            
+
             # Push to hub
             repo = Repository(tmp_dir, clone_from=repo_id, token=token)
             repo.push_to_hub(commit_message=commit_message)
-            
+
         repo_url = f"https://huggingface.co/{repo_id}"
         logger.info(f"Pushed model to {repo_url}")
         return repo_url
-        
+
     except Exception as e:
         logger.error(f"Error pushing model to hub: {str(e)}")
         raise
@@ -229,19 +232,19 @@ def download_from_hub(
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """
     Download a model from the Hugging Face Hub
-    
+
     Args:
         repo_id: Repository ID
         revision: Revision to download
         token: Hugging Face token
         cache_dir: Directory to cache downloads
-        
+
     Returns:
         Tuple[PreTrainedModel, PreTrainedTokenizer]: Model and tokenizer
     """
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        
+
         # Download model and tokenizer
         model = AutoModelForCausalLM.from_pretrained(
             repo_id,
@@ -249,17 +252,17 @@ def download_from_hub(
             token=token,
             cache_dir=cache_dir,
         )
-        
+
         tokenizer = AutoTokenizer.from_pretrained(
             repo_id,
             revision=revision,
             token=token,
             cache_dir=cache_dir,
         )
-        
+
         logger.info(f"Downloaded model from {repo_id}")
         return model, tokenizer
-        
+
     except Exception as e:
         logger.error(f"Error downloading model from hub: {str(e)}")
-        raise 
+        raise

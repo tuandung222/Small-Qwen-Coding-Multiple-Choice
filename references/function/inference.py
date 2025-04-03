@@ -1,6 +1,6 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ class GenerationConfig:
     """
     Configuration for text generation
     """
+
     max_length: int = 100
     min_length: int = 1
     num_beams: int = 1
@@ -41,21 +42,21 @@ def generate_text(
 ) -> List[str]:
     """
     Generate text from a prompt
-    
+
     Args:
         model: Model to use for generation
         tokenizer: Tokenizer to use for encoding/decoding
         prompt: Input prompt
         config: Generation configuration
         device: Device to generate on
-        
+
     Returns:
         List[str]: Generated text sequences
     """
     try:
         # Encode prompt
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        
+
         # Generate
         with torch.no_grad():
             outputs = model.generate(
@@ -77,12 +78,12 @@ def generate_text(
                 eos_token_id=config.eos_token_id or tokenizer.eos_token_id,
                 bad_words_ids=config.bad_words_ids,
             )
-            
+
         # Decode outputs
         generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
+
         return generated_texts
-        
+
     except Exception as e:
         logger.error(f"Error generating text: {str(e)}")
         raise
@@ -99,7 +100,7 @@ def generate_with_guidance(
 ) -> List[str]:
     """
     Generate text with classifier-free guidance
-    
+
     Args:
         model: Model to use for generation
         tokenizer: Tokenizer to use for encoding/decoding
@@ -108,26 +109,26 @@ def generate_with_guidance(
         device: Device to generate on
         guidance_scale: Scale for classifier-free guidance
         num_inference_steps: Number of inference steps
-        
+
     Returns:
         List[str]: Generated text sequences
     """
     try:
         # Encode prompt
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        
+
         # Generate with guidance
         with torch.no_grad():
             # Get unconditional embeddings
             uncond_inputs = tokenizer([""], return_tensors="pt").to(device)
             uncond_embeddings = model.get_input_embeddings()(uncond_inputs.input_ids)
-            
+
             # Get conditional embeddings
             cond_embeddings = model.get_input_embeddings()(inputs.input_ids)
-            
+
             # Concatenate embeddings
             embeddings = torch.cat([uncond_embeddings, cond_embeddings])
-            
+
             # Generate
             outputs = model.generate(
                 inputs_embeds=embeddings,
@@ -150,12 +151,12 @@ def generate_with_guidance(
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
             )
-            
+
         # Decode outputs
         generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
+
         return generated_texts
-        
+
     except Exception as e:
         logger.error(f"Error generating text with guidance: {str(e)}")
         raise
@@ -171,7 +172,7 @@ def generate_with_control(
 ) -> List[str]:
     """
     Generate text with control codes
-    
+
     Args:
         model: Model to use for generation
         tokenizer: Tokenizer to use for encoding/decoding
@@ -179,7 +180,7 @@ def generate_with_control(
         config: Generation configuration
         device: Device to generate on
         control_codes: List of control codes to apply
-        
+
     Returns:
         List[str]: Generated text sequences
     """
@@ -187,18 +188,18 @@ def generate_with_control(
         # Encode prompt and control codes
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         control_inputs = tokenizer(control_codes, return_tensors="pt", padding=True).to(device)
-        
+
         # Generate with control
         with torch.no_grad():
             # Get control embeddings
             control_embeddings = model.get_input_embeddings()(control_inputs.input_ids)
-            
+
             # Get prompt embeddings
             prompt_embeddings = model.get_input_embeddings()(inputs.input_ids)
-            
+
             # Concatenate embeddings
             embeddings = torch.cat([control_embeddings, prompt_embeddings])
-            
+
             # Generate
             outputs = model.generate(
                 inputs_embeds=embeddings,
@@ -219,12 +220,12 @@ def generate_with_control(
                 eos_token_id=config.eos_token_id or tokenizer.eos_token_id,
                 bad_words_ids=config.bad_words_ids,
             )
-            
+
         # Decode outputs
         generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
+
         return generated_texts
-        
+
     except Exception as e:
         logger.error(f"Error generating text with control: {str(e)}")
         raise
@@ -242,7 +243,7 @@ def generate_with_retrieval(
 ) -> List[str]:
     """
     Generate text with retrieval augmentation
-    
+
     Args:
         model: Model to use for generation
         tokenizer: Tokenizer to use for encoding/decoding
@@ -252,47 +253,51 @@ def generate_with_retrieval(
         retrieval_model: Model to use for retrieval
         retrieval_database: Database of texts to retrieve from
         num_retrievals: Number of texts to retrieve
-        
+
     Returns:
         List[str]: Generated text sequences
     """
     try:
         # Encode prompt
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        
+
         # Retrieve relevant texts
         with torch.no_grad():
             # Get prompt embeddings
             prompt_embeddings = retrieval_model.get_embeddings(inputs.input_ids)
-            
+
             # Get database embeddings
-            database_inputs = tokenizer(retrieval_database, return_tensors="pt", padding=True).to(device)
+            database_inputs = tokenizer(retrieval_database, return_tensors="pt", padding=True).to(
+                device
+            )
             database_embeddings = retrieval_model.get_embeddings(database_inputs.input_ids)
-            
+
             # Compute similarities
             similarities = torch.matmul(prompt_embeddings, database_embeddings.t())
-            
+
             # Get top retrievals
             top_k = min(num_retrievals, len(retrieval_database))
             top_k_values, top_k_indices = torch.topk(similarities, top_k)
-            
+
             # Get retrieved texts
             retrieved_texts = [retrieval_database[i] for i in top_k_indices[0]]
-            
+
         # Generate with retrieved texts
         with torch.no_grad():
             # Encode retrieved texts
-            retrieved_inputs = tokenizer(retrieved_texts, return_tensors="pt", padding=True).to(device)
-            
+            retrieved_inputs = tokenizer(retrieved_texts, return_tensors="pt", padding=True).to(
+                device
+            )
+
             # Get retrieved embeddings
             retrieved_embeddings = model.get_input_embeddings()(retrieved_inputs.input_ids)
-            
+
             # Get prompt embeddings
             prompt_embeddings = model.get_input_embeddings()(inputs.input_ids)
-            
+
             # Concatenate embeddings
             embeddings = torch.cat([retrieved_embeddings, prompt_embeddings])
-            
+
             # Generate
             outputs = model.generate(
                 inputs_embeds=embeddings,
@@ -313,12 +318,12 @@ def generate_with_retrieval(
                 eos_token_id=config.eos_token_id or tokenizer.eos_token_id,
                 bad_words_ids=config.bad_words_ids,
             )
-            
+
         # Decode outputs
         generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
+
         return generated_texts
-        
+
     except Exception as e:
         logger.error(f"Error generating text with retrieval: {str(e)}")
-        raise 
+        raise

@@ -41,15 +41,17 @@ class SafetyCheckpointCallback(BaseCallback):
 
             # Get trainer instance - try from kwargs or fallback to attribute
             trainer = None
-            if 'trainer' in kwargs:
-                trainer = kwargs['trainer']
-            elif hasattr(self, 'trainer'):
+            if "trainer" in kwargs:
+                trainer = kwargs["trainer"]
+            elif hasattr(self, "trainer"):
                 trainer = self.trainer
-            
+
             if trainer is None:
-                logger.warning(f"SafetyCheckpointCallback: No trainer found at step {state.global_step}. Cannot save checkpoint.")
+                logger.warning(
+                    f"SafetyCheckpointCallback: No trainer found at step {state.global_step}. Cannot save checkpoint."
+                )
                 return control
-                
+
             # Save model
             trainer.save_model(checkpoint_dir)
             logger.info(f"Saved safety checkpoint to {checkpoint_dir}")

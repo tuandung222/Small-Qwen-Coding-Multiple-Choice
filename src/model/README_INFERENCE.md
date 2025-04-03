@@ -225,4 +225,4 @@ python src/inference_demo.py --prompt_file "path/to/prompt.txt"
 3. Enable Flash Attention if your model supports it
 4. Use 4-bit or 8-bit quantization for larger models to reduce memory usage
 5. Set `device_map="auto"` for multi-GPU inference
-6. Use `torch.compile()` for additional performance (requires PyTorch 2.0+) 
+6. Use `torch.compile()` for additional performance (requires PyTorch 2.0+)

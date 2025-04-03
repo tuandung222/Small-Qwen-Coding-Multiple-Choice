@@ -1284,7 +1284,27 @@ class QwenTrainer:
         # Create the model card content
         model_card = f"""# {model_name}
 
+> **Note**: This model card is automatically created during the training process.
+
 This model is a fine-tuned version of {base_model} on a coding multiple-choice dataset. It uses the LoRA method with {'Unsloth optimizations' if getattr(self.model, 'is_unsloth_model', False) else 'standard PEFT implementation'}.
+
+## Dataset
+
+This model was trained on the [Coding MCQ Reasoning Dataset](https://huggingface.co/datasets/tuandunghcmut/coding-mcq-reasoning), which contains carefully curated coding-related multiple choice questions with detailed reasoning steps. Each example includes:
+- A coding question
+- Multiple choice options
+- Detailed reasoning steps in YAML format
+- Teacher-provided explanations
+
+{dataset_info}
+
+## Model Registry
+
+This model is hosted on the 🤗 Hugging Face Hub, which serves as our model registry. The best checkpoint (based on lowest validation loss) is automatically pushed to the Hub during training, ensuring version control and easy access to the most optimized model state.
+
+## Training Details & Experiment Tracking
+
+{'🔍 **WandB Experiment**: ' + f'[View detailed training logs and metrics]({wandb_url})' if wandb_url else ''}
 
 ## Model Performance
 
@@ -1305,13 +1325,6 @@ This model is fine-tuned to excel at coding-related multiple-choice tasks. It de
 - Ability to evaluate and select the most appropriate answer from multiple choices
 - Code explanation and interpretation skills
 
-## Training and Evaluation Data
-
-"""
-        model_card += dataset_info
-        model_card += """
-The model was trained on the coding-mcq-reasoning dataset, which contains coding-related multiple choice questions with reasoning steps. Each example includes a question, multiple choices, and well-reasoned explanations.
-
 ## Training Procedure
 
 """
@@ -1323,9 +1336,6 @@ The model was trained on the coding-mcq-reasoning dataset, which contains coding
         model_card += "\n### Framework Versions\n\n"
         for framework, version in framework_versions.items():
             model_card += f"{framework} {version}\n"
-
-        if wandb_url:
-            model_card += f"\n## Experiment Tracking\n\nThis model's training process is tracked on Weights & Biases: [View the full experiment]({wandb_url})\n"
 
         if example_completions:
             model_card += "\n## Example Completions\n\n"

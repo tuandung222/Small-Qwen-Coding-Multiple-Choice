@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
 class ModelConfig:
     """Configuration for model-related parameters"""
+
     source_model: str = "unsloth/Qwen2.5-Coder-1.5B-Instruct"
     destination_repo: str = "tuandunghcmut/Qwen25_Coder_MultipleChoice_v2"
     max_seq_length: int = 2048
@@ -17,6 +18,7 @@ class ModelConfig:
 @dataclass
 class LoRAConfig:
     """Configuration for LoRA-specific parameters"""
+
     r: int = 64
     alpha: int = 16
     dropout: float = 0.1
@@ -29,6 +31,7 @@ class LoRAConfig:
 @dataclass
 class OptimizerConfig:
     """Configuration for optimizer parameters"""
+
     optimizer_type: str = "lion_8bit"
     weight_decay: float = 0.1
     beta1: float = 0.95
@@ -41,6 +44,7 @@ class OptimizerConfig:
 @dataclass
 class LRSchedulerConfig:
     """Configuration for learning rate scheduler"""
+
     lr_scheduler_type: str = "cosine"
     num_cycles: int = 1
     power: float = 1.0
@@ -50,6 +54,7 @@ class LRSchedulerConfig:
 @dataclass
 class TrainingConfig:
     """Configuration for general training parameters"""
+
     epochs: int = 3
     batch_size: int = 4
     grad_accum: int = 4
@@ -69,6 +74,7 @@ class TrainingConfig:
 @dataclass
 class ValidationConfig:
     """Configuration for validation parameters"""
+
     val_split: float = 0.1
     validation_steps: int = 50
     minimal_validating: bool = True
@@ -81,6 +87,7 @@ class ValidationConfig:
 @dataclass
 class DatasetConfig:
     """Configuration for dataset parameters"""
+
     dataset_id: str = "tuandunghcmut/coding-mcq-reasoning"
     dataloader_num_workers: int = 4
     dataloader_pin_memory: bool = True
@@ -90,6 +97,7 @@ class DatasetConfig:
 @dataclass
 class PromptConfig:
     """Configuration for prompt-related parameters"""
+
     prompt_template: str = "teacher_reasoned"
     prompt_track_diversity: bool = True
     prompt_track_quality: bool = True
@@ -101,6 +109,7 @@ class PromptConfig:
 @dataclass
 class ResponseOnlyConfig:
     """Configuration for response-only training"""
+
     enabled: bool = False
     instruction_token: str = "<|im_start|>user\n"
     response_token: str = "<|im_start|>assistant\n"
@@ -111,6 +120,7 @@ class ResponseOnlyConfig:
 @dataclass
 class AttentionConfig:
     """Configuration for attention implementation"""
+
     implementation: str = "flash_attention_2"
     force_implementation: bool = False
 
@@ -118,6 +128,7 @@ class AttentionConfig:
 @dataclass
 class WandBConfig:
     """Configuration for Weights & Biases logging"""
+
     project: str = "Qwen2.5-Coder-1.5B-Instruct-Coding-Multiple-Choice"
     report_to: str = "wandb"
     tags: List[str] = field(default_factory=lambda: ["qwen", "multiple-choice", "coding", "lora"])
@@ -126,6 +137,7 @@ class WandBConfig:
 @dataclass
 class EnvironmentConfig:
     """Configuration for environment settings"""
+
     full_determinism: bool = False
     torch_compile: bool = False
     use_cpu: bool = False
@@ -136,6 +148,7 @@ class EnvironmentConfig:
 @dataclass
 class CompleteConfig:
     """Complete configuration for training"""
+
     model: ModelConfig = field(default_factory=ModelConfig)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -148,10 +161,10 @@ class CompleteConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
-    
+
     @classmethod
     def from_args(cls, args):
         """Create a CompleteConfig from parsed arguments"""
         # This method will be implemented to convert argparse arguments to config objects
         # For now, it's a placeholder
-        return cls() 
+        return cls()

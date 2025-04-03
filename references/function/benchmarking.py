@@ -1,9 +1,9 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import torch
 import numpy as np
+import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ class BenchmarkConfig:
     """
     Configuration for model benchmarking
     """
+
     batch_size: int = 32
     num_samples: int = 1000
     max_length: int = 100
@@ -35,12 +36,12 @@ def benchmark_generation_speed(
 ) -> Dict[str, float]:
     """
     Benchmark model generation speed
-    
+
     Args:
         model: Model to benchmark
         tokenizer: Tokenizer to use
         config: Benchmark configuration
-        
+
     Returns:
         Dict[str, float]: Speed metrics
     """
@@ -48,11 +49,11 @@ def benchmark_generation_speed(
         # Set random seed
         torch.manual_seed(config.seed)
         np.random.seed(config.seed)
-        
+
         # Set device
         device = torch.device(config.device)
         model = model.to(device)
-        
+
         # Generate test prompts
         test_prompts = [
             "Write a function to sort a list in Python.",
@@ -61,14 +62,14 @@ def benchmark_generation_speed(
             "What is the difference between Python and JavaScript?",
             "How does garbage collection work in Java?",
         ]
-        
+
         # Speed metrics
         metrics = {
             "generation_time": [],
             "tokens_per_second": [],
             "throughput": [],
         }
-        
+
         # Warmup
         logger.info("Warming up...")
         for _ in range(config.num_warmup):
@@ -84,17 +85,17 @@ def benchmark_generation_speed(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
         # Benchmark
         logger.info("Running benchmark...")
         for _ in range(config.num_iterations):
             prompt = np.random.choice(test_prompts)
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
-            
+
             with torch.no_grad():
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
-                
+
                 start_time.record()
                 outputs = model.generate(
                     **inputs,
@@ -106,23 +107,23 @@ def benchmark_generation_speed(
                     early_stopping=True,
                 )
                 end_time.record()
-                
+
                 # Wait for GPU to finish
                 torch.cuda.synchronize()
-                
+
                 # Record metrics
                 generation_time = start_time.elapsed_time(end_time)
                 metrics["generation_time"].append(generation_time)
-                
+
                 # Compute tokens per second
                 num_tokens = len(outputs[0])
                 tokens_per_second = num_tokens / (generation_time / 1000)  # Convert to seconds
                 metrics["tokens_per_second"].append(tokens_per_second)
-                
+
                 # Compute throughput
                 throughput = 1 / (generation_time / 1000)  # Generations per second
                 metrics["throughput"].append(throughput)
-                
+
         # Compute average metrics
         metrics = {
             "avg_generation_time": np.mean(metrics["generation_time"]),
@@ -132,10 +133,10 @@ def benchmark_generation_speed(
             "std_tokens_per_second": np.std(metrics["tokens_per_second"]),
             "std_throughput": np.std(metrics["throughput"]),
         }
-        
+
         logger.info("Completed generation speed benchmarking")
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error benchmarking generation speed: {str(e)}")
         raise
@@ -149,13 +150,13 @@ def benchmark_inference_speed(
 ) -> Dict[str, float]:
     """
     Benchmark model inference speed
-    
+
     Args:
         model: Model to benchmark
         tokenizer: Tokenizer to use
         test_dataloader: Test data loader
         config: Benchmark configuration
-        
+
     Returns:
         Dict[str, float]: Speed metrics
     """
@@ -163,18 +164,18 @@ def benchmark_inference_speed(
         # Set random seed
         torch.manual_seed(config.seed)
         np.random.seed(config.seed)
-        
+
         # Set device
         device = torch.device(config.device)
         model = model.to(device)
-        
+
         # Speed metrics
         metrics = {
             "inference_time": [],
             "samples_per_second": [],
             "throughput": [],
         }
-        
+
         # Warmup
         logger.info("Warming up...")
         for _ in range(config.num_warmup):
@@ -182,7 +183,7 @@ def benchmark_inference_speed(
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
                 _ = model(**batch)
-                
+
         # Benchmark
         logger.info("Running benchmark...")
         model.eval()
@@ -190,31 +191,31 @@ def benchmark_inference_speed(
             for batch in test_dataloader:
                 # Move batch to device
                 batch = {k: v.to(device) for k, v in batch.items()}
-                
+
                 # Forward pass
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
-                
+
                 start_time.record()
                 _ = model(**batch)
                 end_time.record()
-                
+
                 # Wait for GPU to finish
                 torch.cuda.synchronize()
-                
+
                 # Record metrics
                 inference_time = start_time.elapsed_time(end_time)
                 metrics["inference_time"].append(inference_time)
-                
+
                 # Compute samples per second
                 batch_size = batch["input_ids"].size(0)
                 samples_per_second = batch_size / (inference_time / 1000)  # Convert to seconds
                 metrics["samples_per_second"].append(samples_per_second)
-                
+
                 # Compute throughput
                 throughput = batch_size / (inference_time / 1000)  # Samples per second
                 metrics["throughput"].append(throughput)
-                
+
         # Compute average metrics
         metrics = {
             "avg_inference_time": np.mean(metrics["inference_time"]),
@@ -224,10 +225,10 @@ def benchmark_inference_speed(
             "std_samples_per_second": np.std(metrics["samples_per_second"]),
             "std_throughput": np.std(metrics["throughput"]),
         }
-        
+
         logger.info("Completed inference speed benchmarking")
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error benchmarking inference speed: {str(e)}")
         raise
@@ -240,12 +241,12 @@ def benchmark_memory_usage(
 ) -> Dict[str, float]:
     """
     Benchmark model memory usage
-    
+
     Args:
         model: Model to benchmark
         tokenizer: Tokenizer to use
         config: Benchmark configuration
-        
+
     Returns:
         Dict[str, float]: Memory metrics
     """
@@ -253,7 +254,7 @@ def benchmark_memory_usage(
         # Set device
         device = torch.device(config.device)
         model = model.to(device)
-        
+
         # Memory metrics
         metrics = {
             "model_size": 0,
@@ -261,11 +262,11 @@ def benchmark_memory_usage(
             "allocated_memory": [],
             "cached_memory": [],
         }
-        
+
         # Measure model size
         for param in model.parameters():
             metrics["model_size"] += param.nelement() * param.element_size()
-            
+
         # Generate test prompts
         test_prompts = [
             "Write a function to sort a list in Python.",
@@ -274,7 +275,7 @@ def benchmark_memory_usage(
             "What is the difference between Python and JavaScript?",
             "How does garbage collection work in Java?",
         ]
-        
+
         # Warmup
         logger.info("Warming up...")
         for _ in range(config.num_warmup):
@@ -290,18 +291,18 @@ def benchmark_memory_usage(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
         # Benchmark
         logger.info("Running benchmark...")
         for _ in range(config.num_iterations):
             # Reset memory stats
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.empty_cache()
-            
+
             # Generate
             prompt = np.random.choice(test_prompts)
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
-            
+
             with torch.no_grad():
                 _ = model.generate(
                     **inputs,
@@ -312,12 +313,12 @@ def benchmark_memory_usage(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
             # Record memory stats
             metrics["peak_memory"].append(torch.cuda.max_memory_allocated())
             metrics["allocated_memory"].append(torch.cuda.memory_allocated())
             metrics["cached_memory"].append(torch.cuda.memory_reserved())
-            
+
         # Convert to MB and compute statistics
         metrics = {
             "model_size_mb": metrics["model_size"] / (1024 * 1024),
@@ -328,10 +329,10 @@ def benchmark_memory_usage(
             "std_allocated_memory_mb": np.std(metrics["allocated_memory"]) / (1024 * 1024),
             "std_cached_memory_mb": np.std(metrics["cached_memory"]) / (1024 * 1024),
         }
-        
+
         logger.info("Completed memory usage benchmarking")
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error benchmarking memory usage: {str(e)}")
         raise
@@ -344,12 +345,12 @@ def benchmark_gpu_utilization(
 ) -> Dict[str, float]:
     """
     Benchmark GPU utilization
-    
+
     Args:
         model: Model to benchmark
         tokenizer: Tokenizer to use
         config: Benchmark configuration
-        
+
     Returns:
         Dict[str, float]: GPU metrics
     """
@@ -357,7 +358,7 @@ def benchmark_gpu_utilization(
         # Set device
         device = torch.device(config.device)
         model = model.to(device)
-        
+
         # GPU metrics
         metrics = {
             "gpu_utilization": [],
@@ -365,7 +366,7 @@ def benchmark_gpu_utilization(
             "gpu_power_usage": [],
             "gpu_temperature": [],
         }
-        
+
         # Generate test prompts
         test_prompts = [
             "Write a function to sort a list in Python.",
@@ -374,7 +375,7 @@ def benchmark_gpu_utilization(
             "What is the difference between Python and JavaScript?",
             "How does garbage collection work in Java?",
         ]
-        
+
         # Warmup
         logger.info("Warming up...")
         for _ in range(config.num_warmup):
@@ -390,14 +391,14 @@ def benchmark_gpu_utilization(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
         # Benchmark
         logger.info("Running benchmark...")
         for _ in range(config.num_iterations):
             # Generate
             prompt = np.random.choice(test_prompts)
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
-            
+
             with torch.no_grad():
                 _ = model.generate(
                     **inputs,
@@ -408,13 +409,13 @@ def benchmark_gpu_utilization(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
             # Record GPU stats
             metrics["gpu_utilization"].append(torch.cuda.utilization())
             metrics["gpu_memory_utilization"].append(torch.cuda.memory_utilization())
             metrics["gpu_power_usage"].append(torch.cuda.power_usage())
             metrics["gpu_temperature"].append(torch.cuda.temperature())
-            
+
         # Compute average metrics
         metrics = {
             "avg_gpu_utilization": np.mean(metrics["gpu_utilization"]),
@@ -426,10 +427,10 @@ def benchmark_gpu_utilization(
             "std_gpu_power_usage": np.std(metrics["gpu_power_usage"]),
             "std_gpu_temperature": np.std(metrics["gpu_temperature"]),
         }
-        
+
         logger.info("Completed GPU utilization benchmarking")
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error benchmarking GPU utilization: {str(e)}")
         raise
@@ -443,13 +444,13 @@ def run_all_benchmarks(
 ) -> Dict[str, Dict[str, float]]:
     """
     Run all model benchmarks
-    
+
     Args:
         model: Model to benchmark
         tokenizer: Tokenizer to use
         test_dataloader: Test data loader
         config: Benchmark configuration
-        
+
     Returns:
         Dict[str, Dict[str, float]]: All benchmark metrics
     """
@@ -459,7 +460,7 @@ def run_all_benchmarks(
         inference_metrics = benchmark_inference_speed(model, tokenizer, test_dataloader, config)
         memory_metrics = benchmark_memory_usage(model, tokenizer, config)
         gpu_metrics = benchmark_gpu_utilization(model, tokenizer, config)
-        
+
         # Combine metrics
         all_metrics = {
             "generation": generation_metrics,
@@ -467,10 +468,10 @@ def run_all_benchmarks(
             "memory": memory_metrics,
             "gpu": gpu_metrics,
         }
-        
+
         logger.info("Completed all benchmarks")
         return all_metrics
-        
+
     except Exception as e:
         logger.error(f"Error running all benchmarks: {str(e)}")
-        raise 
+        raise

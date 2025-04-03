@@ -1,9 +1,9 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import torch
 import gradio as gr
+import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ class DeploymentConfig:
     """
     Configuration for model deployment
     """
+
     model_path: str
     tokenizer_path: str
     device: str = "cuda"
@@ -33,30 +34,30 @@ def load_model_for_inference(
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """
     Load model and tokenizer for inference
-    
+
     Args:
         config: Deployment configuration
-        
+
     Returns:
         Tuple[PreTrainedModel, PreTrainedTokenizer]: Loaded model and tokenizer
     """
     try:
         # Set device
         device = torch.device(config.device)
-        
+
         # Load tokenizer
         tokenizer = PreTrainedTokenizer.from_pretrained(config.tokenizer_path)
-        
+
         # Load model
         model = PreTrainedModel.from_pretrained(
             config.model_path,
             torch_dtype=torch.float16 if config.precision == "fp16" else torch.float32,
             device_map="auto",
         )
-        
+
         logger.info(f"Loaded model from {config.model_path}")
         return model, tokenizer
-        
+
     except Exception as e:
         logger.error(f"Error loading model for inference: {str(e)}")
         raise
@@ -69,20 +70,21 @@ def create_gradio_interface(
 ) -> gr.Interface:
     """
     Create Gradio interface for model inference
-    
+
     Args:
         model: Loaded model
         tokenizer: Loaded tokenizer
         config: Deployment configuration
-        
+
     Returns:
         gr.Interface: Gradio interface
     """
     try:
+
         def generate_text(prompt: str) -> str:
             # Encode prompt
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            
+
             # Generate
             with torch.no_grad():
                 outputs = model.generate(
@@ -94,12 +96,12 @@ def create_gradio_interface(
                     repetition_penalty=config.repetition_penalty,
                     early_stopping=True,
                 )
-                
+
             # Decode output
             generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
+
             return generated_text
-            
+
         # Create interface
         interface = gr.Interface(
             fn=generate_text,
@@ -113,10 +115,10 @@ def create_gradio_interface(
                 ["Write a SQL query to join two tables."],
             ],
         )
-        
+
         logger.info("Created Gradio interface")
         return interface
-        
+
     except Exception as e:
         logger.error(f"Error creating Gradio interface: {str(e)}")
         raise
@@ -129,7 +131,7 @@ def deploy_model(
 ) -> None:
     """
     Deploy model using Gradio
-    
+
     Args:
         model: Loaded model
         tokenizer: Loaded tokenizer
@@ -138,7 +140,7 @@ def deploy_model(
     try:
         # Create interface
         interface = create_gradio_interface(model, tokenizer, config)
-        
+
         # Launch interface
         interface.launch(
             server_name="0.0.0.0",
@@ -146,9 +148,9 @@ def deploy_model(
             share=config.share,
             auth=config.auth,
         )
-        
+
         logger.info(f"Deployed model on port {config.port}")
-        
+
     except Exception as e:
         logger.error(f"Error deploying model: {str(e)}")
         raise
@@ -161,33 +163,33 @@ def create_fastapi_app(
 ) -> Any:
     """
     Create FastAPI app for model inference
-    
+
     Args:
         model: Loaded model
         tokenizer: Loaded tokenizer
         config: Deployment configuration
-        
+
     Returns:
         Any: FastAPI app
     """
     try:
         from fastapi import FastAPI, HTTPException
         from pydantic import BaseModel
-        
+
         app = FastAPI()
-        
+
         class GenerateRequest(BaseModel):
             prompt: str
-            
+
         class GenerateResponse(BaseModel):
             generated_text: str
-            
+
         @app.post("/generate", response_model=GenerateResponse)
         async def generate(request: GenerateRequest) -> GenerateResponse:
             try:
                 # Encode prompt
                 inputs = tokenizer(request.prompt, return_tensors="pt").to(model.device)
-                
+
                 # Generate
                 with torch.no_grad():
                     outputs = model.generate(
@@ -199,18 +201,18 @@ def create_fastapi_app(
                         repetition_penalty=config.repetition_penalty,
                         early_stopping=True,
                     )
-                    
+
                 # Decode output
                 generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                
+
                 return GenerateResponse(generated_text=generated_text)
-                
+
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
-                
+
         logger.info("Created FastAPI app")
         return app
-        
+
     except Exception as e:
         logger.error(f"Error creating FastAPI app: {str(e)}")
         raise
@@ -222,23 +224,23 @@ def deploy_fastapi_app(
 ) -> None:
     """
     Deploy FastAPI app
-    
+
     Args:
         app: FastAPI app
         config: Deployment configuration
     """
     try:
         import uvicorn
-        
+
         # Run app
         uvicorn.run(
             app,
             host="0.0.0.0",
             port=config.port,
         )
-        
+
         logger.info(f"Deployed FastAPI app on port {config.port}")
-        
+
     except Exception as e:
         logger.error(f"Error deploying FastAPI app: {str(e)}")
         raise
@@ -250,7 +252,7 @@ def create_dockerfile(
 ) -> None:
     """
     Create Dockerfile for model deployment
-    
+
     Args:
         config: Deployment configuration
         output_path: Path to save Dockerfile
@@ -277,13 +279,13 @@ EXPOSE {config.port}
 # Run app
 CMD ["python", "app.py"]
 """
-        
+
         # Save Dockerfile
         with open(output_path, "w") as f:
             f.write(dockerfile_content)
-            
+
         logger.info(f"Created Dockerfile at {output_path}")
-        
+
     except Exception as e:
         logger.error(f"Error creating Dockerfile: {str(e)}")
-        raise 
+        raise

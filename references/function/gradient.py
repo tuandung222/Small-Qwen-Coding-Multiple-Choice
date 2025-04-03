@@ -1,6 +1,8 @@
 import logging
+from typing import Any, Dict, List, Optional
+
 import torch
-from typing import Dict, Any, Optional, List
+
 from src.config.training_config import TrainingConfig
 
 logger = logging.getLogger(__name__)
@@ -12,7 +14,7 @@ def setup_gradient_checkpointing(
 ) -> None:
     """
     Setup gradient checkpointing for the model
-    
+
     Args:
         model: Model to configure
         training_config: Training configuration
@@ -24,7 +26,7 @@ def setup_gradient_checkpointing(
         else:
             model.gradient_checkpointing_disable()
             logger.info("Disabled gradient checkpointing")
-            
+
     except Exception as e:
         logger.error(f"Error setting up gradient checkpointing: {str(e)}")
         raise
@@ -36,14 +38,14 @@ def clip_gradients(
 ) -> None:
     """
     Clip gradients to prevent exploding gradients
-    
+
     Args:
         model: Model to clip gradients for
         max_grad_norm: Maximum gradient norm
     """
     try:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        
+
     except Exception as e:
         logger.error(f"Error clipping gradients: {str(e)}")
         raise
@@ -58,33 +60,33 @@ def accumulate_gradients(
 ) -> bool:
     """
     Accumulate gradients for gradient accumulation
-    
+
     Args:
         loss: Loss value
         model: Model to accumulate gradients for
         optimizer: Optimizer to use
         gradient_accumulation_steps: Number of steps to accumulate over
         step: Current step
-        
+
     Returns:
         bool: Whether to update weights
     """
     try:
         # Scale loss by number of accumulation steps
         loss = loss / gradient_accumulation_steps
-        
+
         # Backward pass
         loss.backward()
-        
+
         # Check if we should update weights
         should_update = (step + 1) % gradient_accumulation_steps == 0
-        
+
         if should_update:
             optimizer.step()
             optimizer.zero_grad()
-            
+
         return should_update
-        
+
     except Exception as e:
         logger.error(f"Error accumulating gradients: {str(e)}")
         raise
@@ -95,34 +97,34 @@ def get_gradient_stats(
 ) -> Dict[str, float]:
     """
     Get statistics about gradients
-    
+
     Args:
         model: Model to get gradient stats for
-        
+
     Returns:
         Dict[str, float]: Gradient statistics
     """
     try:
         total_norm = 0
         param_norms = []
-        
+
         for p in model.parameters():
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
                 param_norms.append(param_norm.item())
-                
-        total_norm = total_norm ** 0.5
-        
+
+        total_norm = total_norm**0.5
+
         stats = {
             "total_norm": total_norm,
             "mean_norm": sum(param_norms) / len(param_norms) if param_norms else 0,
             "max_norm": max(param_norms) if param_norms else 0,
             "min_norm": min(param_norms) if param_norms else 0,
         }
-        
+
         return stats
-        
+
     except Exception as e:
         logger.error(f"Error getting gradient stats: {str(e)}")
         raise
@@ -134,11 +136,11 @@ def check_gradient_overflow(
 ) -> bool:
     """
     Check if gradients have overflowed
-    
+
     Args:
         model: Model to check gradients for
         threshold: Threshold for overflow
-        
+
     Returns:
         bool: Whether gradients have overflowed
     """
@@ -149,9 +151,9 @@ def check_gradient_overflow(
                     return True
                 if p.grad.norm().item() > threshold:
                     return True
-                    
+
         return False
-        
+
     except Exception as e:
         logger.error(f"Error checking gradient overflow: {str(e)}")
-        raise 
+        raise

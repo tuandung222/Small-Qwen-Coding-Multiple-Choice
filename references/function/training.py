@@ -1,17 +1,18 @@
+import json
 import logging
 import os
-import json
-from typing import Optional, Dict, Any, List, Tuple, Callable
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from transformers import Trainer, TrainingArguments, PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer, Trainer, TrainingArguments
 
 from src.config.training_config import TrainingConfig, ValidationConfig, WandBConfig
+
+from .logging import log_gradients, log_learning_rate, log_memory_usage, log_metrics
 from .optimization import OptimizerConfig, create_optimizer, create_scheduler
-from .logging import log_metrics, log_gradients, log_learning_rate, log_memory_usage
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class TrainingConfig:
     """
     Configuration for model training
     """
+
     output_dir: str
     num_train_epochs: int
     per_device_train_batch_size: int
@@ -50,13 +52,13 @@ def setup_training_args(
 ) -> TrainingArguments:
     """
     Setup training arguments for the Trainer
-    
+
     Args:
         training_config: Training configuration
         validation_config: Validation configuration
         wandb_config: Weights & Biases configuration
         output_dir: Directory to save outputs
-        
+
     Returns:
         TrainingArguments: Configured training arguments
     """
@@ -87,16 +89,16 @@ def setup_training_args(
             group=wandb_config.group,
             tags=wandb_config.tags,
         )
-        
+
         logger.info("Training arguments:")
         logger.info(f"Output directory: {output_dir}")
         logger.info(f"Number of epochs: {training_config.num_train_epochs}")
         logger.info(f"Batch size: {training_config.per_device_train_batch_size}")
         logger.info(f"Learning rate: {training_config.learning_rate}")
         logger.info(f"Gradient accumulation steps: {training_config.gradient_accumulation_steps}")
-        
+
         return training_args
-        
+
     except Exception as e:
         logger.error(f"Error setting up training arguments: {str(e)}")
         raise
@@ -110,7 +112,7 @@ def setup_wandb(
 ) -> None:
     """
     Setup Weights & Biases logging
-    
+
     Args:
         wandb_config: Weights & Biases configuration
         model_config: Model configuration
@@ -120,9 +122,9 @@ def setup_wandb(
     try:
         if not wandb_config.enabled:
             return
-            
+
         import wandb
-        
+
         wandb.init(
             project=wandb_config.project,
             name=wandb_config.run_name,
@@ -134,9 +136,9 @@ def setup_wandb(
                 "lora": lora_config,
             },
         )
-        
+
         logger.info(f"Initialized Weights & Biases logging for project: {wandb_config.project}")
-        
+
     except Exception as e:
         logger.error(f"Error setting up Weights & Biases: {str(e)}")
         raise
@@ -149,28 +151,28 @@ def save_training_results(
 ) -> str:
     """
     Save training results to a JSON file
-    
+
     Args:
         results: Training results to save
         output_dir: Directory to save results
         experiment_name: Name of the experiment
-        
+
     Returns:
         str: Path to the saved results file
     """
     try:
         results_dir = os.path.join(output_dir, "results")
         os.makedirs(results_dir, exist_ok=True)
-        
+
         results_file = os.path.join(results_dir, f"{experiment_name}_results.json")
-        
+
         with open(results_file, "w") as f:
             json.dump(results, f, indent=2)
-            
+
         logger.info(f"Saved training results to: {results_file}")
-        
+
         return results_file
-        
+
     except Exception as e:
         logger.error(f"Error saving training results: {str(e)}")
         raise
@@ -179,26 +181,26 @@ def save_training_results(
 def compute_metrics(eval_preds: tuple) -> Dict[str, float]:
     """
     Compute metrics for evaluation
-    
+
     Args:
         eval_preds: Tuple of predictions and labels
-        
+
     Returns:
         Dict[str, float]: Computed metrics
     """
     try:
         import numpy as np
         from sklearn.metrics import accuracy_score
-        
+
         predictions, labels = eval_preds
         predictions = np.argmax(predictions, axis=-1)
-        
+
         accuracy = accuracy_score(labels, predictions)
-        
+
         return {
             "accuracy": accuracy,
         }
-        
+
     except Exception as e:
         logger.error(f"Error computing metrics: {str(e)}")
         raise
@@ -217,7 +219,7 @@ def train_epoch(
 ) -> Tuple[int, Dict[str, float]]:
     """
     Train for one epoch
-    
+
     Args:
         model: Model to train
         train_dataloader: Training data loader
@@ -228,7 +230,7 @@ def train_epoch(
         epoch: Current epoch
         global_step: Current global step
         scaler: Gradient scaler for mixed precision training
-        
+
     Returns:
         Tuple[int, Dict[str, float]]: Updated global step and metrics
     """
@@ -236,11 +238,11 @@ def train_epoch(
         model.train()
         total_loss = 0
         metrics = {}
-        
+
         for step, batch in enumerate(train_dataloader):
             # Move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
-            
+
             # Forward pass with mixed precision
             if scaler is not None:
                 with torch.cuda.amp.autocast():
@@ -249,42 +251,44 @@ def train_epoch(
             else:
                 outputs = model(**batch)
                 loss = outputs.loss
-                
+
             # Scale loss and backward pass
             if scaler is not None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
-                
+
             # Gradient accumulation
             if (step + 1) % config.gradient_accumulation_steps == 0:
                 # Clip gradients
                 if scaler is not None:
                     scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-                
+
                 # Optimizer step
                 if scaler is not None:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     optimizer.step()
-                    
+
                 # Scheduler step
                 if scheduler is not None:
                     scheduler.step()
-                    
+
                 # Reset gradients
                 optimizer.zero_grad()
-                
+
                 # Update global step
                 global_step += 1
-                
+
                 # Log metrics
                 if global_step % config.logging_steps == 0:
                     metrics = {
                         "loss": loss.item(),
-                        "learning_rate": scheduler.get_last_lr()[0] if scheduler else optimizer.param_groups[0]["lr"],
+                        "learning_rate": scheduler.get_last_lr()[0]
+                        if scheduler
+                        else optimizer.param_groups[0]["lr"],
                         "epoch": epoch,
                         "step": global_step,
                     }
@@ -292,15 +296,15 @@ def train_epoch(
                     log_gradients(model, global_step)
                     log_learning_rate(optimizer, global_step)
                     log_memory_usage(global_step)
-                    
+
             total_loss += loss.item()
-            
+
         # Calculate average loss
         metrics["train_loss"] = total_loss / len(train_dataloader)
         logger.info(f"Epoch {epoch} average loss: {metrics['train_loss']:.4f}")
-        
+
         return global_step, metrics
-        
+
     except Exception as e:
         logger.error(f"Error in training epoch: {str(e)}")
         raise
@@ -314,13 +318,13 @@ def evaluate(
 ) -> Dict[str, float]:
     """
     Evaluate the model
-    
+
     Args:
         model: Model to evaluate
         eval_dataloader: Evaluation data loader
         device: Device to evaluate on
         scaler: Gradient scaler for mixed precision training
-        
+
     Returns:
         Dict[str, float]: Evaluation metrics
     """
@@ -328,12 +332,12 @@ def evaluate(
         model.eval()
         total_loss = 0
         metrics = {}
-        
+
         with torch.no_grad():
             for batch in eval_dataloader:
                 # Move batch to device
                 batch = {k: v.to(device) for k, v in batch.items()}
-                
+
                 # Forward pass with mixed precision
                 if scaler is not None:
                     with torch.cuda.amp.autocast():
@@ -342,15 +346,15 @@ def evaluate(
                 else:
                     outputs = model(**batch)
                     loss = outputs.loss
-                    
+
                 total_loss += loss.item()
-                
+
         # Calculate average loss
         metrics["eval_loss"] = total_loss / len(eval_dataloader)
         logger.info(f"Evaluation loss: {metrics['eval_loss']:.4f}")
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error in evaluation: {str(e)}")
         raise
@@ -366,7 +370,7 @@ def train(
 ) -> Tuple[PreTrainedModel, Dict[str, Any]]:
     """
     Train the model
-    
+
     Args:
         model: Model to train
         train_dataloader: Training data loader
@@ -374,25 +378,25 @@ def train(
         config: Training configuration
         device: Device to train on
         optimizer_config: Optimizer configuration
-        
+
     Returns:
         Tuple[PreTrainedModel, Dict[str, Any]]: Trained model and training history
     """
     try:
         # Create optimizer
         optimizer = create_optimizer(model, optimizer_config)
-        
+
         # Create scheduler
         scheduler = create_scheduler(optimizer, config)
-        
+
         # Create gradient scaler for mixed precision training
         scaler = torch.cuda.amp.GradScaler() if config.fp16 else None
-        
+
         # Training loop
         global_step = 0
         best_eval_loss = float("inf")
         training_history = []
-        
+
         for epoch in range(config.num_train_epochs):
             # Train epoch
             global_step, train_metrics = train_epoch(
@@ -406,7 +410,7 @@ def train(
                 global_step=global_step,
                 scaler=scaler,
             )
-            
+
             # Evaluate
             if eval_dataloader is not None and global_step % config.eval_steps == 0:
                 eval_metrics = evaluate(
@@ -415,27 +419,27 @@ def train(
                     device=device,
                     scaler=scaler,
                 )
-                
+
                 # Save best model
                 if eval_metrics["eval_loss"] < best_eval_loss:
                     best_eval_loss = eval_metrics["eval_loss"]
                     model.save_pretrained(f"{config.output_dir}/best_model")
-                    
+
             # Save checkpoint
             if global_step % config.save_steps == 0:
                 model.save_pretrained(f"{config.output_dir}/checkpoint-{global_step}")
-                
+
             # Update training history
             metrics = {**train_metrics}
             if eval_dataloader is not None:
                 metrics.update(eval_metrics)
             training_history.append(metrics)
-            
+
         # Save final model
         model.save_pretrained(f"{config.output_dir}/final_model")
-        
+
         return model, training_history
-        
+
     except Exception as e:
         logger.error(f"Error in training: {str(e)}")
         raise
@@ -452,7 +456,7 @@ def train_with_validation(
 ) -> Tuple[PreTrainedModel, Dict[str, Any]]:
     """
     Train the model with early stopping
-    
+
     Args:
         model: Model to train
         train_dataloader: Training data loader
@@ -461,26 +465,26 @@ def train_with_validation(
         device: Device to train on
         optimizer_config: Optimizer configuration
         early_stopping_patience: Number of epochs to wait before early stopping
-        
+
     Returns:
         Tuple[PreTrainedModel, Dict[str, Any]]: Trained model and training history
     """
     try:
         # Create optimizer
         optimizer = create_optimizer(model, optimizer_config)
-        
+
         # Create scheduler
         scheduler = create_scheduler(optimizer, config)
-        
+
         # Create gradient scaler for mixed precision training
         scaler = torch.cuda.amp.GradScaler() if config.fp16 else None
-        
+
         # Training loop
         global_step = 0
         best_eval_loss = float("inf")
         patience_counter = 0
         training_history = []
-        
+
         for epoch in range(config.num_train_epochs):
             # Train epoch
             global_step, train_metrics = train_epoch(
@@ -494,7 +498,7 @@ def train_with_validation(
                 global_step=global_step,
                 scaler=scaler,
             )
-            
+
             # Evaluate
             eval_metrics = evaluate(
                 model=model,
@@ -502,7 +506,7 @@ def train_with_validation(
                 device=device,
                 scaler=scaler,
             )
-            
+
             # Early stopping check
             if eval_metrics["eval_loss"] < best_eval_loss:
                 best_eval_loss = eval_metrics["eval_loss"]
@@ -513,20 +517,20 @@ def train_with_validation(
                 if patience_counter >= early_stopping_patience:
                     logger.info(f"Early stopping triggered after {epoch + 1} epochs")
                     break
-                    
+
             # Save checkpoint
             if global_step % config.save_steps == 0:
                 model.save_pretrained(f"{config.output_dir}/checkpoint-{global_step}")
-                
+
             # Update training history
             metrics = {**train_metrics, **eval_metrics}
             training_history.append(metrics)
-            
+
         # Save final model
         model.save_pretrained(f"{config.output_dir}/final_model")
-        
+
         return model, training_history
-        
+
     except Exception as e:
         logger.error(f"Error in training with validation: {str(e)}")
-        raise 
+        raise

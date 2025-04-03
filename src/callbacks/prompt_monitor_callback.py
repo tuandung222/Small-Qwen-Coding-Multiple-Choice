@@ -2,8 +2,9 @@
 Prompt monitoring callback for tracking prompt quality and diversity.
 """
 
+from typing import Any, Dict, List, Optional
+
 from transformers import TrainerControl, TrainerState, TrainingArguments
-from typing import Dict, List, Optional, Any
 
 from .base_callback import BaseCallback, logger
 
@@ -11,7 +12,7 @@ from .base_callback import BaseCallback, logger
 class PromptMonitorCallback(BaseCallback):
     """
     Callback for monitoring prompt quality, diversity, and characteristics.
-    
+
     Features:
     - Tracks prompt diversity metrics
     - Monitors prompt quality
@@ -36,7 +37,7 @@ class PromptMonitorCallback(BaseCallback):
         self.comparison = comparison
         self.saved_prompts = []
         self.prompt_metrics = {}
-        
+
     def on_log(
         self,
         args: TrainingArguments,
@@ -48,11 +49,11 @@ class PromptMonitorCallback(BaseCallback):
         """Log prompt metrics during training."""
         if not (self.track_diversity or self.track_quality):
             return
-            
+
         # In a real implementation, this would analyze prompts and log metrics
         if state.global_step % 100 == 0:
             logger.info(f"PromptMonitorCallback active at step {state.global_step}")
-            
+
             # Example metrics we would track in a full implementation
             example_metrics = {
                 "prompts/diversity_score": 0.85,
@@ -60,10 +61,10 @@ class PromptMonitorCallback(BaseCallback):
                 "prompts/avg_length": 150,
                 "prompts/total_saved": len(self.saved_prompts),
             }
-            
+
             # Log to wandb if available
             self._log_to_wandb(example_metrics, state.global_step)
-            
+
     def on_train_begin(
         self,
         args: TrainingArguments,
@@ -73,16 +74,13 @@ class PromptMonitorCallback(BaseCallback):
     ) -> None:
         """Initialize prompt monitoring at the beginning of training."""
         logger.info("Initializing prompt monitoring...")
-        
+
     def save_prompt(self, prompt: str, metadata: Dict[str, Any] = None) -> None:
         """Save a prompt for analysis."""
         if len(self.saved_prompts) >= self.max_prompts_to_save:
             # Remove the oldest prompt
             self.saved_prompts.pop(0)
-            
-        prompt_data = {
-            "text": prompt,
-            "metadata": metadata or {}
-        }
-        
-        self.saved_prompts.append(prompt_data) 
+
+        prompt_data = {"text": prompt, "metadata": metadata or {}}
+
+        self.saved_prompts.append(prompt_data)

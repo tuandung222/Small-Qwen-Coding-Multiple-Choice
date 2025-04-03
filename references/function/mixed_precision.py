@@ -1,6 +1,8 @@
 import logging
+from typing import Any, Dict, Optional
+
 import torch
-from typing import Dict, Any, Optional
+
 from src.config.training_config import TrainingConfig
 
 logger = logging.getLogger(__name__)
@@ -12,11 +14,11 @@ def setup_mixed_precision(
 ) -> Optional[torch.cuda.amp.GradScaler]:
     """
     Setup mixed precision training
-    
+
     Args:
         model: Model to configure
         training_config: Training configuration
-        
+
     Returns:
         Optional[torch.cuda.amp.GradScaler]: GradScaler if using mixed precision
     """
@@ -28,20 +30,20 @@ def setup_mixed_precision(
             else:
                 logger.info("Using BF16 mixed precision")
                 dtype = torch.bfloat16
-                
+
             # Convert model to mixed precision
             model = model.to(dtype=dtype)
-            
+
             # Create GradScaler for FP16
             if training_config.fp16:
                 scaler = torch.cuda.amp.GradScaler()
                 return scaler
-                
+
         else:
             logger.info("Using full precision")
-            
+
         return None
-        
+
     except Exception as e:
         logger.error(f"Error setting up mixed precision: {str(e)}")
         raise
@@ -57,7 +59,7 @@ def train_step_with_mixed_precision(
 ) -> Dict[str, float]:
     """
     Perform a training step with mixed precision
-    
+
     Args:
         model: Model to train
         optimizer: Optimizer to use
@@ -65,7 +67,7 @@ def train_step_with_mixed_precision(
         inputs: Input tensors
         gradient_accumulation_steps: Number of steps to accumulate over
         step: Current step
-        
+
     Returns:
         Dict[str, float]: Training metrics
     """
@@ -74,10 +76,10 @@ def train_step_with_mixed_precision(
         with torch.cuda.amp.autocast():
             outputs = model(**inputs)
             loss = outputs.loss / gradient_accumulation_steps
-            
+
         # Backward pass with scaler
         scaler.scale(loss).backward()
-        
+
         # Update weights if accumulating
         if (step + 1) % gradient_accumulation_steps == 0:
             scaler.unscale_(optimizer)
@@ -85,13 +87,13 @@ def train_step_with_mixed_precision(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            
+
         metrics = {
             "loss": loss.item() * gradient_accumulation_steps,
         }
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error in mixed precision training step: {str(e)}")
         raise
@@ -103,28 +105,28 @@ def eval_step_with_mixed_precision(
 ) -> Dict[str, float]:
     """
     Perform an evaluation step with mixed precision
-    
+
     Args:
         model: Model to evaluate
         inputs: Input tensors
-        
+
     Returns:
         Dict[str, float]: Evaluation metrics
     """
     try:
         model.eval()
-        
+
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 outputs = model(**inputs)
                 loss = outputs.loss
-                
+
         metrics = {
             "eval_loss": loss.item(),
         }
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error in mixed precision evaluation step: {str(e)}")
         raise
@@ -133,7 +135,7 @@ def eval_step_with_mixed_precision(
 def check_mixed_precision_support() -> Dict[str, bool]:
     """
     Check if mixed precision is supported on the current device
-    
+
     Returns:
         Dict[str, bool]: Support status for different precision types
     """
@@ -142,13 +144,13 @@ def check_mixed_precision_support() -> Dict[str, bool]:
             "fp16": torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 7,
             "bf16": torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8,
         }
-        
+
         logger.info("Mixed precision support:")
         logger.info(f"  FP16: {support['fp16']}")
         logger.info(f"  BF16: {support['bf16']}")
-        
+
         return support
-        
+
     except Exception as e:
         logger.error(f"Error checking mixed precision support: {str(e)}")
-        raise 
+        raise

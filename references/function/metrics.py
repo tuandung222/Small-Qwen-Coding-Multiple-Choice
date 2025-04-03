@@ -1,9 +1,9 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple, Callable
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import torch
 import numpy as np
+import torch
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
@@ -15,6 +15,7 @@ class MetricConfig:
     """
     Configuration for metric computation
     """
+
     metric_names: List[str]
     average: str = "binary"
     sample_weight: Optional[np.ndarray] = None
@@ -31,18 +32,18 @@ def compute_metrics(
 ) -> Dict[str, float]:
     """
     Compute evaluation metrics
-    
+
     Args:
         predictions: Model predictions
         labels: Ground truth labels
         config: Metric configuration
-        
+
     Returns:
         Dict[str, float]: Computed metrics
     """
     try:
         metrics = {}
-        
+
         for metric_name in config.metric_names:
             if metric_name == "accuracy":
                 metrics["accuracy"] = accuracy_score(
@@ -66,9 +67,9 @@ def compute_metrics(
                 metrics["f1"] = f1
             else:
                 logger.warning(f"Unknown metric: {metric_name}")
-                
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error computing metrics: {str(e)}")
         raise
@@ -80,40 +81,40 @@ def compute_rouge_metrics(
 ) -> Dict[str, float]:
     """
     Compute ROUGE metrics
-    
+
     Args:
         predictions: Generated texts
         labels: Reference texts
-        
+
     Returns:
         Dict[str, float]: ROUGE metrics
     """
     try:
         from rouge_score import rouge_scorer
-        
+
         scorer = rouge_scorer.RougeScorer(
             ["rouge1", "rouge2", "rougeL"],
             use_stemmer=True,
         )
-        
+
         metrics = {
             "rouge1": 0.0,
             "rouge2": 0.0,
             "rougeL": 0.0,
         }
-        
+
         for pred, label in zip(predictions, labels):
             scores = scorer.score(label, pred)
             metrics["rouge1"] += scores["rouge1"].fmeasure
             metrics["rouge2"] += scores["rouge2"].fmeasure
             metrics["rougeL"] += scores["rougeL"].fmeasure
-            
+
         # Average scores
         num_samples = len(predictions)
         metrics = {k: v / num_samples for k, v in metrics.items()}
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error computing ROUGE metrics: {str(e)}")
         raise
@@ -125,17 +126,17 @@ def compute_bleu_metrics(
 ) -> Dict[str, float]:
     """
     Compute BLEU metrics
-    
+
     Args:
         predictions: Generated texts
         labels: Reference texts
-        
+
     Returns:
         Dict[str, float]: BLEU metrics
     """
     try:
-        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-        
+        from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
         smooth = SmoothingFunction()
         metrics = {
             "bleu1": 0.0,
@@ -143,12 +144,12 @@ def compute_bleu_metrics(
             "bleu3": 0.0,
             "bleu4": 0.0,
         }
-        
+
         for pred, label in zip(predictions, labels):
             # Tokenize
             pred_tokens = pred.split()
             label_tokens = label.split()
-            
+
             # Compute BLEU scores
             metrics["bleu1"] += sentence_bleu(
                 [label_tokens],
@@ -174,13 +175,13 @@ def compute_bleu_metrics(
                 weights=(0.25, 0.25, 0.25, 0.25),
                 smoothing_function=smooth.method1,
             )
-            
+
         # Average scores
         num_samples = len(predictions)
         metrics = {k: v / num_samples for k, v in metrics.items()}
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error computing BLEU metrics: {str(e)}")
         raise
@@ -192,32 +193,32 @@ def compute_bert_score(
 ) -> Dict[str, float]:
     """
     Compute BERTScore
-    
+
     Args:
         predictions: Generated texts
         labels: Reference texts
-        
+
     Returns:
         Dict[str, float]: BERTScore metrics
     """
     try:
         from bert_score import score
-        
+
         P, R, F1 = score(
             predictions,
             labels,
             lang="en",
             verbose=False,
         )
-        
+
         metrics = {
             "bert_score_precision": P.mean().item(),
             "bert_score_recall": R.mean().item(),
             "bert_score_f1": F1.mean().item(),
         }
-        
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error computing BERTScore: {str(e)}")
         raise
@@ -232,14 +233,14 @@ def compute_metrics_for_generation(
 ) -> Dict[str, float]:
     """
     Compute metrics for text generation
-    
+
     Args:
         model: Model to evaluate
         tokenizer: Tokenizer to use
         eval_dataloader: Evaluation data loader
         device: Device to evaluate on
         metric_config: Metric configuration
-        
+
     Returns:
         Dict[str, float]: Computed metrics
     """
@@ -247,12 +248,12 @@ def compute_metrics_for_generation(
         model.eval()
         all_predictions = []
         all_labels = []
-        
+
         with torch.no_grad():
             for batch in eval_dataloader:
                 # Move batch to device
                 batch = {k: v.to(device) for k, v in batch.items()}
-                
+
                 # Generate
                 outputs = model.generate(
                     **batch,
@@ -260,23 +261,26 @@ def compute_metrics_for_generation(
                     num_beams=4,
                     early_stopping=True,
                 )
-                
+
                 # Decode
                 predictions = tokenizer.batch_decode(outputs, skip_special_tokens=True)
                 labels = tokenizer.batch_decode(batch["labels"], skip_special_tokens=True)
-                
+
                 all_predictions.extend(predictions)
                 all_labels.extend(labels)
-                
+
         # Compute metrics
         metrics = {}
-        
+
         # Classification metrics
-        if any(metric in metric_config.metric_names for metric in ["accuracy", "precision", "recall", "f1"]):
+        if any(
+            metric in metric_config.metric_names
+            for metric in ["accuracy", "precision", "recall", "f1"]
+        ):
             # Convert to numpy arrays
             predictions = np.array(all_predictions)
             labels = np.array(all_labels)
-            
+
             # Compute metrics
             classification_metrics = compute_metrics(
                 predictions=predictions,
@@ -284,7 +288,7 @@ def compute_metrics_for_generation(
                 config=metric_config,
             )
             metrics.update(classification_metrics)
-            
+
         # ROUGE metrics
         if "rouge" in metric_config.metric_names:
             rouge_metrics = compute_rouge_metrics(
@@ -292,7 +296,7 @@ def compute_metrics_for_generation(
                 labels=all_labels,
             )
             metrics.update(rouge_metrics)
-            
+
         # BLEU metrics
         if "bleu" in metric_config.metric_names:
             bleu_metrics = compute_bleu_metrics(
@@ -300,7 +304,7 @@ def compute_metrics_for_generation(
                 labels=all_labels,
             )
             metrics.update(bleu_metrics)
-            
+
         # BERTScore
         if "bert_score" in metric_config.metric_names:
             bert_score_metrics = compute_bert_score(
@@ -308,9 +312,9 @@ def compute_metrics_for_generation(
                 labels=all_labels,
             )
             metrics.update(bert_score_metrics)
-            
+
         return metrics
-        
+
     except Exception as e:
         logger.error(f"Error computing metrics for generation: {str(e)}")
-        raise 
+        raise

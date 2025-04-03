@@ -1,6 +1,6 @@
 import logging
-from typing import Dict, Any, Optional, Union, List, Tuple
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,7 @@ class OptimizerConfig:
     """
     Configuration for optimizer
     """
+
     name: str = "adamw"
     learning_rate: float = 2e-4
     weight_decay: float = 0.01
@@ -34,11 +35,11 @@ def create_optimizer(
 ) -> Optimizer:
     """
     Create an optimizer for the model
-    
+
     Args:
         model: Model to optimize
         config: Optimizer configuration
-        
+
     Returns:
         Optimizer: Created optimizer
     """
@@ -47,18 +48,23 @@ def create_optimizer(
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "params": [
+                    p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": config.weight_decay,
             },
             {
-                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "params": [
+                    p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)
+                ],
                 "weight_decay": 0.0,
             },
         ]
-        
+
         # Create optimizer
         if config.name.lower() == "adamw":
             from torch.optim import AdamW
+
             optimizer = AdamW(
                 optimizer_grouped_parameters,
                 lr=config.learning_rate,
@@ -67,6 +73,7 @@ def create_optimizer(
             )
         elif config.name.lower() == "adam":
             from torch.optim import Adam
+
             optimizer = Adam(
                 optimizer_grouped_parameters,
                 lr=config.learning_rate,
@@ -75,6 +82,7 @@ def create_optimizer(
             )
         elif config.name.lower() == "sgd":
             from torch.optim import SGD
+
             optimizer = SGD(
                 optimizer_grouped_parameters,
                 lr=config.learning_rate,
@@ -83,10 +91,10 @@ def create_optimizer(
             )
         else:
             raise ValueError(f"Unknown optimizer: {config.name}")
-            
+
         logger.info(f"Created {config.name} optimizer with learning rate {config.learning_rate}")
         return optimizer
-        
+
     except Exception as e:
         logger.error(f"Error creating optimizer: {str(e)}")
         raise
@@ -99,22 +107,23 @@ def create_scheduler(
 ) -> _LRScheduler:
     """
     Create a learning rate scheduler
-    
+
     Args:
         optimizer: Optimizer to schedule
         config: Optimizer configuration
         num_training_steps: Total number of training steps
-        
+
     Returns:
         _LRScheduler: Created scheduler
     """
     try:
         # Calculate warmup steps
         num_warmup_steps = int(num_training_steps * config.warmup_ratio)
-        
+
         # Create scheduler
         if config.lr_scheduler_type.lower() == "linear":
             from transformers import get_linear_schedule_with_warmup
+
             scheduler = get_linear_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
@@ -122,6 +131,7 @@ def create_scheduler(
             )
         elif config.lr_scheduler_type.lower() == "cosine":
             from transformers import get_cosine_schedule_with_warmup
+
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
@@ -129,6 +139,7 @@ def create_scheduler(
             )
         elif config.lr_scheduler_type.lower() == "cosine_with_restarts":
             from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
+
             scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
@@ -136,6 +147,7 @@ def create_scheduler(
             )
         elif config.lr_scheduler_type.lower() == "polynomial":
             from transformers import get_polynomial_decay_schedule_with_warmup
+
             scheduler = get_polynomial_decay_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
@@ -144,10 +156,12 @@ def create_scheduler(
             )
         else:
             raise ValueError(f"Unknown scheduler type: {config.lr_scheduler_type}")
-            
-        logger.info(f"Created {config.lr_scheduler_type} scheduler with {num_warmup_steps} warmup steps")
+
+        logger.info(
+            f"Created {config.lr_scheduler_type} scheduler with {num_warmup_steps} warmup steps"
+        )
         return scheduler
-        
+
     except Exception as e:
         logger.error(f"Error creating scheduler: {str(e)}")
         raise
@@ -159,7 +173,7 @@ def clip_gradients(
 ) -> None:
     """
     Clip gradients to prevent exploding gradients
-    
+
     Args:
         model: Model to clip gradients for
         max_grad_norm: Maximum gradient norm
@@ -167,7 +181,7 @@ def clip_gradients(
     try:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         logger.debug(f"Clipped gradients to max norm {max_grad_norm}")
-        
+
     except Exception as e:
         logger.error(f"Error clipping gradients: {str(e)}")
         raise
@@ -176,17 +190,17 @@ def clip_gradients(
 def get_lr(optimizer: Optimizer) -> float:
     """
     Get the current learning rate
-    
+
     Args:
         optimizer: Optimizer to get learning rate from
-        
+
     Returns:
         float: Current learning rate
     """
     try:
         for param_group in optimizer.param_groups:
             return param_group["lr"]
-            
+
     except Exception as e:
         logger.error(f"Error getting learning rate: {str(e)}")
         raise
@@ -195,10 +209,10 @@ def get_lr(optimizer: Optimizer) -> float:
 def get_gradient_norm(model: nn.Module) -> float:
     """
     Get the gradient norm
-    
+
     Args:
         model: Model to get gradient norm for
-        
+
     Returns:
         float: Gradient norm
     """
@@ -208,8 +222,8 @@ def get_gradient_norm(model: nn.Module) -> float:
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
-        return total_norm ** 0.5
-        
+        return total_norm**0.5
+
     except Exception as e:
         logger.error(f"Error getting gradient norm: {str(e)}")
         raise
@@ -218,10 +232,10 @@ def get_gradient_norm(model: nn.Module) -> float:
 def get_parameter_norm(model: nn.Module) -> float:
     """
     Get the parameter norm
-    
+
     Args:
         model: Model to get parameter norm for
-        
+
     Returns:
         float: Parameter norm
     """
@@ -230,8 +244,8 @@ def get_parameter_norm(model: nn.Module) -> float:
         for p in model.parameters():
             param_norm = p.data.norm(2)
             total_norm += param_norm.item() ** 2
-        return total_norm ** 0.5
-        
+        return total_norm**0.5
+
     except Exception as e:
         logger.error(f"Error getting parameter norm: {str(e)}")
         raise
@@ -240,10 +254,10 @@ def get_parameter_norm(model: nn.Module) -> float:
 def get_optimizer_stats(optimizer: Optimizer) -> Dict[str, float]:
     """
     Get optimizer statistics
-    
+
     Args:
         optimizer: Optimizer to get statistics for
-        
+
     Returns:
         Dict[str, float]: Optimizer statistics
     """
@@ -256,7 +270,7 @@ def get_optimizer_stats(optimizer: Optimizer) -> Dict[str, float]:
             "weight_decay": optimizer.param_groups[0].get("weight_decay", 0.0),
         }
         return stats
-        
+
     except Exception as e:
         logger.error(f"Error getting optimizer stats: {str(e)}")
-        raise 
+        raise

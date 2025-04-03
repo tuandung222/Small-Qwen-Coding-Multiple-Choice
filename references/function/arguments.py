@@ -1,7 +1,7 @@
-import logging
 import argparse
-from typing import Dict, Any, Optional, List, Union
+import logging
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -11,9 +11,12 @@ class ModelArguments:
     """
     Arguments for model configuration
     """
+
     model_name_or_path: str = field(
         default="Qwen/Qwen1.5-7B-Chat",
-        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"},
+        metadata={
+            "help": "Path to pretrained model or model identifier from huggingface.co/models"
+        },
     )
     model_revision: str = field(
         default="main",
@@ -58,6 +61,7 @@ class LoRAArguments:
     """
     Arguments for LoRA configuration
     """
+
     lora_r: int = field(
         default=8,
         metadata={"help": "LoRA attention dimension"},
@@ -89,9 +93,12 @@ class TrainingArguments:
     """
     Arguments for training configuration
     """
+
     output_dir: str = field(
         default="./results",
-        metadata={"help": "The output directory where the model predictions and checkpoints will be written"},
+        metadata={
+            "help": "The output directory where the model predictions and checkpoints will be written"
+        },
     )
     num_train_epochs: int = field(
         default=3,
@@ -107,7 +114,9 @@ class TrainingArguments:
     )
     gradient_accumulation_steps: int = field(
         default=1,
-        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass"},
+        metadata={
+            "help": "Number of updates steps to accumulate before performing a backward/update pass"
+        },
     )
     learning_rate: float = field(
         default=2e-4,
@@ -168,6 +177,7 @@ class DataArguments:
     """
     Arguments for data configuration
     """
+
     dataset_name: str = field(
         default="Qwen/Qwen1.5-7B-Chat",
         metadata={"help": "The name of the dataset to use"},
@@ -211,6 +221,7 @@ class WandbArguments:
     """
     Arguments for Weights & Biases configuration
     """
+
     wandb_project: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the W&B project"},
@@ -240,20 +251,20 @@ class WandbArguments:
 def parse_args() -> Dict[str, Any]:
     """
     Parse command line arguments
-    
+
     Returns:
         Dict[str, Any]: Dictionary of parsed arguments
     """
     try:
         parser = argparse.ArgumentParser(description="Training script for language models")
-        
+
         # Add argument groups
         model_args = ModelArguments()
         lora_args = LoRAArguments()
         training_args = TrainingArguments()
         data_args = DataArguments()
         wandb_args = WandbArguments()
-        
+
         # Add arguments to parser
         for args in [model_args, lora_args, training_args, data_args, wandb_args]:
             for field_name, field in args.__dataclass_fields__.items():
@@ -263,10 +274,10 @@ def parse_args() -> Dict[str, Any]:
                     default=field.default,
                     help=field.metadata.get("help", ""),
                 )
-                
+
         # Parse arguments
         args = parser.parse_args()
-        
+
         # Convert to dictionary
         args_dict = {
             "model": vars(model_args),
@@ -275,15 +286,15 @@ def parse_args() -> Dict[str, Any]:
             "data": vars(data_args),
             "wandb": vars(wandb_args),
         }
-        
+
         logger.info("Parsed arguments:")
         for group, group_args in args_dict.items():
             logger.info(f"{group}:")
             for key, value in group_args.items():
                 logger.info(f"  {key}: {value}")
-                
+
         return args_dict
-        
+
     except Exception as e:
         logger.error(f"Error parsing arguments: {str(e)}")
-        raise 
+        raise

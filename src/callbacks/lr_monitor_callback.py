@@ -30,44 +30,52 @@ class LRMonitorCallback(BaseCallback):
                 # Check if trainer is accessible
                 if self.trainer is None and "trainer" in kwargs:
                     self.trainer = kwargs["trainer"]
-                
+
                 # Get current learning rate - multiple ways to try
                 current_lr = None
-                
+
                 # Method 1: From state (most reliable)
                 if hasattr(state, "learning_rate"):
                     current_lr = state.learning_rate
-                
+
                 # Method 2: From lr_scheduler
-                elif hasattr(self.trainer, "lr_scheduler") and self.trainer.lr_scheduler is not None:
+                elif (
+                    hasattr(self.trainer, "lr_scheduler") and self.trainer.lr_scheduler is not None
+                ):
                     lr_scheduler = self.trainer.lr_scheduler
                     if hasattr(lr_scheduler, "get_last_lr"):
                         lrs = lr_scheduler.get_last_lr()
                         current_lr = lrs[0] if lrs else None
-                
+
                 # Method 3: From optimizer
                 elif hasattr(self.trainer, "optimizer") and self.trainer.optimizer is not None:
                     optimizer = self.trainer.optimizer
                     if hasattr(optimizer, "param_groups") and len(optimizer.param_groups) > 0:
                         current_lr = optimizer.param_groups[0].get("lr")
-                
+
                 # Method 4: From Hugging Face Trainer's get_lr_scheduler
-                elif hasattr(self.trainer, "trainer") and hasattr(self.trainer.trainer, "lr_scheduler"):
+                elif hasattr(self.trainer, "trainer") and hasattr(
+                    self.trainer.trainer, "lr_scheduler"
+                ):
                     lr_scheduler = self.trainer.trainer.lr_scheduler
                     if hasattr(lr_scheduler, "get_last_lr"):
                         lrs = lr_scheduler.get_last_lr()
                         current_lr = lrs[0] if lrs else None
-                
+
                 # If we couldn't get the LR, log a warning and return
                 if current_lr is None:
-                    logger.warning("Could not determine learning rate - no lr_scheduler or optimizer found")
+                    logger.warning(
+                        "Could not determine learning rate - no lr_scheduler or optimizer found"
+                    )
                     return control
-                
+
                 # Get optimizer if available
                 optimizer = None
                 if hasattr(self.trainer, "optimizer"):
                     optimizer = self.trainer.optimizer
-                elif hasattr(self.trainer, "trainer") and hasattr(self.trainer.trainer, "optimizer"):
+                elif hasattr(self.trainer, "trainer") and hasattr(
+                    self.trainer.trainer, "optimizer"
+                ):
                     optimizer = self.trainer.trainer.optimizer
 
                 # Prepare metrics
