@@ -156,7 +156,7 @@ python src/run.py \
     \
     # Dataset configuration
     --dataset "tuandunghcmut/coding-mcq-reasoning" \
-    --val-split 0.04 \
+    --val-split 0.03 \
     --random-seed 42 \
     --output-dir "model_output" \
     \
