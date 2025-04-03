@@ -18,6 +18,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
     TextIteratorStreamer,
+    TextStreamer,
 )
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
@@ -360,21 +361,24 @@ class QwenModelHandler:
 
         # Decode the output
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        response = response[len(prompt) :].strip()  # Remove the prompt from the response
+        # Remove the prompt from the response
+        response = response[len(prompt) :].strip()
         return response
 
     def generate_with_streaming(
         self,
         prompt: str,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 768,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 50,
         repetition_penalty: float = 1.0,
         do_sample: bool = True,
-    ) -> str:
+        min_p: float = 0.1,
+        stream: bool = True,
+    ):
         """
-        Generate a response from the model with simulated streaming.
+        Generate a response from the model with streaming support.
 
         Args:
             prompt: The input prompt
@@ -384,19 +388,70 @@ class QwenModelHandler:
             top_k: Top-k sampling parameter
             repetition_penalty: Penalty for repeated tokens
             do_sample: Whether to use sampling or greedy generation
+            min_p: Minimum probability for sampling (recommended 0.1)
+            stream: Whether to stream the output or return the full response
 
         Returns:
-            str: The generated text response
+            If stream=True: Generator yielding response chunks and full text
+            If stream=False: Complete response as string
         """
-        return self.generate_response(
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            repetition_penalty=repetition_penalty,
-            do_sample=do_sample,
-        )
+        from transformers import TextStreamer
+        from unsloth import FastLanguageModel
+
+        # Enable faster inference if using Unsloth
+        if self.model_source == ModelSource.UNSLOTH:
+            FastLanguageModel.for_inference(self.model)
+
+        # Format the prompt using chat template
+        messages = [{"role": "user", "content": prompt}]
+        inputs = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+        ).to(self.model.device)
+
+        # Create attention mask
+        attention_mask = torch.ones_like(inputs)
+
+        if stream:
+            # Use TextStreamer for streaming output
+            text_streamer = TextStreamer(self.tokenizer, skip_prompt=True)
+
+            # Generate with streaming
+            _ = self.model.generate(
+                input_ids=inputs,
+                attention_mask=attention_mask,
+                streamer=text_streamer,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+                min_p=min_p,
+                use_cache=True,
+            )
+            return ""
+        else:
+            # Generate without streaming
+            outputs = self.model.generate(
+                input_ids=inputs,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+                min_p=min_p,
+                use_cache=True,
+            )
+
+            # Decode the output
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Remove the prompt from the response
+            prompt_text = self.tokenizer.decode(inputs[0], skip_special_tokens=True)
+            response = response[len(prompt_text) :].strip()
+
+            return response
 
     def calculate_perplexity(self, prompt: str, answer: str, temperature: float = 0.0) -> float:
         """

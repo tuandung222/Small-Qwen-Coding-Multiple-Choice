@@ -365,6 +365,11 @@ class QwenTrainer:
         """
         logger.info("Preparing dataset for training...")
 
+        # Keep track of steps for debug logging
+        self.training_step = 0
+        self.debug_log_interval = 5  # Log every 5 steps
+        self.prompt_debug_logs = []
+
         def format_example(example):
             # Use the prompt creator to format the prompt
             prompt = self.prompt_creator.create_training_prompt(
@@ -372,11 +377,9 @@ class QwenTrainer:
             )
 
             # Get the target completion from the example
-            if "teacher_reasoning" in example and example["teacher_reasoning"]:
-                # Use teacher reasoning if available
-                completion = example["teacher_reasoning"]
+            if "yml_str" in example and example["yml_str"]:
+                completion = example["yml_str"]
             else:
-                # Default to just the answer if no reasoning is available
                 completion = f"The answer is {example['answer']}."
 
             # Format as a conversation
@@ -385,10 +388,53 @@ class QwenTrainer:
                 {"role": "assistant", "content": completion},
             ]
 
+            # Store debug information
+            debug_info = {
+                "prompt": prompt,
+                "completion": completion,
+                "full_conversation": messages,
+                "question": example["question"],
+                "choices": example["choices"],
+                "answer": example.get("answer", None),
+            }
+            self.prompt_debug_logs.append(debug_info)
+
             # Apply the tokenizer's chat template
             text = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=False
             )
+
+            # Log debug information periodically
+            self.training_step += 1
+            if self.training_step % self.debug_log_interval == 0:
+                logger.info(f"\n{'='*50}\nTraining Step {self.training_step} Debug Info:")
+                logger.info(f"\nPrompt:\n{prompt}")
+                logger.info(f"\nCompletion:\n{completion}")
+                logger.info(f"\nFull Text Input:\n{text[:500]}...")  # Show first 500 chars
+                logger.info(f"\nTokenized Length: {len(self.tokenizer.encode(text))}")
+                logger.info("=" * 50)
+
+                # Log to wandb if available
+                try:
+                    import wandb
+
+                    if wandb.run:
+                        wandb.log(
+                            {
+                                "debug/step": self.training_step,
+                                "debug/prompt_length": len(prompt),
+                                "debug/completion_length": len(completion),
+                                "debug/total_length": len(text),
+                                "debug/tokenized_length": len(self.tokenizer.encode(text)),
+                                "debug/example": {
+                                    "prompt": prompt,
+                                    "completion": completion,
+                                    "full_text": text[:1000],  # First 1000 chars
+                                },
+                            }
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to log to wandb: {e}")
 
             # Tokenize the text
             tokenized = self.tokenizer(
@@ -403,9 +449,7 @@ class QwenTrainer:
             result = {
                 "input_ids": tokenized.input_ids[0],
                 "attention_mask": tokenized.attention_mask[0],
-                "labels": tokenized.input_ids[
-                    0
-                ].clone(),  # For causal LM, labels are the same as input_ids
+                "labels": tokenized.input_ids[0].clone(),
             }
 
             return result
@@ -413,19 +457,41 @@ class QwenTrainer:
         # Apply the formatting to each example
         formatted_dataset = dataset.map(
             format_example,
-            remove_columns=dataset.column_names,  # Remove all original columns
+            remove_columns=dataset.column_names,
             load_from_cache_file=False,
         )
 
         logger.info(f"Dataset prepared: {len(formatted_dataset)} examples")
 
-        # Log a few examples for debugging
-        if self.debug_samples > 0:
-            logger.info("Sample formatted examples:")
-            for i in range(min(self.debug_samples, len(formatted_dataset))):
-                sample = formatted_dataset[i]
-                decoded_text = self.tokenizer.decode(sample["input_ids"])
-                logger.info(f"Example {i}:\n{decoded_text[:200]}... (truncated)")
+        # Save debug logs to file
+        try:
+            import json
+            import os
+            from datetime import datetime
+
+            debug_dir = os.path.join("outputs", "debug_logs")
+            os.makedirs(debug_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            debug_file = os.path.join(debug_dir, f"prompt_debug_logs_{timestamp}.json")
+
+            with open(debug_file, "w") as f:
+                json.dump(
+                    {
+                        "total_examples": len(dataset),
+                        "max_seq_length": self.max_seq_length,
+                        "prompt_type": self.prompt_creator.prompt_type,
+                        "logs": self.prompt_debug_logs[
+                            :100
+                        ],  # Save first 100 examples to avoid huge files
+                    },
+                    f,
+                    indent=2,
+                )
+
+            logger.info(f"Debug logs saved to: {debug_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save debug logs: {e}")
 
         return formatted_dataset
 
@@ -548,7 +614,7 @@ class QwenTrainer:
         default_config["config"]["training"].update(
             {
                 "scheduler": {
-                    "type": "cosine",
+                    "type": "cosine_with_warmup",
                     "warmup_ratio": warmup_ratio,
                     "warmup_steps": warmup_steps,
                 }
@@ -754,7 +820,7 @@ class QwenTrainer:
         # Default LR scheduler config if not provided
         if lr_scheduler_config is None:
             lr_scheduler_config = {
-                "lr_scheduler_type": "cosine",
+                "lr_scheduler_type": "cosine_with_warmup",
                 "num_cycles": 1,
                 "power": 1.0,
                 "last_epoch": -1,
@@ -782,9 +848,9 @@ class QwenTrainer:
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "learning_rate": learning_rate,
             "num_train_epochs": num_train_epochs,
-            "warmup_steps": warmup_steps,  # Use calculated warmup steps
+            "warmup_steps": 50,  # Default to 50 warmup steps
             # Learning rate schedule
-            "lr_scheduler_type": lr_scheduler_config["lr_scheduler_type"],
+            "lr_scheduler_type": "cosine_with_warmup",  # Changed to cosine with warmup
             # Logging and saving configuration
             "logging_steps": logging_steps,
             "save_steps": save_steps,

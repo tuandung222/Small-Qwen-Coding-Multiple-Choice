@@ -176,7 +176,16 @@ def parse_args():
     parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate")
     parser.add_argument(
-        "--warmup-ratio", type=float, default=0.1, help="Proportion of steps for warmup"
+        "--warmup-steps",
+        type=int,
+        default=50,
+        help="Number of warmup steps (overrides warmup-ratio if provided)",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=None,
+        help="Ratio of total steps to use for warmup (ignored if warmup-steps is provided)",
     )
     parser.add_argument(
         "--weight-decay", type=float, default=0.01, help="Weight decay for optimizer"
@@ -424,8 +433,9 @@ def parse_args():
     parser.add_argument(
         "--lr-scheduler",
         type=str,
-        default="cosine",
+        default="cosine_with_warmup",
         choices=[
+            "cosine_with_warmup",
             "cosine",
             "linear",
             "cosine_with_restarts",

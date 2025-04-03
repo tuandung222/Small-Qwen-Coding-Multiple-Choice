@@ -2,7 +2,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 from datasets import Dataset
@@ -159,38 +159,67 @@ class MultipleChoiceTester:
 
         return results, metrics
 
-    def infer_example(self, example, temperature=0.7, stream=True):
-        """Run inference on a single example"""
-        prompt = self.prompt_creator.create_inference_prompt(
-            example["question"], example["choices"]
+    def infer_example(
+        self, example: Dict[str, Any], temperature: float = 0.7, stream: bool = False
+    ) -> Union[Dict[str, Any], Iterator[Tuple[str, str]]]:
+        """
+        Run inference on a single example.
+
+        Args:
+            example: Dictionary containing 'question' and 'choices'
+            temperature: Sampling temperature
+            stream: Whether to stream the response
+
+        Returns:
+            If stream=False: Dictionary containing inference results including:
+                - question: The input question
+                - choices: The formatted choices
+                - ground_truth: The correct answer if available
+                - predicted_answer: The model's predicted answer
+                - reasoning: The model's reasoning
+                - is_correct: Whether the prediction matches ground truth
+                - response_text: The complete model response
+            If stream=True: Generator yielding (chunk, full_text) tuples where:
+                - chunk: The latest generated text chunk
+                - full_text: The complete generated text so far
+        """
+        if not isinstance(example, dict) or "question" not in example or "choices" not in example:
+            raise ValueError("Example must be a dictionary with 'question' and 'choices' keys")
+
+        # Format choices if they're a list
+        if isinstance(example["choices"], list):
+            choices = "\n".join(example["choices"])
+        else:
+            choices = example["choices"]
+
+        # Create prompt
+        prompt = self.prompt_creator.create_inference_prompt(example["question"], choices)
+
+        # Get response
+        response = self.model_handler.generate_with_streaming(
+            prompt=prompt, temperature=temperature, stream=stream
         )
 
         if stream:
-            response_streamer = self.model_handler.generate_with_streaming(
-                prompt=prompt, temperature=temperature, stream=True
-            )
-            response_text = ""
-            for text in response_streamer:
-                response_text += text
-        else:
-            response_text = self.model_handler.generate_with_streaming(
-                prompt=prompt, temperature=temperature, stream=False
-            )
+            # For streaming, return the generator directly
+            return response
 
-        predicted_answer, reasoning = self.response_parser.parse(response_text)
+        # For non-streaming, parse the response
+        predicted_answer, reasoning = self.response_parser.parse(response)
 
+        # Check if answer is correct
         is_correct = None
         if "answer" in example and example["answer"] and predicted_answer:
-            is_correct = example["answer"].upper() == predicted_answer
+            is_correct = example["answer"].upper() == predicted_answer.upper()
 
         return {
             "question": example["question"],
-            "choices": example["choices"],
+            "choices": choices,
             "ground_truth": example.get("answer"),
             "predicted_answer": predicted_answer,
             "reasoning": reasoning,
             "is_correct": is_correct,
-            "response_text": response_text,
+            "response_text": response,
         }
 
     def save_results(self, results, output_dir="./results"):

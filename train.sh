@@ -29,17 +29,17 @@ python src/run.py \
     --experiment-name "${EXPERIMENT_NAME}" \
     --source-model "unsloth/Qwen2.5-Coder-1.5B-Instruct" \
     --destination-repo "tuandunghcmut/Qwen25_Coder_MultipleChoice_v3" \
-    --epochs 3 \
+    --epochs 2 \
     --batch-size 32 \
-    --learning-rate 1e-4 \
+    --learning-rate 2e-4 \
     --grad-accum 1 \
     --warmup-ratio 0.15 \
-    --weight-decay 0.02 \
+    --weight-decay 0.01 \
     --max-seq-length 2048 \
     --quantization "4bit" \
     \
-    --lora-r 16 \
-    --lora-alpha 16 \
+    --lora-r 32 \
+    --lora-alpha 64 \
     --lora-dropout 0.05 \
     --peft-type "lora" \
     --target-modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
@@ -57,12 +57,12 @@ python src/run.py \
     \
     --early-stopping-patience 7 \
     --early-stopping-delta 0.01 \
-    --validation-steps 30 \
+    --validation-steps 10 \
     --metric-for-best "eval_loss" \
     --validate-at-start \
     \
     --prompt-template "teacher_reasoned" \
-    --logging-steps 30 \
+    --logging-steps 10 \
     --save-steps 90 \
     --save-total-limit 5 \
     --push-strategy "best" \
