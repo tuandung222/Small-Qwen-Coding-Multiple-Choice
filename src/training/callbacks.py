@@ -49,6 +49,7 @@ class ValidationCallback(TrainerCallback):
     4. Detailed logging to WandB
     5. Early stopping support
     6. Initial validation before training starts
+    7. Caching of validation results
     """
 
     def __init__(
@@ -61,6 +62,8 @@ class ValidationCallback(TrainerCallback):
         early_stopping_patience: int = 3,
         early_stopping_min_delta: float = 0.0,
         validate_at_start: bool = True,
+        minimal_validating: bool = True,
+        max_validation_samples: int = 60,
     ):
         self.trainer = trainer_instance
         self.validation_steps = validation_steps
@@ -70,6 +73,8 @@ class ValidationCallback(TrainerCallback):
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
         self.validate_at_start = validate_at_start
+        self.minimal_validating = minimal_validating
+        self.max_validation_samples = max_validation_samples
 
         # Initialize tracking
         self.best_metric = float("inf") if not greater_is_better else float("-inf")
@@ -77,12 +82,91 @@ class ValidationCallback(TrainerCallback):
         self.validation_history = []
         self.no_improvement_count = 0
 
+        # Cache for validation results
+        self.last_validation_step = 0
+        self.last_validation_results = {}
+        self.last_validation_metrics = {}
+
         # Ensure we have a directory for storing metrics
         self.metrics_dir = None
         if hasattr(self.trainer, "args") and hasattr(self.trainer.args, "output_dir"):
             self.metrics_dir = os.path.join(self.trainer.args.output_dir, "validation_metrics")
             os.makedirs(self.metrics_dir, exist_ok=True)
             logger.info(f"Validation metrics will be saved to {self.metrics_dir}")
+
+    def _prepare_validation_dataset(self, dataset):
+        """
+        Prepare validation dataset, optionally limiting its size for minimal validation.
+
+        Args:
+            dataset: Original validation dataset
+
+        Returns:
+            Dataset: Prepared validation dataset
+        """
+        if dataset is None:
+            return None
+
+        if not self.minimal_validating:
+            return dataset
+
+        # Limit validation dataset size
+        if len(dataset) > self.max_validation_samples:
+            logger.info(
+                f"Limiting validation dataset from {len(dataset)} to {self.max_validation_samples} samples"
+            )
+            # Use random indices for better representation
+            indices = random.sample(range(len(dataset)), self.max_validation_samples)
+            limited_dataset = dataset.select(indices)
+            logger.info(f"Created minimal validation dataset with {len(limited_dataset)} samples")
+            return limited_dataset
+
+        return dataset
+
+    def should_validate(self, current_step: int) -> bool:
+        """
+        Determine if validation should be run at the current step.
+
+        Args:
+            current_step: Current training step
+
+        Returns:
+            bool: True if validation should be run, False otherwise
+        """
+        # Always validate at step 0 if validate_at_start is True
+        if current_step == 0 and self.validate_at_start:
+            return True
+
+        # Check if enough steps have passed since last validation
+        steps_since_last = current_step - self.last_validation_step
+        return steps_since_last >= self.validation_steps
+
+    def get_cached_or_validate(self, state: TrainerState) -> Dict[str, Any]:
+        """
+        Get validation results from cache or run validation if needed.
+
+        Args:
+            state: Current training state
+
+        Returns:
+            Dict containing validation metrics
+        """
+        current_step = state.global_step
+
+        # Check if we should run validation
+        if not self.should_validate(current_step):
+            logger.info(f"Using cached validation results from step {self.last_validation_step}")
+            return self.last_validation_metrics
+
+        # Run validation
+        logger.info(f"Running validation at step {current_step}")
+        metrics = self._run_validation()
+
+        # Update cache
+        self.last_validation_step = current_step
+        self.last_validation_metrics = metrics
+
+        return metrics
 
     def on_train_begin(
         self,
@@ -130,7 +214,12 @@ class ValidationCallback(TrainerCallback):
                             test_size=val_split, seed=random_seed
                         )
                         # Use only the test split for validation
-                        self.trainer.val_dataset = split_datasets["test"]
+                        val_dataset = split_datasets["test"]
+
+                        # Apply minimal validation if enabled
+                        val_dataset = self._prepare_validation_dataset(val_dataset)
+
+                        self.trainer.val_dataset = val_dataset
                         logger.info(
                             f"Created validation dataset with {len(self.trainer.val_dataset)} examples"
                         )
@@ -274,16 +363,21 @@ class ValidationCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        """Run validation every validation_steps."""
-        if state.global_step % self.validation_steps == 0:
-            # Run validation
-            metrics = self._run_validation()
+        """Run validation based on validation_steps interval."""
+        try:
+            # Get validation results (from cache or new run)
+            metrics = self.get_cached_or_validate(state)
+
+            # If no metrics available, skip further processing
+            if not metrics:
+                return control
 
             # Always save metrics history, even if it's not the best
             self._save_metrics_history(metrics, state.global_step)
 
-            # Log metrics
-            self._log_metrics(metrics, state.global_step)
+            # Only log metrics if we actually ran validation this step
+            if state.global_step == self.last_validation_step:
+                self._log_metrics(metrics, state.global_step)
 
             # Check for improvement
             current_metric = metrics.get(self.metric_for_best)
@@ -291,6 +385,7 @@ class ValidationCallback(TrainerCallback):
                 improved = self._check_improvement(current_metric)
                 if improved:
                     self._handle_improvement(metrics, state.global_step)
+                    self.no_improvement_count = 0
                 else:
                     logger.info(
                         f"No improvement in {self.metric_for_best}: current={current_metric:.4f}, best={self.best_metric:.4f}"
@@ -302,8 +397,14 @@ class ValidationCallback(TrainerCallback):
                             f"Early stopping triggered after {self.no_improvement_count} validations without improvement"
                         )
                         control.should_training_stop = True
-                if improved:
-                    self.no_improvement_count = 0
+
+        except Exception as e:
+            logger.error(f"Error in validation step: {e}")
+            import traceback
+
+            logger.debug(f"Validation error details: {traceback.format_exc()}")
+
+        return control
 
     def _run_validation(self) -> Dict[str, float]:
         """Run comprehensive validation."""

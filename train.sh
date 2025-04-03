@@ -28,6 +28,8 @@ EPOCHS=3
 WARMUP_STEPS=30
 VALIDATION_STEPS=30
 DEBUG_SAMPLES=3
+MINIMAL_VALIDATING=true
+MAX_VALIDATION_SAMPLES=60
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -64,6 +66,14 @@ while [[ $# -gt 0 ]]; do
       DEBUG_SAMPLES="$2"
       shift 2
       ;;
+    --minimal-validating)
+      MINIMAL_VALIDATING=true
+      shift
+      ;;
+    --max-validation-samples)
+      MAX_VALIDATION_SAMPLES="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown parameter: $1"
       exit 1
@@ -81,6 +91,7 @@ echo "Epochs: $EPOCHS"
 echo "Warmup steps: $WARMUP_STEPS"
 echo "Validation steps: $VALIDATION_STEPS"
 echo "Debug samples: $DEBUG_SAMPLES"
+echo "Minimal validating: $MINIMAL_VALIDATING (max $MAX_VALIDATION_SAMPLES samples)"
 echo "==========================="
 
 # Add timestamp to experiment name for uniqueness
@@ -108,6 +119,15 @@ python src/run.py \
     --lr-scheduler "cosine_with_warmup" \
     --lr-scheduler-num-cycles 1 \
     \
+    # Validation configuration
+    --validation-steps "$VALIDATION_STEPS" \
+    --minimal-validating \
+    --max-validation-samples "$MAX_VALIDATION_SAMPLES" \
+    --validate-at-start \
+    --metric-for-best "eval_loss" \
+    --early-stopping-patience 3 \
+    --early-stopping-delta 0.01 \
+    \
     # LoRA configuration (adjusted for Lion)
     --lora-r 32 \
     --lora-alpha 64 \
@@ -116,10 +136,8 @@ python src/run.py \
     --target-modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
     \
     # Training monitoring
-    --validation-steps "$VALIDATION_STEPS" \
     --debug-samples "$DEBUG_SAMPLES" \
     --push-to-hub \
-    --validate-at-start \
     --prompt-track-diversity \
     --prompt-track-quality \
     --prompt-categorize \
@@ -128,9 +146,6 @@ python src/run.py \
     --logging-steps 10 \
     --save-steps 100 \
     --save-total-limit 3 \
-    --metric-for-best "eval_loss" \
-    --early-stopping-patience 3 \
-    --early-stopping-delta 0.01 \
     \
     # Model configuration
     --max-seq-length 2048 \
