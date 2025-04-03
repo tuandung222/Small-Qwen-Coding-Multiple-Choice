@@ -7,6 +7,7 @@ import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from email.headerregistry import DateHeader
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -624,120 +625,106 @@ class ValidationCallback(TrainerCallback):
             return {}
 
     def _evaluate_with_progress(self, eval_dataset) -> Dict[str, float]:
-        """Custom evaluation with tqdm progress bar for better visibility."""
-        # Set model to evaluation mode
+        """Custom evaluation with optimized batch processing."""
         model = self.trainer.model
         model.eval()
 
         # Verify dataset is usable
-        if eval_dataset is None:
-            logger.error("Cannot evaluate with progress: dataset is None")
-            raise ValueError("Dataset is None")
+        if eval_dataset is None or not hasattr(eval_dataset, "__len__") or len(eval_dataset) == 0:
+            logger.error("Invalid evaluation dataset")
+            raise ValueError("Invalid evaluation dataset")
 
-        if not hasattr(eval_dataset, "__len__"):
-            logger.error("Cannot evaluate with progress: dataset has no length")
-            raise ValueError("Dataset has no __len__ method")
-
-        if len(eval_dataset) == 0:
-            logger.error("Cannot evaluate with progress: dataset is empty")
-            raise ValueError("Dataset is empty")
-
-        # Create a dataloader
+        # Create an optimized dataloader
         try:
-            if hasattr(self.trainer, "get_eval_dataloader"):
-                logger.info("Using trainer's get_eval_dataloader method")
-                eval_dataloader = self.trainer.get_eval_dataloader(eval_dataset)
-            else:
-                # Fallback to creating a dataloader manually
-                logger.info("Creating evaluation dataloader manually")
-                from torch.utils.data import DataLoader
-
-                # Get the collator
-                data_collator = self.trainer.data_collator
-                if data_collator is None:
-                    logger.warning("No data collator found - using default identity collator")
-
-                    # Define a simple identity collator as fallback
-                    def identity_collator(examples):
-                        return examples
-
-                    data_collator = identity_collator
-
-                # Create dataloader
-                eval_dataloader = DataLoader(
-                    eval_dataset,
-                    batch_size=self.trainer.args.per_device_eval_batch_size,
-                    collate_fn=data_collator,
-                    num_workers=self.trainer.args.dataloader_num_workers,
-                    pin_memory=self.trainer.args.dataloader_pin_memory,
-                )
-
-            logger.info(f"Created eval dataloader with {len(eval_dataloader)} batches")
+            eval_batch_size = (
+                self.trainer.args.per_device_eval_batch_size * 2
+            )  # Double batch size for eval
+            eval_dataloader = DateHeader(
+                eval_dataset,
+                batch_size=eval_batch_size,
+                collate_fn=self.trainer.data_collator,
+                num_workers=4,  # Use multiple workers
+                pin_memory=True,  # Pin memory for faster GPU transfer
+                prefetch_factor=2,  # Prefetch batches
+                persistent_workers=True,  # Keep workers alive
+            )
+            logger.info(f"Created optimized eval dataloader with {len(eval_dataloader)} batches")
         except Exception as e:
             logger.error(f"Error creating evaluation dataloader: {e}")
             raise
 
-        # Setup metrics
+        # Setup metrics and device
+        device = model.device
         losses = []
         num_eval_steps = 0
 
-        # Log basic information
-        device = model.device
-        logger.info(f"Running evaluation on device: {device}")
-        desc = "Validation"
+        # Optimize CUDA operations
+        torch.backends.cudnn.benchmark = True  # Enable CUDNN autotuner
 
-        # Wrap with try/except to catch any errors during evaluation
+        # Use automatic mixed precision for evaluation
+        from torch.cuda.amp import autocast
+
+        scaler = torch.cuda.amp.GradScaler()
+
+        # Batch accumulator for memory efficiency
+        accumulated_loss = 0.0
+        accumulation_count = 0
+        accumulation_steps = 4  # Adjust based on memory
+
         try:
-            with torch.no_grad():
-                # Show progress bar for evaluation batches
-                for step, batch in enumerate(tqdm(eval_dataloader, desc=desc, position=0)):
+            with torch.no_grad(), autocast(enabled=True):
+                for step, batch in enumerate(tqdm(eval_dataloader, desc="Validation", position=0)):
                     try:
-                        # Move batch to device
+                        # Efficient batch transfer to GPU
                         batch = {
-                            k: v.to(device) if isinstance(v, torch.Tensor) else v
+                            k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                             for k, v in batch.items()
                         }
 
-                        # Determine if we should compute loss on responses only
-                        if "compute_loss_on_response_only" in batch:
-                            compute_loss_on_response_only = batch.pop(
-                                "compute_loss_on_response_only"
-                            )
-                        else:
-                            compute_loss_on_response_only = True  # Default behavior
-
-                        # Forward pass
+                        # Forward pass with memory optimization
                         outputs = model(**batch)
-
-                        # Get loss
                         loss = outputs.loss.detach().float()
-                        losses.append(loss.item())
+
+                        # Accumulate loss
+                        accumulated_loss += loss.item()
+                        accumulation_count += 1
+
+                        # Process accumulated batches
+                        if accumulation_count >= accumulation_steps:
+                            avg_loss = accumulated_loss / accumulation_count
+                            losses.append(avg_loss)
+                            accumulated_loss = 0.0
+                            accumulation_count = 0
+
                         num_eval_steps += 1
 
                     except Exception as batch_error:
                         logger.warning(f"Error processing batch {step}: {batch_error}")
-                        # Continue with next batch instead of failing the whole evaluation
                         continue
-        except Exception as eval_error:
-            logger.error(f"Error during evaluation: {eval_error}")
-            import traceback
 
-            logger.error(f"Evaluation error details: {traceback.format_exc()}")
+                # Process any remaining accumulated loss
+                if accumulation_count > 0:
+                    avg_loss = accumulated_loss / accumulation_count
+                    losses.append(avg_loss)
+
+        except Exception as eval_error:
+            logger.error(f"Evaluation error: {eval_error}")
             raise
 
-        # Compute average loss
+        # Compute final metrics
         if not losses:
-            logger.warning("No valid batches were processed during evaluation")
             return {"eval_loss": 0.0, "eval_error": "No valid batches"}
 
         loss_value = torch.tensor(losses).mean().item()
 
-        # Return metrics
+        # Reset CUDNN benchmark
+        torch.backends.cudnn.benchmark = False
+
         return {
             "eval_loss": loss_value,
             "eval_samples": len(eval_dataset),
-            "eval_batches": len(eval_dataloader),
             "eval_steps": num_eval_steps,
+            "eval_batch_size": eval_batch_size,
         }
 
     def _save_validation_samples(self, val_dataset, num_samples: int = 3):
@@ -1925,7 +1912,7 @@ class PromptMonitorCallback(TrainerCallback):
 
 
 class ModelLoadingAlertCallback(TrainerCallback):
-    """Callback to alert when model loading method changes."""
+    """Callback to alert when model loading method changes and warn about QLoRA optimizations."""
 
     def __init__(self, use_unsloth: bool = True):
         """
@@ -1937,35 +1924,151 @@ class ModelLoadingAlertCallback(TrainerCallback):
         self.use_unsloth = use_unsloth
         self.alert_shown = False
         self.trainer = None
+        self.warning_count = 0
+        self.max_warnings = 3  # Show warning multiple times during training
+
+    def _calculate_memory_usage(self, model):
+        """Calculate approximate memory usage for QLoRA."""
+        try:
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+            # Estimate memory usage for QLoRA
+            base_model_memory = total_params * 0.5 / (1024**3)  # GB for 4-bit model
+            lora_memory = trainable_params * 4 / (1024**3)  # GB for LoRA weights (FP32)
+            optimizer_memory = trainable_params * 8 / (1024**3)  # GB for Adam states
+            activation_memory = 2  # GB (approximate)
+
+            return {
+                "total_params": total_params,
+                "trainable_params": trainable_params,
+                "base_model_memory_gb": base_model_memory,
+                "lora_memory_gb": lora_memory,
+                "optimizer_memory_gb": optimizer_memory,
+                "activation_memory_gb": activation_memory,
+                "total_memory_gb": base_model_memory
+                + lora_memory
+                + optimizer_memory
+                + activation_memory,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to calculate memory usage: {e}")
+            return None
+
+    def _show_performance_warning(self, model):
+        """Show detailed performance warning with QLoRA-specific information."""
+        memory_info = self._calculate_memory_usage(model)
+
+        warning_msg = "\n" + "!" * 80 + "\n"
+        warning_msg += "⚠️  CRITICAL PERFORMANCE WARNING  ⚠️\n"
+        warning_msg += "!" * 80 + "\n\n"
+
+        warning_msg += "Training is proceeding WITHOUT proper QLoRA optimizations! This means:\n"
+        warning_msg += "1. 💾 SIGNIFICANTLY HIGHER MEMORY USAGE:\n"
+        if memory_info:
+            warning_msg += (
+                f"   - Base model memory (4-bit): {memory_info['base_model_memory_gb']:.2f} GB\n"
+            )
+            warning_msg += f"   - LoRA weights memory: {memory_info['lora_memory_gb']:.2f} GB\n"
+            warning_msg += f"   - Optimizer states: {memory_info['optimizer_memory_gb']:.2f} GB\n"
+            warning_msg += f"   - Activation memory: {memory_info['activation_memory_gb']:.2f} GB\n"
+            warning_msg += f"   - Total estimated memory: {memory_info['total_memory_gb']:.2f} GB\n"
+            warning_msg += f"   - With proper QLoRA, this could be reduced by up to 80%!\n"
+
+        warning_msg += "\n2. ⚡ TRAINING INEFFICIENCIES:\n"
+        warning_msg += "   - Missing 4-bit quantization optimizations\n"
+        warning_msg += "   - Suboptimal memory access patterns\n"
+        warning_msg += "   - Higher CPU-GPU transfer overhead\n"
+
+        warning_msg += "\n3. 🔧 MISSING QLORA FEATURES:\n"
+        warning_msg += "   - No double quantization\n"
+        warning_msg += "   - No NF4 data type benefits\n"
+        warning_msg += "   - No paged optimizer states\n"
+        warning_msg += "   - No efficient k-bit training\n"
+
+        warning_msg += "\nRECOMMENDED ACTIONS:\n"
+        warning_msg += "1. Stop training (Ctrl+C)\n"
+        warning_msg += "2. Ensure proper QLoRA setup:\n"
+        warning_msg += "   - Install bitsandbytes>=0.39.0\n"
+        warning_msg += "   - Install transformers>=4.31.0\n"
+        warning_msg += "   - Install accelerate>=0.20.3\n"
+        warning_msg += "   - Install peft>=0.4.0\n"
+        warning_msg += "3. Check BitsAndBytes configuration\n"
+        warning_msg += "4. Verify k-bit training preparation\n"
+        warning_msg += "5. Restart training with proper QLoRA settings\n"
+
+        warning_msg += "\n" + "!" * 80 + "\n"
+
+        print(warning_msg)
+
+        # Also log to wandb if available
+        try:
+            import wandb
+
+            if wandb.run:
+                wandb.alert(
+                    title="⚠️ Training Without QLoRA Optimizations",
+                    text=warning_msg,
+                    level=wandb.AlertLevel.ERROR,
+                )
+
+                # Log memory metrics
+                if memory_info:
+                    wandb.log(
+                        {
+                            "memory/base_model_gb": memory_info["base_model_memory_gb"],
+                            "memory/lora_weights_gb": memory_info["lora_memory_gb"],
+                            "memory/optimizer_gb": memory_info["optimizer_memory_gb"],
+                            "memory/activation_gb": memory_info["activation_memory_gb"],
+                            "memory/total_gb": memory_info["total_memory_gb"],
+                        }
+                    )
+        except ImportError:
+            pass
 
     def on_train_begin(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
     ) -> TrainerControl:
-        """Show alert at the beginning of training if Unsloth was attempted but not used."""
+        """Show alert at the beginning of training if QLoRA was not properly configured."""
         if self.use_unsloth and not self.alert_shown:
             try:
-                # Check if trainer is available
                 if self.trainer is None:
                     logger.warning("Trainer not available in ModelLoadingAlertCallback")
                     return control
 
-                # Check if model is available
                 if not hasattr(self.trainer, "model") or self.trainer.model is None:
                     logger.warning("Model not available in ModelLoadingAlertCallback")
                     return control
 
-                # Check if the model is using Unsloth
                 model = self.trainer.model
-                if not hasattr(model, "is_unsloth_model") or not model.is_unsloth_model:
-                    print("\n" + "=" * 80)
-                    print(
-                        "\033[91mWARNING: Using standard Transformers loading instead of Unsloth optimization\033[0m"
-                    )
-                    print(
-                        "\033[91mThis may result in slower training and higher memory usage\033[0m"
-                    )
-                    print("=" * 80 + "\n")
+                if not hasattr(model, "is_qlora_model") or not model.is_qlora_model:
+                    self._show_performance_warning(model)
                     self.alert_shown = True
+                    self.warning_count += 1
+
             except Exception as e:
                 logger.warning(f"Error checking model loading method: {e}")
+        return control
+
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> TrainerControl:
+        """Show periodic warnings during training."""
+        if self.use_unsloth and self.warning_count < self.max_warnings:
+            if state.global_step % 100 == 0:  # Show warning every 100 steps
+                try:
+                    model = self.trainer.model
+                    if not hasattr(model, "is_qlora_model") or not model.is_qlora_model:
+                        self._show_performance_warning(model)
+                        self.warning_count += 1
+                except Exception as e:
+                    logger.warning(f"Error checking model during training: {e}")
         return control

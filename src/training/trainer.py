@@ -192,89 +192,109 @@ class QwenTrainer:
         self.model = self.model.from_pretrained(checkpoint_path)
         self.tokenizer = self.tokenizer.from_pretrained(checkpoint_path)
 
-    def setup(self):
-        """Setup trainer with LoRA if configured"""
-        if self.lora_config:
-            self.model = get_peft_model(self.model, self.lora_config)
-
     def prepare_model_for_training(self) -> Any:
         """
-        Prepare model for training with LoRA configuration.
-
-        This method:
-        1. Applies LoRA configuration if provided
-        2. Uses Unsloth's optimizations when possible
-        3. Configures gradient checkpointing
-        4. Sets up mixed precision training
-
-        Returns:
-            The prepared model ready for training
-
-        Raises:
-            RuntimeError: If model preparation fails
-            Exception: If Unsloth optimization fails and fallback is needed
+        Prepare model for training with QLoRA optimizations.
         """
-        use_unsloth = False
-        if self.lora_config:
-            try:
-                # Try using Unsloth's optimized LoRA implementation
-                # Extract parameters from the PEFT LoraConfig
+        try:
+            print("\033[92mPreparing model with QLoRA optimizations...\033[0m")
+
+            # Configure QLoRA settings
+            from peft import prepare_model_for_kbit_training
+            from transformers import BitsAndBytesConfig
+
+            # QLoRA quantization config
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16 if is_bf16_supported() else torch.float16,
+                bnb_4bit_compute_device="cuda",
+            )
+
+            # Load model with quantization config
+            self.model.config.quantization_config = bnb_config
+
+            # Prepare model for k-bit training
+            self.model = prepare_model_for_kbit_training(
+                self.model,
+                use_gradient_checkpointing=True,
+                gradient_checkpointing_kwargs={"use_reentrant": False},
+            )
+
+            if self.lora_config:
+                # Extract LoRA parameters
                 r = self.lora_config.r
                 lora_alpha = self.lora_config.lora_alpha
                 lora_dropout = self.lora_config.lora_dropout
                 target_modules = self.lora_config.target_modules
 
-                print("\033[92mAttempting to use Unsloth's LoRA implementation...\033[0m")
-                use_unsloth = True
+                # Apply QLoRA with Unsloth optimizations if available
+                try:
+                    from unsloth import FastLanguageModel
 
-                # Use Unsloth's LoRA implementation
-                self.peft_model = FastLanguageModel.get_peft_model(
-                    self.model,
-                    r=r,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    target_modules=target_modules,
-                    bias="none",
-                    use_gradient_checkpointing="unsloth",
-                    random_state=42,
-                )
+                    print("\033[92mApplying Unsloth optimizations with QLoRA...\033[0m")
 
-                # Print parameters info
+                    model_kwargs = {
+                        "device_map": "auto",
+                        "torch_dtype": torch.bfloat16 if is_bf16_supported() else torch.float16,
+                    }
+
+                    self.peft_model = FastLanguageModel.get_peft_model(
+                        self.model,
+                        r=r,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        target_modules=target_modules,
+                        bias="none",
+                        use_gradient_checkpointing="unsloth",
+                        random_state=42,
+                        **model_kwargs,
+                    )
+
+                    self.peft_model.is_unsloth_model = True
+                    self.peft_model.is_qlora_model = True
+
+                except ImportError:
+                    print("\033[93mUnsloth not available, falling back to standard QLoRA...\033[0m")
+                    from peft import get_peft_model
+
+                    self.peft_model = get_peft_model(self.model, self.lora_config)
+                    self.peft_model.is_unsloth_model = False
+                    self.peft_model.is_qlora_model = True
+
+                # Enable memory efficient optimizations
+                if hasattr(self.peft_model, "enable_input_require_grads"):
+                    self.peft_model.enable_input_require_grads()
+
+                # Print model information
                 total_params = sum(p.numel() for p in self.peft_model.parameters())
                 trainable_params = sum(
                     p.numel() for p in self.peft_model.parameters() if p.requires_grad
                 )
-                print(
-                    f"\033[92mtrainable params: {trainable_params:,} || all params: {total_params:,} || trainable%: {100 * trainable_params / total_params:.4f}\033[0m"
-                )
 
-                # Mark model as Unsloth model
-                self.peft_model.is_unsloth_model = True
+                print(f"\033[92mQLoRA model prepared:")
+                print(f"- Trainable params: {trainable_params:,}")
+                print(f"- Total params: {total_params:,}")
+                print(f"- Trainable%: {100 * trainable_params / total_params:.4f}")
+                print(f"- Using {'BF16' if is_bf16_supported() else 'FP16'} precision")
+                print(f"- 4-bit quantization with NF4")
+                print(f"- Double quantization: enabled")
+                print(f"- Gradient checkpointing: enabled\033[0m")
+
                 return self.peft_model
+            else:
+                # Fallback to standard model preparation
+                self.model.train()
+                self.model.is_unsloth_model = False
+                self.model.is_qlora_model = True
+                return self.model
 
-            except Exception as e:
-                print(f"\033[91mFailed to use Unsloth's LoRA implementation: {e}\033[0m")
-                print("\033[91mFalling back to standard PEFT LoRA\033[0m")
-
-                try:
-                    # Fallback to standard PEFT LoRA
-                    self.peft_model = get_peft_model(self.model, self.lora_config)
-                    self.peft_model.print_trainable_parameters()
-                    # Mark model as not using Unsloth
-                    self.peft_model.is_unsloth_model = False
-                    return self.peft_model
-                except Exception as e:
-                    print(f"\033[91mFailed to apply standard PEFT LoRA: {e}\033[0m")
-                    return None
-
-        # If no LoRA config, prepare base model
-        try:
-            self.model.train()
-            # Mark model as not using Unsloth
-            self.model.is_unsloth_model = False
-            return self.model
         except Exception as e:
-            print(f"\033[91mFailed to prepare base model: {e}\033[0m")
+            print(f"\033[91mFailed to prepare model with QLoRA: {e}\033[0m")
+            import traceback
+
+            print(f"\033[91mError details: {traceback.format_exc()}\033[0m")
             return None
 
     def _log_debug_examples(self, dataset: Dataset, epoch: int = 0):
@@ -355,143 +375,97 @@ class QwenTrainer:
 
     def _prepare_dataset_for_training(self, dataset: Dataset) -> Dataset:
         """
-        Prepare dataset for training by formatting it with the prompt creator.
-
-        Args:
-            dataset: The raw dataset to format
-
-        Returns:
-            Formatted dataset ready for training
+        Prepare dataset for training with optimized processing and caching.
         """
         logger.info("Preparing dataset for training...")
+        initial_size = len(dataset)
 
-        # Keep track of steps for debug logging
-        self.training_step = 0
-        self.debug_log_interval = 5  # Log every 5 steps
-        self.prompt_debug_logs = []
+        # Create cache directory with unique identifier
+        cache_dir = os.path.join("outputs", "dataset_cache")
+        os.makedirs(cache_dir, exist_ok=True)
 
-        def format_example(example):
-            # Use the prompt creator to format the prompt
-            prompt = self.prompt_creator.create_training_prompt(
-                question=example["question"], choices=example["choices"]
-            )
+        # Create cache key based on dataset and processing parameters
+        cache_key = hashlib.md5(
+            f"{dataset._fingerprint}_{self.max_seq_length}_{self.prompt_creator.prompt_type}".encode()
+        ).hexdigest()
+        cache_path = os.path.join(cache_dir, f"processed_{cache_key}.arrow")
 
-            # Get the target completion from the example
-            if "yml_str" in example and example["yml_str"]:
-                completion = example["yml_str"]
-            else:
-                completion = f"The answer is {example['answer']}."
+        # Try to load cached dataset
+        if os.path.exists(cache_path):
+            try:
+                logger.info(f"Loading cached dataset from {cache_path}")
+                return Dataset.load_from_disk(cache_path)
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}")
 
-            # Format as a conversation
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": completion},
+        # Process dataset with optimizations
+        def format_example(examples):
+            # Process multiple examples at once for efficiency
+            batch_size = len(examples["question"])
+            prompts = []
+            completions = []
+
+            for i in range(batch_size):
+                prompt = self.prompt_creator.create_training_prompt(
+                    question=examples["question"][i], choices=examples["choices"][i]
+                )
+                assert (
+                    "yml_str" in examples
+                ), "yml_str is not in the dataset"  # Must have yml_str column
+                completion = (
+                    examples["yml_str"][i]
+                    if examples["yml_str"][i]
+                    else f"The answer is {examples['answer'][i]}."
+                )
+                prompts.append(prompt)
+                completions.append(completion)
+
+            # Batch process conversations
+            conversations = [
+                [{"role": "user", "content": p}, {"role": "assistant", "content": c}]
+                for p, c in zip(prompts, completions)
             ]
 
-            # Store debug information
-            debug_info = {
-                "prompt": prompt,
-                "completion": completion,
-                "full_conversation": messages,
-                "question": example["question"],
-                "choices": example["choices"],
-                "answer": example.get("answer", None),
-            }
-            self.prompt_debug_logs.append(debug_info)
+            # Batch tokenization
+            texts = [
+                self.tokenizer.apply_chat_template(
+                    conv, tokenize=False, add_generation_prompt=False
+                )
+                for conv in conversations
+            ]
 
-            # Apply the tokenizer's chat template
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
-
-            # Log debug information periodically
-            self.training_step += 1
-            if self.training_step % self.debug_log_interval == 0:
-                logger.info(f"\n{'='*50}\nTraining Step {self.training_step} Debug Info:")
-                logger.info(f"\nPrompt:\n{prompt}")
-                logger.info(f"\nCompletion:\n{completion}")
-                logger.info(f"\nFull Text Input:\n{text[:500]}...")  # Show first 500 chars
-                logger.info(f"\nTokenized Length: {len(self.tokenizer.encode(text))}")
-                logger.info("=" * 50)
-
-                # Log to wandb if available
-                try:
-                    import wandb
-
-                    if wandb.run:
-                        wandb.log(
-                            {
-                                "debug/step": self.training_step,
-                                "debug/prompt_length": len(prompt),
-                                "debug/completion_length": len(completion),
-                                "debug/total_length": len(text),
-                                "debug/tokenized_length": len(self.tokenizer.encode(text)),
-                                "debug/example": {
-                                    "prompt": prompt,
-                                    "completion": completion,
-                                    "full_text": text[:1000],  # First 1000 chars
-                                },
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to log to wandb: {e}")
-
-            # Tokenize the text
+            # Efficient tokenization with padding
             tokenized = self.tokenizer(
-                text,
+                texts,
                 max_length=self.max_seq_length,
                 truncation=True,
                 padding="max_length",
                 return_tensors="pt",
             )
 
-            # Return the input_ids and attention_mask
-            result = {
-                "input_ids": tokenized.input_ids[0],
-                "attention_mask": tokenized.attention_mask[0],
-                "labels": tokenized.input_ids[0].clone(),
+            return {
+                "input_ids": tokenized.input_ids,
+                "attention_mask": tokenized.attention_mask,
+                "labels": tokenized.input_ids.clone(),
             }
 
-            return result
-
-        # Apply the formatting to each example
+        # Process dataset with optimized batch processing
         formatted_dataset = dataset.map(
             format_example,
+            batched=True,
+            batch_size=100,  # Process 100 examples at once
+            num_proc=4,  # Use 4 CPU cores
             remove_columns=dataset.column_names,
-            load_from_cache_file=False,
+            load_from_cache_file=True,
+            desc="Processing dataset",
         )
 
-        logger.info(f"Dataset prepared: {len(formatted_dataset)} examples")
-
-        # Save debug logs to file
+        # Save processed dataset to cache
         try:
-            import json
-            import os
-            from datetime import datetime
-
-            debug_dir = os.path.join("outputs", "debug_logs")
-            os.makedirs(debug_dir, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            debug_file = os.path.join(debug_dir, f"prompt_debug_logs_{timestamp}.json")
-
-            with open(debug_file, "w") as f:
-                json.dump(
-                    {
-                        "total_examples": len(dataset),
-                        "max_seq_length": self.max_seq_length,
-                        "prompt_type": self.prompt_creator.prompt_type,
-                        "logs": self.prompt_debug_logs[
-                            :100
-                        ],  # Save first 100 examples to avoid huge files
-                    },
-                    f,
-                    indent=2,
-                )
-
-            logger.info(f"Debug logs saved to: {debug_file}")
+            formatted_dataset.save_to_disk(cache_path)
+            logger.info(f"Saved processed dataset to {cache_path}")
         except Exception as e:
-            logger.warning(f"Failed to save debug logs: {e}")
+            logger.warning(f"Failed to save dataset cache: {e}")
 
         return formatted_dataset
 
@@ -634,6 +608,7 @@ class QwenTrainer:
         gradient_accumulation_steps: int = 4,
         learning_rate: float = 2e-4,
         warmup_ratio: float = 0.1,
+        warmup_steps: int = -1,
         max_steps: Optional[int] = None,
         logging_steps: int = 10,
         save_steps: int = 100,
@@ -808,10 +783,10 @@ class QwenTrainer:
         # Default optimizer config if not provided
         if optimizer_config is None:
             optimizer_config = {
-                "optimizer_type": "adamw_torch",
-                "weight_decay": 0.01,
-                "beta1": 0.9,
-                "beta2": 0.999,
+                "optimizer_type": "lion_8bit",  # Changed default to Lion 8-bit
+                "weight_decay": 0.1,  # Increased for Lion optimizer
+                "beta1": 0.95,  # Recommended for Lion
+                "beta2": 0.98,  # Recommended for Lion
                 "epsilon": 1e-8,
                 "max_grad_norm": 1.0,
                 "optim_bits": 8,
@@ -820,16 +795,18 @@ class QwenTrainer:
         # Default LR scheduler config if not provided
         if lr_scheduler_config is None:
             lr_scheduler_config = {
-                "lr_scheduler_type": "cosine_with_warmup",
+                "lr_scheduler_type": "cosine",  # Default to cosine scheduler
                 "num_cycles": 1,
                 "power": 1.0,
                 "last_epoch": -1,
             }
 
-        logger.info(f"Using optimizer: {optimizer_config['optimizer_type']}")
+        logger.info(
+            f"Using optimizer: {optimizer_config['optimizer_type']} with weight decay {optimizer_config['weight_decay']}"
+        )
         logger.info(f"Using LR scheduler: {lr_scheduler_config['lr_scheduler_type']}")
 
-        # Calculate warmup steps
+        # Calculate warmup steps and ratio
         if max_steps is not None and max_steps > 0:
             total_steps = max_steps
         else:
@@ -838,9 +815,21 @@ class QwenTrainer:
                 // (per_device_train_batch_size * gradient_accumulation_steps)
                 * num_train_epochs
             )
-        warmup_steps = int(total_steps * warmup_ratio)
 
-        # Setup training arguments
+        # Handle warmup steps calculation
+        if warmup_steps is None or warmup_steps < 0:
+            if warmup_ratio is None:
+                warmup_ratio = 0.1  # Default warmup ratio
+            warmup_steps = int(total_steps * warmup_ratio)
+        else:
+            # Calculate effective ratio if warmup_steps is explicitly set
+            warmup_ratio = warmup_steps / total_steps if total_steps > 0 else 0.0
+
+        logger.info(
+            f"Using {warmup_steps} warmup steps ({warmup_ratio*100:.1f}% of {total_steps} total steps)"
+        )
+
+        # Setup training arguments with Lion 8-bit specific settings and gradient clipping
         training_args_dict = {
             # Basic training configuration
             "output_dir": output_dir,
@@ -848,9 +837,9 @@ class QwenTrainer:
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "learning_rate": learning_rate,
             "num_train_epochs": num_train_epochs,
-            "warmup_steps": 50,  # Default to 50 warmup steps
+            "warmup_steps": warmup_steps,
             # Learning rate schedule
-            "lr_scheduler_type": "cosine_with_warmup",  # Changed to cosine with warmup
+            "lr_scheduler_type": lr_scheduler_config["lr_scheduler_type"],
             # Logging and saving configuration
             "logging_steps": logging_steps,
             "save_steps": save_steps,
@@ -863,13 +852,17 @@ class QwenTrainer:
             # Mixed precision training
             "fp16": not is_bf16_supported(),
             "bf16": is_bf16_supported(),
-            # Optimizer configuration
+            # Lion 8-bit optimizer configuration
             "optim": optimizer_config["optimizer_type"],
             "weight_decay": optimizer_config["weight_decay"],
-            "adam_beta1": optimizer_config["beta1"],
-            "adam_beta2": optimizer_config["beta2"],
-            "adam_epsilon": optimizer_config["epsilon"],
+            "optim_args": {
+                "betas": (optimizer_config["beta1"], optimizer_config["beta2"]),
+                "eps": optimizer_config["epsilon"],
+            },
+            # Gradient clipping and stability
             "max_grad_norm": optimizer_config["max_grad_norm"],
+            "gradient_checkpointing": True,
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
             # Integration configuration
             "report_to": "wandb",
             "push_to_hub": bool(self.destination_hub_config),
@@ -884,6 +877,12 @@ class QwenTrainer:
             "dataloader_pin_memory": True,
             # Set random seed
             "seed": random_seed,
+            # Additional stability settings
+            "full_determinism": False,  # Allow some non-determinism for better performance
+            "torch_compile": False,  # Disable torch.compile for stability
+            "ddp_find_unused_parameters": False,
+            "use_cpu": False,
+            "use_mps_device": False,
         }
 
         # Handle max_steps
@@ -930,6 +929,34 @@ class QwenTrainer:
             callbacks=callbacks,
             tokenizer=self.tokenizer,
         )
+
+        # Explicitly initialize optimizer and scheduler
+        self.trainer.create_optimizer_and_scheduler(num_training_steps=max_steps or -1)
+
+        if not hasattr(self.trainer, "lr_scheduler") or self.trainer.lr_scheduler is None:
+            logger.warning("LR scheduler not initialized properly, creating manually...")
+            from transformers import get_scheduler
+
+            # Create optimizer if not exists
+            if not hasattr(self.trainer, "optimizer"):
+                self.trainer.create_optimizer()
+
+            # Calculate num_training_steps
+            num_update_steps_per_epoch = len(formatted_train_dataset) // (
+                per_device_train_batch_size * gradient_accumulation_steps
+            )
+            num_training_steps = num_training_epochs * num_update_steps_per_epoch
+
+            # Create scheduler
+            self.trainer.lr_scheduler = get_scheduler(
+                lr_scheduler_config["lr_scheduler_type"],
+                optimizer=self.trainer.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+            logger.info(
+                f"Created {lr_scheduler_config['lr_scheduler_type']} scheduler with {warmup_steps} warmup steps"
+            )
 
         # Apply response-only training if configured
         if responses_only_config and responses_only_config.get("enabled", False):
