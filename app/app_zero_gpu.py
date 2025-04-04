@@ -55,9 +55,9 @@ class MCQGradioApp:
                     max_seq_length=2048,
                     # quantization=None,  # Disable quantization
                     device_map="auto",  # Automatically choose best device
-                    attn_implementation="flash_attention_2",  # Use flash attention for better performance
-                    force_attn_implementation=True,  # Force flash attention even if not optimal
-                    model_source="unsloth",  # Use Unsloth's optimized model
+                    # attn_implementation="flash_attention_2",  # Use flash attention for better performance
+                    # force_attn_implementation=True,  # Force flash attention even if not optimal
+                    model_source="huggingface",  # Use Unsloth's optimized model
                 )
                 # Set model to float16 after loading
                 if self.model_handler.model is not None:
