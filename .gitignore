@@ -44,7 +44,7 @@ unsloth_compiled_cache/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
-*.ipynb
+# *.ipynb
 
 # IDE
 .idea/
