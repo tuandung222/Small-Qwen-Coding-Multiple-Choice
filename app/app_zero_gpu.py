@@ -31,7 +31,8 @@ import torch
 
 # import unsloth  # Import unsloth for optimized model loading
 import yaml
-from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
+
+# from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
 
 # from src.model.qwen_handler import QwenModelHandler
 # from src.prompt_processors.prompt_creator import PromptCreator
