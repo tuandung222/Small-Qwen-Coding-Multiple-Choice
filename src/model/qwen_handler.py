@@ -401,10 +401,12 @@ class QwenModelHandler:
             stream: Whether to stream the output or return the full response
 
         Returns:
-            If stream=True: Generator yielding response chunks and full text
+            If stream=True: TextIteratorStreamer object that yields tokens as they're generated
             If stream=False: Complete response as string
         """
-        from transformers import TextStreamer
+        import threading
+
+        from transformers import TextIteratorStreamer
         from unsloth import FastLanguageModel
 
         # Enable faster inference if using Unsloth
@@ -421,24 +423,32 @@ class QwenModelHandler:
         attention_mask = torch.ones_like(inputs)
 
         if stream:
-            # Use TextStreamer for streaming output
-            text_streamer = TextStreamer(self.tokenizer, skip_prompt=True)
-
-            # Generate with streaming
-            _ = self.model.generate(
-                input_ids=inputs,
-                attention_mask=attention_mask,
-                streamer=text_streamer,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                repetition_penalty=repetition_penalty,
-                do_sample=do_sample,
-                min_p=min_p,
-                use_cache=True,
+            # Use TextIteratorStreamer for streaming output
+            streamer = TextIteratorStreamer(
+                self.tokenizer, skip_prompt=True, skip_special_tokens=True
             )
-            return ""
+
+            # Generation args
+            generation_args = {
+                "input_ids": inputs,
+                "attention_mask": attention_mask,
+                "streamer": streamer,
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "repetition_penalty": repetition_penalty,
+                "do_sample": do_sample,
+                "min_p": min_p,
+                "use_cache": True,
+            }
+
+            # Start generation in a separate thread
+            thread = threading.Thread(target=self.model.generate, kwargs=generation_args)
+            thread.start()
+
+            # Return the streamer object
+            return streamer
         else:
             # Generate without streaming
             outputs = self.model.generate(

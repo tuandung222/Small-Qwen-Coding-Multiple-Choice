@@ -12,6 +12,8 @@
 *   A demonstration notebook is available on Google Colab (click the badge below). Please note that the training code has been omitted from this notebook. It is intended solely for testing and inference using the latest checkpoint.
     [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tuandunghcmut/Small-Qwen-Coding-Multiple-Choice/blob/main/notebooks/inference_examples.ipynb)
 
+
+
 *   The guide below provides an explanation of the code presented in the notebook. This notebook is a compressed version of the whole project.
 
 ## Installation

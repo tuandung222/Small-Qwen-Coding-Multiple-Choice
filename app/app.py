@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -41,7 +42,7 @@ class MCQGradioApp:
                 self.model_handler = QwenModelHandler(
                     model_name=self.model_path,
                     max_seq_length=2048,
-                    quantization=None,  # Disable quantization
+                    # quantization=None,  # Disable quantization
                     device_map="auto",  # Automatically choose best device
                     attn_implementation="flash_attention_2",  # Use flash attention for better performance
                     force_attn_implementation=True,  # Force flash attention even if not optimal
@@ -89,7 +90,9 @@ class MCQGradioApp:
             # Get model response using streaming generation
             print("\nStarting streaming generation...")
             response_chunks = []
-            for chunk in self.model_handler.generate_with_streaming(
+
+            # Get streamer object
+            streamer = self.model_handler.generate_with_streaming(
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
@@ -99,55 +102,28 @@ class MCQGradioApp:
                 do_sample=do_sample,
                 min_p=0.1,  # Recommended value for better generation
                 stream=True,
-            ):
+            )
+
+            # Iterate through streaming chunks
+            for chunk in streamer:
                 if chunk:  # Only append non-empty chunks
                     response_chunks.append(chunk)
                     # Yield partial response for real-time display
                     partial_response = "".join(response_chunks)
-                    yield prompt, f"""Question: {question}
+                    # Format partial response for display
+                    formatted_response = f"""Question: {question}
 
 Choices:
 {choices}
 
 {partial_response}"""
 
+                    # Yield to Gradio for display
+                    yield prompt, formatted_response
+
             # Combine all chunks for final response
             response = "".join(response_chunks)
             print(f"Complete Model Response:\n{response}")
-
-            # Parse the response using the standard format
-            print("\nParsing response...")
-            try:
-                parsed_response = self.response_parser.parse(response)
-                print(f"Parsed Response: {parsed_response}")
-
-                if not parsed_response or not isinstance(parsed_response, dict):
-                    raise ValueError("Failed to parse response into expected format")
-
-                if "answer" not in parsed_response or not parsed_response["answer"]:
-                    raise ValueError("No answer found in parsed response")
-
-                if "full_response" not in parsed_response:
-                    parsed_response["full_response"] = response
-
-            except Exception as parse_error:
-                print(f"Error parsing response: {parse_error}")
-                # Create a fallback response that follows the YAML format
-                parsed_response = {
-                    "answer": "Error: Could not parse model response",
-                    "full_response": f"""understanding: |
-  Error occurred while parsing the model response
-analysis: |
-  Unable to analyze the response due to parsing error
-reasoning: |
-  The model response could not be properly parsed into the expected YAML format
-conclusion: |
-  Please try again with different parameters
-answer: X
-
-Raw model output:
-{response}""",
-                }
 
             # Format the final response
             final_response = f"""Question: {question}
@@ -155,7 +131,7 @@ Raw model output:
 Choices:
 {choices}
 
-{parsed_response['full_response']}"""
+{response}"""
 
             print("\nFinal Formatted Response:")
             print(final_response)
@@ -166,7 +142,7 @@ Choices:
             self.response_cache[cache_key] = result
             print("\nCached result for future use")
 
-            # Yield final response
+            # One final yield to ensure we display the complete response
             yield result
 
         except Exception as e:
@@ -297,16 +273,16 @@ Raw model output:
                     temperature_slider = gr.Slider(
                         minimum=0.0,
                         maximum=1.0,
-                        value=0.1,
-                        step=0.05,
+                        value=0.001,
+                        step=0.005,
                         label="Temperature (higher = more creative, lower = more deterministic)",
                     )
 
                     # Additional generation parameters
                     max_new_tokens_slider = gr.Slider(
                         minimum=128,
-                        maximum=4096,
-                        value=2048,
+                        maximum=2048,
+                        value=768,
                         step=128,
                         label="Max New Tokens (maximum length of generated response)",
                     )
@@ -314,7 +290,7 @@ Raw model output:
                     top_p_slider = gr.Slider(
                         minimum=0.0,
                         maximum=1.0,
-                        value=0.9,
+                        value=0.95,
                         step=0.05,
                         label="Top-p (nucleus sampling probability)",
                     )
@@ -322,7 +298,7 @@ Raw model output:
                     top_k_slider = gr.Slider(
                         minimum=1,
                         maximum=100,
-                        value=50,
+                        value=80,
                         step=1,
                         label="Top-k (number of highest probability tokens to consider)",
                     )
@@ -330,7 +306,7 @@ Raw model output:
                     repetition_penalty_slider = gr.Slider(
                         minimum=1.0,
                         maximum=2.0,
-                        value=1.1,
+                        value=1.2,
                         step=0.1,
                         label="Repetition Penalty (higher = less repetition)",
                     )
