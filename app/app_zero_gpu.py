@@ -1,7 +1,17 @@
 # git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
 
+import json
 import os
+import re
 import sys
+from typing import List, Optional, Union
+
+import gradio as gr
+import spaces
+import torch
+
+# import unsloth  # Import unsloth for optimized model loading
+import yaml
 
 # run command to clone the repo
 # os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
@@ -11,26 +21,15 @@ import sys
 
 # https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/blob/main/app/requirements.space.txt
 # run pip install from this link
-os.system(
-    "pip install -r https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/blob/main/app/requirements.space.txt"
-)
+# os.system(
+#     "pip install -r https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice/blob/main/app/requirements.space.txt"
+# )
 
 
 # Add the parent directory to sys.path
 # sys.path.append("Small-Qwen-Coding-Multiple-Choice")
 # sys.path.append("Small-Qwen-Coding-Multiple-Choice/app")
 
-import json
-import os
-import re
-from typing import List, Optional, Union
-
-import gradio as gr
-import spaces
-import torch
-
-# import unsloth  # Import unsloth for optimized model loading
-import yaml
 
 # from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
 
@@ -1901,7 +1900,49 @@ try:
 except ImportError:
     pass
 
-from src.utils.logger import get_logger
+import logging
+import sys
+from typing import Optional
+
+
+def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
+    """
+    Get a logger with consistent formatting and configuration.
+
+    Args:
+        name: Name of the logger (typically __name__)
+        level: Optional logging level (defaults to INFO)
+
+    Returns:
+        logging.Logger: Configured logger instance
+    """
+    # Create logger
+    logger = logging.getLogger(name)
+
+    # Set level if specified
+    if level is not None:
+        logger.setLevel(level)
+    elif logger.level == logging.NOTSET:
+        logger.setLevel(logging.INFO)
+
+    # Only add handler if logger doesn't already have handlers
+    if not logger.handlers:
+        # Create console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+
+        # Create formatter
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+
+        # Set formatter for handler
+        console_handler.setFormatter(formatter)
+
+        # Add handler to logger
+        logger.addHandler(console_handler)
+
+    return logger
+
 
 logger = get_logger(__name__)
 
@@ -2645,15 +2686,16 @@ class MCQGradioApp:
                     # force_attn_implementation=True,  # Force flash attention even if not optimal
                     model_source="huggingface",  # Use Unsloth's optimized model
                 )
+                # NOTE: alueError: You cannot cast a bitsandbytes model in a new `dtype`. Make sure to load the model using `from_pretrained` using the desired `dtype` by passing the correct `torch_dtype` argument.
                 # Set model to float16 after loading
-                if self.model_handler.model is not None:
-                    self.model_handler.model = self.model_handler.model.to(torch.float16)
+                # if self.model_handler.model is not None:
+                #     self.model_handler.model = self.model_handler.model.to(torch.float16)
                 print("Model loaded successfully!")
             except Exception as e:
                 print(f"Error loading model: {str(e)}")
                 raise
 
-    @spaces.gpu
+    @spaces.GPU
     def inference(
         self,
         question,
