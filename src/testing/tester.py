@@ -137,18 +137,55 @@ class MultipleChoiceTester:
             "results": results,
         }
 
-    def infer_batch(self, examples, temperature=0.0, batch_size=64):
-        """Run inference on a batch of examples"""
+    def infer_batch(self, examples: List[Dict[str, Any]], temperature: float = 0.0, batch_size: int = 64) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Run inference on a batch of examples using batch generation."""
         results = []
         correct_count = 0
+        prompts = []
 
-        with torch.inference_mode():
-            for example in examples:
-                result = self.infer_example(example, temperature=temperature, stream=False)
-                results.append(result)
+        # Prepare prompts for the batch
+        for example in examples:
+            if isinstance(example["choices"], list):
+                choices_str = "\n".join(example["choices"])
+            else:
+                choices_str = example["choices"]
+            prompt = self.prompt_creator.create_inference_prompt(example["question"], choices_str)
+            prompts.append(prompt)
 
-                if result.get("is_correct", False):
+        # Get batch response (non-streaming)
+        batch_responses = self.model_handler.generate_batch(
+            prompts=prompts,
+            temperature=temperature,
+            # Use a reasonable max_new_tokens, adjust if needed
+            max_new_tokens=512,
+            do_sample=(temperature > 0.0) # Only sample if temperature > 0
+        )
+
+        # Process results for each example in the batch
+        for i, example in enumerate(examples):
+            response_text = batch_responses[i]
+            predicted_answer, reasoning = self.response_parser.parse(response_text)
+
+            is_correct = None
+            if "answer" in example and example["answer"] and predicted_answer:
+                is_correct = example["answer"].upper() == predicted_answer.upper()
+                if is_correct:
                     correct_count += 1
+
+            if isinstance(example["choices"], list):
+                choices_fmt = "\n".join(example["choices"])
+            else:
+                choices_fmt = example["choices"]
+
+            results.append({
+                "question": example["question"],
+                "choices": choices_fmt,
+                "ground_truth": example.get("answer"),
+                "predicted_answer": predicted_answer,
+                "reasoning": reasoning,
+                "is_correct": is_correct,
+                "response_text": response_text,
+            })
 
         accuracy = correct_count / len(examples) if examples else 0
         metrics = {

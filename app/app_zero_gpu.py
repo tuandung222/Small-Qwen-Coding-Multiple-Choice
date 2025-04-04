@@ -1976,12 +1976,13 @@ class QwenModelHandler:
         self,
         model_name: str,
         max_seq_length: int = 2048,
-        quantization: Union[str, BitsAndBytesConfig] = "4bit",
+        # quantization: Union[str, BitsAndBytesConfig] = "4bit",
+        quantization: Union[str, BitsAndBytesConfig] = None,
         model_source: str = ModelSource.HUGGINGFACE,
         device_map: str = "cuda",
         source_hub_config: Optional[HubConfig] = None,
         destination_hub_config: Optional[HubConfig] = None,
-        attn_implementation: str = "default",
+        attn_implementation: str = "sdpa",
         force_attn_implementation: bool = False,
     ):
         """
@@ -2176,7 +2177,7 @@ class QwenModelHandler:
 
         #########################################################################################
         # NOTE: Code for disable quantization
-        quantization_config = None
+        # quantization_config = None
         #########################################################################################
 
         # Add quantization config if specified
@@ -2199,6 +2200,7 @@ class QwenModelHandler:
             trust_remote_code=True,
             padding_side="right",
             model_max_length=self.max_seq_length,
+            # torch_dtype=torch.float16,
         )
 
     def _load_from_unsloth(self):

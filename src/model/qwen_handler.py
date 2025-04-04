@@ -487,6 +487,72 @@ class QwenModelHandler:
 
             return response
 
+    def generate_batch(
+        self,
+        prompts: List[str],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.0,
+        do_sample: bool = True,
+    ) -> List[str]:
+        """
+        Generate responses for a batch of prompts.
+
+        Args:
+            prompts: A list of input prompts
+            max_new_tokens: Maximum number of tokens to generate per prompt
+            temperature: Sampling temperature
+            top_p: Nucleus sampling probability
+            top_k: Top-k sampling parameter
+            repetition_penalty: Penalty for repeated tokens
+            do_sample: Whether to use sampling or greedy generation
+
+        Returns:
+            List[str]: A list of generated text responses
+        """
+        # Ensure tokenizer has padding token and set padding side
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        original_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left" # Use left padding for batch generation
+
+        # Tokenize the batch of prompts
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_seq_length - max_new_tokens, # Ensure space for generation
+        )
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        input_ids_len = inputs["input_ids"].shape[1]
+
+        # Generate responses for the batch
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=do_sample,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id, # Explicitly set EOS token
+            )
+
+        # Decode the generated sequences, skipping special tokens
+        # Slice outputs to only contain generated tokens (excluding prompt)
+        generated_ids = outputs[:, input_ids_len:]
+        responses = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+        # Restore original padding side
+        self.tokenizer.padding_side = original_padding_side
+
+        return responses
+
     def calculate_perplexity(self, prompt: str, answer: str, temperature: float = 0.0) -> float:
         """
         Calculate perplexity of the given answer for a prompt.
