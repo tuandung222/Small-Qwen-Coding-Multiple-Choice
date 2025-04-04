@@ -1,39 +1,29 @@
 # git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
 
+import os, sys
+# run command to clone the repo
+os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
+
+# run command to install the dependencies in the cloned repo / app/requirements.full.txt
+os.system("pip install -r Small-Qwen-Coding-Multiple-Choice/app/requirements.full.txt")
+
+# Add the parent directory to sys.path
+sys.path.append('Small-Qwen-Coding-Multiple-Choice')
+sys.path.append('Small-Qwen-Coding-Multiple-Choice/app')
+
 import json
 import os
 import re
-import sys
 from pathlib import Path
-
-# # run command to clone the repo
-# os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
-
-# # run command to install the dependencies in the cloned repo / app/requirements.full.txt
-# os.system("pip install -r Small-Qwen-Coding-Multiple-Choice/app/requirements.full.txt")
-
-# # Add the parent directory to sys.path
-# sys.path.append('Small-Qwen-Coding-Multiple-Choice')
-# sys.path.append('Small-Qwen-Coding-Multiple-Choice/app')
-
-
-try:
-    import spaces
-except ImportError:
-    pass
-
+import spaces
+import torch
 import gradio as gr
 import torch
 import unsloth  # Import unsloth for optimized model loading
 import yaml
 
-try:
-    import src
-except ImportError:
-    sys.path.append("../")
 
 from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
-
 from src.model.qwen_handler import QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
@@ -76,7 +66,7 @@ class MCQGradioApp:
                 print(f"Error loading model: {str(e)}")
                 raise
 
-    # @spaces.gpu
+    @spaces.gpu
     def inference(
         self,
         question,
