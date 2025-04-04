@@ -7,7 +7,7 @@ import sys
 os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
 
 # run command to install the dependencies in the cloned repo / app/requirements.full.txt
-os.system("pip install -r Small-Qwen-Coding-Multiple-Choice/app/requirements.full.txt")
+os.system("pip install -r Small-Qwen-Coding-Multiple-Choice/app/requirements.space.txt")
 
 # Add the parent directory to sys.path
 sys.path.append("Small-Qwen-Coding-Multiple-Choice")
@@ -21,7 +21,8 @@ from pathlib import Path
 import gradio as gr
 import spaces
 import torch
-import unsloth  # Import unsloth for optimized model loading
+
+# import unsloth  # Import unsloth for optimized model loading
 import yaml
 from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
 

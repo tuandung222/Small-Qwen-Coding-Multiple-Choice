@@ -8,7 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import huggingface_hub
 import torch
-import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
+
+try:
+    import unsloth  # Import unsloth first to apply all optimizations and avoid warnings
+except ImportError:
+    pass
 from huggingface_hub import HfApi, snapshot_download, upload_folder
 from peft import PeftModel
 from transformers import (
@@ -20,8 +24,12 @@ from transformers import (
     TextIteratorStreamer,
     TextStreamer,
 )
-from unsloth import FastLanguageModel
-from unsloth.chat_templates import train_on_responses_only
+
+try:
+    from unsloth import FastLanguageModel
+    from unsloth.chat_templates import train_on_responses_only
+except ImportError:
+    pass
 
 from src.utils.auth import setup_authentication
 from src.utils.logger import get_logger
@@ -407,11 +415,18 @@ class QwenModelHandler:
         import threading
 
         from transformers import TextIteratorStreamer
-        from unsloth import FastLanguageModel
+
+        try:
+            from unsloth import FastLanguageModel
+        except ImportError:
+            pass
 
         # Enable faster inference if using Unsloth
         if self.model_source == ModelSource.UNSLOTH:
-            FastLanguageModel.for_inference(self.model)
+            try:
+                FastLanguageModel.for_inference(self.model)
+            except ImportError:
+                pass
 
         # Format the prompt using chat template
         messages = [{"role": "user", "content": prompt}]
