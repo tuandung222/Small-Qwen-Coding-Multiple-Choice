@@ -13,6 +13,8 @@ import torch
 # import unsloth  # Import unsloth for optimized model loading
 import yaml
 
+MODEL_PATH = "tuandunghcmut/Qwen25_Coder_MultipleChoice_v4"
+
 # run command to clone the repo
 # os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
 
@@ -1976,7 +1978,7 @@ class QwenModelHandler:
         max_seq_length: int = 2048,
         quantization: Union[str, BitsAndBytesConfig] = "4bit",
         model_source: str = ModelSource.HUGGINGFACE,
-        device_map: str = "auto",
+        device_map: str = "cuda",
         source_hub_config: Optional[HubConfig] = None,
         destination_hub_config: Optional[HubConfig] = None,
         attn_implementation: str = "default",
@@ -2016,6 +2018,7 @@ class QwenModelHandler:
         # Load the model based on the source
         self._load_model()
 
+    # @spaces.GPU()
     def _check_attention_support(self):
         """Check if the specified attention implementation is supported on the current hardware"""
         # Check for Flash Attention 2 support
@@ -2114,6 +2117,7 @@ class QwenModelHandler:
         logger.info(f"Using attention implementation: {self.attn_implementation}")
         return self.attn_implementation
 
+    # @spaces.GPU()
     def _load_model(self):
         """Load the model and tokenizer based on the specified source"""
         try:
@@ -2245,6 +2249,7 @@ class QwenModelHandler:
             logger.error("Unsloth import failed. Please install unsloth with: pip install unsloth")
             raise
 
+    # @spaces.GPU()
     def generate_response(
         self,
         prompt: str,
@@ -2292,6 +2297,7 @@ class QwenModelHandler:
         response = response[len(prompt) :].strip()
         return response
 
+    # @spaces.GPU()
     def generate_with_streaming(
         self,
         prompt: str,
@@ -2397,6 +2403,7 @@ class QwenModelHandler:
 
             return response
 
+    # @spaces.GPU()
     def calculate_perplexity(self, prompt: str, answer: str, temperature: float = 0.0) -> float:
         """
         Calculate perplexity of the given answer for a prompt.
@@ -2657,6 +2664,20 @@ class QwenModelHandler:
         return hub_url
 
 
+# NOTE: Such a stupid way to load the model, but it works and not cause any error with spaces.GPU()
+"""Load the model from Hugging Face Hub or local checkpoint"""
+MODEL_HANDLER = QwenModelHandler(
+    model_name=MODEL_PATH,
+    max_seq_length=2048,
+    # quantization=None,  # Disable quantization
+    device_map="cuda",  # Automatically choose best device
+    # attn_implementation="flash_attention_2",  # Use flash attention for better performance
+    # force_attn_implementation=True,  # Force flash attention even if not optimal
+    model_source="huggingface",  # Use Unsloth's optimized model
+)
+MODEL_HANDLER.model.to("cuda")
+
+
 class MCQGradioApp:
     """Gradio interface for the multiple choice question answering model"""
 
@@ -2669,7 +2690,8 @@ class MCQGradioApp:
         self.response_cache = {}  # Cache for model responses
 
         # Initialize the model (will be loaded on first use to save memory)
-        self.load_model()
+        # self.load_model()
+        self.model_handler = MODEL_HANDLER
 
     def load_model(self):
         """Load the model from Hugging Face Hub or local checkpoint"""
@@ -2681,7 +2703,7 @@ class MCQGradioApp:
                     model_name=self.model_path,
                     max_seq_length=2048,
                     # quantization=None,  # Disable quantization
-                    device_map="auto",  # Automatically choose best device
+                    device_map="cuda",  # Automatically choose best device
                     # attn_implementation="flash_attention_2",  # Use flash attention for better performance
                     # force_attn_implementation=True,  # Force flash attention even if not optimal
                     model_source="huggingface",  # Use Unsloth's optimized model
@@ -2695,7 +2717,7 @@ class MCQGradioApp:
                 print(f"Error loading model: {str(e)}")
                 raise
 
-    @spaces.GPU
+    @spaces.GPU()
     def inference(
         self,
         question,
@@ -3062,7 +3084,7 @@ def main():
     interface = app.create_interface()
     # Enable queueing at the app level
     interface.queue()
-    interface.launch(share=True)
+    interface.launch()
 
 
 if __name__ == "__main__":
