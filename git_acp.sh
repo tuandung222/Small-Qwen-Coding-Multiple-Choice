@@ -23,7 +23,8 @@ git add .
 git commit -m "$COMMIT_MESSAGE"
 
 # Push to remote
-git push origin main || git push origin master
+git push origin main
+#  || git push origin master
 
 # Print status
 echo "Git add, commit, and push completed"

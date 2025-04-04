@@ -1,6 +1,8 @@
 # git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git
 
-import os, sys
+import os
+import sys
+
 # run command to clone the repo
 os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-Choice.git")
 
@@ -8,22 +10,21 @@ os.system("git clone https://github.com/tuandung222/Small-Qwen-Coding-Multiple-C
 os.system("pip install -r Small-Qwen-Coding-Multiple-Choice/app/requirements.full.txt")
 
 # Add the parent directory to sys.path
-sys.path.append('Small-Qwen-Coding-Multiple-Choice')
-sys.path.append('Small-Qwen-Coding-Multiple-Choice/app')
+sys.path.append("Small-Qwen-Coding-Multiple-Choice")
+sys.path.append("Small-Qwen-Coding-Multiple-Choice/app")
 
 import json
 import os
 import re
 from pathlib import Path
-import spaces
-import torch
+
 import gradio as gr
+import spaces
 import torch
 import unsloth  # Import unsloth for optimized model loading
 import yaml
-
-
 from examples import CODING_EXAMPLES, CODING_EXAMPLES_BY_CATEGORY
+
 from src.model.qwen_handler import QwenModelHandler
 from src.prompt_processors.prompt_creator import PromptCreator
 from src.prompt_processors.response_parser import ResponseParser
