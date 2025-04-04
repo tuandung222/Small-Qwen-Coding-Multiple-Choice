@@ -2174,6 +2174,11 @@ class QwenModelHandler:
             "trust_remote_code": True,
         }
 
+        #########################################################################################
+        # NOTE: Code for disable quantization
+        quantization_config = None
+        #########################################################################################
+
         # Add quantization config if specified
         if quantization_config:
             model_kwargs["quantization_config"] = quantization_config

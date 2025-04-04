@@ -423,10 +423,10 @@ class QwenModelHandler:
 
         # Enable faster inference if using Unsloth
         if self.model_source == ModelSource.UNSLOTH:
-            try:
-                FastLanguageModel.for_inference(self.model)
-            except ImportError:
-                pass
+            # try:
+            FastLanguageModel.for_inference(self.model)
+            # except ImportError:
+            #     pass
 
         # Format the prompt using chat template
         messages = [{"role": "user", "content": prompt}]
