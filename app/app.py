@@ -119,7 +119,7 @@ Choices:
 {partial_response}"""
 
                     # Yield to Gradio for display
-                    yield prompt, formatted_response
+                    yield prompt, formatted_response, "", ""
 
             # Combine all chunks for final response
             response = "".join(response_chunks)
@@ -133,16 +133,29 @@ Choices:
 
 {response}"""
 
+            # Parse YAML for structured display
+            yaml_raw_display = f"```yaml\n{response}\n```"
+
+            try:
+                # Try to parse the YAML
+                yaml_data = yaml.safe_load(response)
+                yaml_json_display = f"```json\n{json.dumps(yaml_data, indent=2)}\n```"
+            except Exception as e:
+                print(f"Error parsing YAML: {e}")
+                yaml_json_display = (
+                    f"**Error parsing YAML:** {str(e)}\n\n**Raw Response:**\n```\n{response}\n```"
+                )
+
             print("\nFinal Formatted Response:")
             print(final_response)
 
-            result = (prompt, final_response)
+            result = (prompt, final_response, yaml_raw_display, yaml_json_display)
 
             # Cache the result
             self.response_cache[cache_key] = result
             print("\nCached result for future use")
 
-            # One final yield to ensure we display the complete response
+            # Yield final response with structured YAML
             yield result
 
         except Exception as e:
@@ -165,7 +178,7 @@ answer: X
 
 Raw model output:
 {response if 'response' in locals() else 'No response available'}"""
-            yield prompt, error_response
+            yield prompt, error_response, "", ""
 
     def process_example(self, example_idx):
         """Process an example from the preset list"""
@@ -239,7 +252,9 @@ Raw model output:
 
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### Examples")
+                    gr.Markdown(
+                        "### Examples (from the bank of 200 high-quality MCQs by Claude 3.7 Sonnet)"
+                    )
 
                     # Category selector
                     category_dropdown = gr.Dropdown(
@@ -257,7 +272,7 @@ Raw model output:
                         value=None,
                     )
 
-                    gr.Markdown("### Your Question")
+                    gr.Markdown("### Your Question (or you can manually enter your input)")
 
                     # Question and choices inputs
                     question_input = gr.Textbox(
@@ -319,7 +334,7 @@ Raw model output:
                     # Submit button
                     submit_btn = gr.Button("Submit", variant="primary")
 
-                with gr.Column(scale=1):
+                with gr.Column(scale=3):
                     gr.Markdown("### Model Input")
                     prompt_display = gr.Textbox(
                         label="Prompt sent to model",
@@ -328,8 +343,15 @@ Raw model output:
                         show_copy_button=True,
                     )
 
-                    gr.Markdown("### Model Response")
+                    gr.Markdown("### Model Streaming Response")
                     output = gr.Markdown(label="Response")
+
+                    with gr.Accordion("Structured YAML Response", open=True):
+                        gr.Markdown(
+                            "Once the model completes its response, the YAML will be displayed here in a structured format."
+                        )
+                        yaml_raw = gr.Markdown(label="Raw YAML")
+                        yaml_json = gr.Markdown(label="YAML as JSON")
 
             # Set up category selection
             category_dropdown.change(
@@ -386,7 +408,7 @@ Raw model output:
                     repetition_penalty_slider,
                     do_sample_checkbox,
                 ],
-                outputs=[prompt_display, output],
+                outputs=[prompt_display, output, yaml_raw, yaml_json],
                 show_progress=True,  # Show progress bar
                 queue=True,  # Enable queueing for better handling of multiple requests
             )
