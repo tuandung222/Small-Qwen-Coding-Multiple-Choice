@@ -3,7 +3,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
-from .prompt_creator import PromptCreator
+try:
+    from .prompt_creator import PromptCreator
+except ImportError:
+    pass
 
 
 class ResponseParser:
