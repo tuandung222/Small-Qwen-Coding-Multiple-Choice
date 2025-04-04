@@ -21,7 +21,7 @@ from src.prompt_processors.response_parser import ResponseParser
 class MCQGradioApp:
     """Gradio interface for the multiple choice question answering model"""
 
-    def __init__(self, model_path="tuandunghcmut/Qwen25_Coder_MultipleChoice_v3"):
+    def __init__(self, model_path="tuandunghcmut/Qwen25_Coder_MultipleChoice_v4"):
         """Initialize the application with model"""
         self.model_path = model_path
         self.model_handler = None

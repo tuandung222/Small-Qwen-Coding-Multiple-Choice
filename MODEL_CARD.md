@@ -2,16 +2,17 @@
 
 *   This project focuses on distilling YAML-based structured multi-step reasoning capabilities from the GPT-4o teacher model into the smaller Qwen2.5 Coder 1.5B-Instruct LLM.
 
-*   This document provides guidance on getting started with `tuandunghcmut/Qwen25_Coder_MultipleChoice`, a model fine-tuned for multiple-choice coding questions.
+*   This document provides guidance on getting started with `tuandunghcmut/Qwen25_Coder_MultipleChoice_v4`, a model fine-tuned for multiple-choice coding questions.
 
-*   Future plans include refactoring the project into a well-structured GitHub repository, expanding the dataset, and retraining the model using distributed training for improved scalability.
+*   The current repository of this project is at [https://github.com/tuandunghcmut/Small-Qwen-Coding-Multiple-Choice](https://github.com/tuandunghcmut/Small-Qwen-Coding-Multiple-Choice).
 
+*   The dataset has been used for training is at [https://huggingface.co/datasets/tuandunghcmut/coding-mcq-reasoning](https://huggingface.co/datasets/tuandunghcmut/coding-mcq-reasoning).
+
+<!-- /workspace/Small-Qwen-Coding-Multiple-Choice/notebooks/inference_examples.ipynb -->
 *   A demonstration notebook is available on Google Colab (click the badge below). Please note that the training code has been omitted from this notebook. It is intended solely for testing and inference using the latest checkpoint.
-    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://drive.google.com/file/d/1Q4jtRjIkFWIAM82pAg4OBPCLjpQ8ndpI/view?usp=sharing)
+    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tuandunghcmut/Small-Qwen-Coding-Multiple-Choice/blob/main/notebooks/inference_examples.ipynb)
 
-*   Note: The Qwen2.5 Coder 1.5B-Instruct model might be too small for this task, and the current training dataset may be insufficient. Future iterations will explore using a larger model and more extensive data. However, the current model successfully adheres to the desired YAML format and demonstrates structured reasoning.
-
-*   The guide below provides an explanation of the code presented in the notebook.
+*   The guide below provides an explanation of the code presented in the notebook. This notebook is a compressed version of the whole project.
 
 ## Installation
 
@@ -19,16 +20,16 @@ First, install the required dependencies:
 
 ```bash
 # Install core dependencies
-pip install transformers torch pandas
+pip install transformers torch
 
 # For faster inference (important)
-pip install unsloth accelerate bitsandbytes
+pip install unsloth bitsandbytes
 
 # Flash Attention (highly recommended for speed)
 pip install flash-attn --no-build-isolation
 
 # For dataset handling and YAML parsing
-pip install datasets pyyaml
+pip install datasets
 ```
 
 ## Environment Setup
