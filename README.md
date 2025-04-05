@@ -1,4 +1,4 @@
-# Qwen-Coder-MCQ: Fine-tuning Qwen2.5 for Multiple-Choice Coding Questions
+# Qwen-Coder-MCQ: Knowledge Distillation of GPT-4o to the compact LLM Qwen2.5-Coder-1.5B-Instruct for Multiple-Choice Coding Questions
 
 <div align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python Version">
@@ -12,7 +12,7 @@
   <!-- <img src="https://codecov.io/gh/tuandung222/Small-Qwen-Coding-Multiple-Choice/branch/main/graph/badge.svg" alt="Coverage"> -->
 </div>
 
-This project implements knowledge distillation of YAML-based structured multi-step reasoning from GPT-4o to the small **Qwen2.5-Coder-1.5B-Instruct** model for multiple-choice coding questions. It uses LoRA (Low-Rank Adaptation) for efficient training and includes a comprehensive pipeline for data processing, training, and evaluation. The live demo showcases the model with 4-bit quantization, making it highly efficient while maintaining reasoning capabilities.
+This project implements knowledge distillation of YAML-based structured multi-step reasoning from GPT-4o to the small **Qwen2.5-Coder-1.5B-Instruct** model for multiple-choice coding questions. It uses LoRA (Low-Rank Adaptation) for efficient finetuning and includes a comprehensive pipeline for data processing, training, and evaluation. The live demo showcases the model with 4-bit quantization, making it highly efficient while maintaining reasoning capabilities.
 
 > 🌐 **Live Demo**: Try the model in action with our Hugging Face Space: [tuandunghcmut/Qwen2.5_Coder_1.5B_Instruct_MCQs_v4_2](https://huggingface.co/spaces/tuandunghcmut/Qwen2.5_Coder_1.5B_Instruct_MCQs_v4_2)
 
@@ -40,7 +40,7 @@ This project implements knowledge distillation of YAML-based structured multi-st
   - [Training Arguments](#training-arguments)
   - [Synthesis Arguments](#synthesis-arguments)
   - [Monitoring Arguments](#monitoring-arguments)
-- [Features](#features)
+- [Highlighted Features](#features)
 - [Dataset](#dataset)
 - [Advanced Features](#advanced-features)
 - [Examples and Showcase](#examples-and-showcase)
@@ -788,7 +788,7 @@ Teacher Reasoning: The solution needs to increment the sequence count (ans) each
 Teacher Conclusion: Answer B is correct because it directly and correctly increments the sequence count by 1 when all k numbers have been seen, aligning with the problem's requirement to find the shortest sequence that cannot be formed.
 ```
 
-<!-- ## 🔍 Advanced Features
+## 🔍 Advanced Features
 
 ### Prompt Monitoring System
 
@@ -1095,9 +1095,9 @@ The WandB dashboard includes:
    )
    ```
 
-For more detailed information about memory profiling and monitoring, refer to the [Memory Profiling Guide](docs/memory_profiling.md) and [WandB Integration Guide](docs/wandb_integration.md). -->
+For more detailed information about memory profiling and monitoring, refer to the [Memory Profiling Guide](docs/memory_profiling.md) and [WandB Integration Guide](docs/wandb_integration.md).
 
-<!-- ## 🏗️ Architecture
+## 🏗️ Architecture
 
 ### Overall System Architecture
 
@@ -1308,5 +1308,5 @@ graph LR
 
     style Metrics fill:#f8f9fa,stroke:#343a40,stroke-width:2px
     style Callbacks fill:#f8f9fa,stroke:#343a40,stroke-width:2px
-    style Visualization fill:#f8f9fa,stroke:#343a40,stroke-width:2px -->
+    style Visualization fill:#f8f9fa,stroke:#343a40,stroke-width:2px
 ```
